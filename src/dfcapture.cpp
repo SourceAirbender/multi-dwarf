@@ -3,6 +3,7 @@
 #include "PluginManager.h"
 
 #include "http_server.h"
+#include "image_encoder.h"
 
 #include <cstdlib>
 #include <string>
@@ -102,6 +103,7 @@ DFhackCExport command_result plugin_init(color_ostream& out, std::vector<PluginC
 DFhackCExport command_result plugin_shutdown(color_ostream&) {
 #ifdef _WIN32
     dfcapture_public::stop_server();
+    dfcapture_public::shutdown_image_encoder();
 #endif
     return CR_OK;
 }
