@@ -6,12 +6,16 @@
 #include "web_assets.h"
 
 #include <atomic>
+#include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace dfcapture_public {
 namespace {
@@ -157,6 +161,57 @@ void register_routes(httplib::Server& server) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(reinterpret_cast<const char*>(jpeg.data()), jpeg.size(), "image/jpeg");
     });
+
+    auto stream_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        auto last_frame = std::make_shared<std::chrono::steady_clock::time_point>(
+            std::chrono::steady_clock::now() - std::chrono::milliseconds(1000));
+        auto interval = std::chrono::milliseconds(1000 / DEFAULT_STREAM_FPS);
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_header("Connection", "close");
+        res.set_header("Content-Type", "multipart/x-mixed-replace; boundary=dfcapture");
+        res.set_chunked_content_provider(
+            [player, last_frame, interval](size_t, httplib::DataSink& sink) mutable {
+                if (!g_running.load() || !sink.is_writable()) {
+                    sink.done();
+                    return;
+                }
+
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = now - *last_frame;
+                if (elapsed < interval)
+                    std::this_thread::sleep_for(interval - elapsed);
+
+                Camera camera;
+                std::string err;
+                if (!camera_for_player(player, camera, &err)) {
+                    sink.done();
+                    return;
+                }
+
+                std::vector<uint8_t> jpeg;
+                if (!capture_camera_jpeg(camera, jpeg, &err)) {
+                    sink.done();
+                    return;
+                }
+
+                std::ostringstream header;
+                header << "--dfcapture\r\n"
+                       << "Content-Type: image/jpeg\r\n"
+                       << "Content-Length: " << jpeg.size() << "\r\n"
+                       << "X-DFCapture-Camera: " << camera.x << "," << camera.y << "," << camera.z
+                       << "\r\n\r\n";
+                std::string h = header.str();
+                sink.write(h.data(), h.size());
+                sink.write(reinterpret_cast<const char*>(jpeg.data()), jpeg.size());
+                sink.write("\r\n", 2);
+                *last_frame = std::chrono::steady_clock::now();
+            });
+    };
+
+    server.Get("/stream", stream_handler);
+    server.Get("/stream.mjpg", stream_handler);
 }
 
 } // namespace

@@ -7,6 +7,7 @@
 namespace dfcapture_public {
 
 constexpr int DEFAULT_STREAM_PORT = 8766;
+constexpr int DEFAULT_STREAM_FPS = 8;
 constexpr const char* DEFAULT_BIND_ADDRESS = "127.0.0.1";
 
 bool start_server(int port, const std::string& bind_address, std::string* err = nullptr);

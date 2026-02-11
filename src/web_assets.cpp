@@ -44,6 +44,12 @@ const char* index_html() {
       font-weight: 700;
     }
 
+    .hint {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
     .stage {
       height: calc(100vh - 48px);
       position: relative;
@@ -92,6 +98,7 @@ const char* index_html() {
   <header class="topbar">
     <div class="brand">dfcapture</div>
     <div class="status" id="status">connecting...</div>
+    <div class="hint">WASD/arrows pan, Q/E elevation</div>
   </header>
   <main class="stage">
     <img class="frame" id="frame" alt="">
@@ -109,6 +116,8 @@ const char* index_html() {
     const player = params.get("player") || "default";
     const frame = document.getElementById("frame");
     const status = document.getElementById("status");
+    let streamToken = 0;
+    let moving = false;
 
     async function refreshCamera() {
       const res = await fetch(`/camera?player=${encodeURIComponent(player)}`, { cache: "no-store" });
@@ -117,17 +126,23 @@ const char* index_html() {
       status.textContent = `${player} camera ${cam.x}, ${cam.y}, ${cam.z}`;
     }
 
-    function refreshFrame() {
-      frame.src = `/frame.jpg?player=${encodeURIComponent(player)}&t=${Date.now()}`;
+    function startStream() {
+      streamToken += 1;
+      frame.src = `/stream.mjpg?player=${encodeURIComponent(player)}&t=${streamToken}`;
     }
 
     async function moveCamera(dx, dy, dz) {
+      if (moving) return;
+      moving = true;
       const qs = new URLSearchParams({ player, dx, dy, dz });
-      const res = await fetch(`/camera/move?${qs.toString()}`, { method: "POST", cache: "no-store" });
-      if (!res.ok) throw new Error(await res.text());
-      const cam = await res.json();
-      status.textContent = `${player} camera ${cam.x}, ${cam.y}, ${cam.z}`;
-      refreshFrame();
+      try {
+        const res = await fetch(`/camera/move?${qs.toString()}`, { method: "POST", cache: "no-store" });
+        if (!res.ok) throw new Error(await res.text());
+        const cam = await res.json();
+        status.textContent = `${player} camera ${cam.x}, ${cam.y}, ${cam.z}`;
+      } finally {
+        moving = false;
+      }
     }
 
     document.querySelectorAll("button[data-dx]").forEach((button) => {
@@ -139,10 +154,37 @@ const char* index_html() {
       });
     });
 
+    window.addEventListener("keydown", (event) => {
+      if (event.repeat) return;
+      const step = event.shiftKey ? 20 : 10;
+      const key = event.key.toLowerCase();
+      if (key === "arrowup" || key === "w") {
+        event.preventDefault();
+        moveCamera(0, -step, 0).catch((err) => { status.textContent = err.message; });
+      } else if (key === "arrowdown" || key === "s") {
+        event.preventDefault();
+        moveCamera(0, step, 0).catch((err) => { status.textContent = err.message; });
+      } else if (key === "arrowleft" || key === "a") {
+        event.preventDefault();
+        moveCamera(-step, 0, 0).catch((err) => { status.textContent = err.message; });
+      } else if (key === "arrowright" || key === "d") {
+        event.preventDefault();
+        moveCamera(step, 0, 0).catch((err) => { status.textContent = err.message; });
+      } else if (key === "q") {
+        event.preventDefault();
+        moveCamera(0, 0, -1).catch((err) => { status.textContent = err.message; });
+      } else if (key === "e") {
+        event.preventDefault();
+        moveCamera(0, 0, 1).catch((err) => { status.textContent = err.message; });
+      }
+    });
+
     frame.addEventListener("load", () => refreshCamera().catch(() => {}));
-    frame.addEventListener("error", () => { status.textContent = "waiting for DF frame..."; });
-    refreshFrame();
-    setInterval(refreshFrame, 250);
+    frame.addEventListener("error", () => {
+      status.textContent = "waiting for DF stream...";
+      setTimeout(startStream, 1000);
+    });
+    startStream();
     refreshCamera().catch((err) => { status.textContent = err.message; });
   </script>
 </body>
