@@ -26,6 +26,7 @@ const char* index_html() {
       background: var(--bg);
       color: var(--text);
       font: 14px/1.4 Consolas, "Liberation Mono", monospace;
+      overflow: hidden;
     }
 
     .topbar {
@@ -45,47 +46,105 @@ const char* index_html() {
 
     .stage {
       height: calc(100vh - 48px);
+      position: relative;
+      background: #000;
+    }
+
+    .frame {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      image-rendering: auto;
+      display: block;
+    }
+
+    .controls {
+      position: absolute;
+      right: 16px;
+      bottom: 16px;
       display: grid;
-      place-items: center;
-      padding: 24px;
-    }
-
-    .panel {
-      width: min(720px, 100%);
+      grid-template-columns: repeat(3, 36px);
+      gap: 6px;
+      padding: 8px;
       border: 2px solid var(--line);
-      background: var(--panel);
-      padding: 20px;
+      background: rgba(12, 12, 12, 0.92);
     }
 
-    h1 {
-      margin: 0 0 10px;
-      font-size: 18px;
-      letter-spacing: 0;
-    }
-
-    p {
-      margin: 8px 0;
-      color: var(--muted);
-    }
-
-    code {
+    button {
+      height: 32px;
+      border: 1px solid var(--line);
+      background: #1d1d1d;
       color: #ffd15a;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #3a2a0e;
+    }
+
+    .status {
+      color: var(--muted);
     }
   </style>
 </head>
 <body>
   <header class="topbar">
     <div class="brand">dfcapture</div>
-    <div>public reconstruction shell</div>
+    <div class="status" id="status">connecting...</div>
   </header>
   <main class="stage">
-    <section class="panel">
-      <h1>Browser shell is running</h1>
-      <p>This is the first compileable milestone: DFHack plugin, local HTTP server, and web shell.</p>
-      <p>Next milestones add frame capture, independent cameras, and UI actions as separate commits.</p>
-      <p>Health endpoint: <code>/health</code></p>
-    </section>
+    <img class="frame" id="frame" alt="">
+    <div class="controls" aria-label="camera controls">
+      <button data-dx="0" data-dy="-10">N</button>
+      <button data-dx="0" data-dy="0" data-dz="1">Up</button>
+      <button data-dx="10" data-dy="0">E</button>
+      <button data-dx="-10" data-dy="0">W</button>
+      <button data-dx="0" data-dy="0" data-dz="-1">Dn</button>
+      <button data-dx="0" data-dy="10">S</button>
+    </div>
   </main>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const player = params.get("player") || "default";
+    const frame = document.getElementById("frame");
+    const status = document.getElementById("status");
+
+    async function refreshCamera() {
+      const res = await fetch(`/camera?player=${encodeURIComponent(player)}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      const cam = await res.json();
+      status.textContent = `${player} camera ${cam.x}, ${cam.y}, ${cam.z}`;
+    }
+
+    function refreshFrame() {
+      frame.src = `/frame.jpg?player=${encodeURIComponent(player)}&t=${Date.now()}`;
+    }
+
+    async function moveCamera(dx, dy, dz) {
+      const qs = new URLSearchParams({ player, dx, dy, dz });
+      const res = await fetch(`/camera/move?${qs.toString()}`, { method: "POST", cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      const cam = await res.json();
+      status.textContent = `${player} camera ${cam.x}, ${cam.y}, ${cam.z}`;
+      refreshFrame();
+    }
+
+    document.querySelectorAll("button[data-dx]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const dx = Number(button.dataset.dx || 0);
+        const dy = Number(button.dataset.dy || 0);
+        const dz = Number(button.dataset.dz || 0);
+        moveCamera(dx, dy, dz).catch((err) => { status.textContent = err.message; });
+      });
+    });
+
+    frame.addEventListener("load", () => refreshCamera().catch(() => {}));
+    frame.addEventListener("error", () => { status.textContent = "waiting for DF frame..."; });
+    refreshFrame();
+    setInterval(refreshFrame, 250);
+    refreshCamera().catch((err) => { status.textContent = err.message; });
+  </script>
 </body>
 </html>)HTML";
 }
