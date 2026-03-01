@@ -1,7 +1,9 @@
 project(dfcapture_public)
 
 dfhack_plugin(dfcapture_public
+    src/client_state.cpp
     src/dfcapture.cpp
+    src/diagnostics.cpp
     src/hud.cpp
     src/http_server.cpp
     src/image_encoder.cpp

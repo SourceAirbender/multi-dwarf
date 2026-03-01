@@ -1,5 +1,6 @@
 #include "sdl_capture.h"
 
+#include "diagnostics.h"
 #include "image_encoder.h"
 #include "modules/DFSDL.h"
 #include "modules/Gui.h"
@@ -25,6 +26,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -237,14 +239,25 @@ bool clamp_camera(Camera& camera, std::string* err) {
 }
 
 bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::string* err) {
+    auto started = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&]() {
+        auto elapsed = std::chrono::steady_clock::now() - started;
+        return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+    };
+    diagnostics_capture_attempt(camera);
+
     if (!capture_ready(err) || !resolve_sdl(err))
+    {
+        diagnostics_capture_failure(camera, err ? *err : "capture prerequisites failed", elapsed_ms());
         return false;
+    }
 
     auto enabler = df::global::enabler;
     df::renderer* renderer = enabler ? enabler->renderer : nullptr;
     void* sdl_renderer = renderer ? renderer->get_renderer() : nullptr;
     if (!sdl_renderer) {
         if (err) *err = "renderer->get_renderer returned null";
+        diagnostics_capture_failure(camera, err ? *err : "renderer unavailable", elapsed_ms());
         return false;
     }
 
@@ -253,6 +266,7 @@ bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::strin
     p_GetRendererOutputSize(sdl_renderer, &width, &height);
     if (width <= 0 || height <= 0) {
         if (err) *err = "bad renderer output size";
+        diagnostics_capture_failure(camera, err ? *err : "bad renderer output size", elapsed_ms());
         return false;
     }
 
@@ -260,12 +274,14 @@ bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::strin
                                    SDL_TEXTUREACCESS_TARGET, width, height);
     if (!target) {
         if (err) *err = "SDL_CreateTexture(target) failed";
+        diagnostics_capture_failure(camera, err ? *err : "SDL_CreateTexture failed", elapsed_ms());
         return false;
     }
 
     if (p_SetRenderTarget(sdl_renderer, target) != 0) {
         p_DestroyTexture(target);
         if (err) *err = "SDL_SetRenderTarget(target) failed";
+        diagnostics_capture_failure(camera, err ? *err : "SDL_SetRenderTarget failed", elapsed_ms());
         return false;
     }
 
@@ -320,6 +336,12 @@ bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::strin
 
     if (!ok && err)
         *err = local_err;
+    if (ok) {
+        diagnostics_capture_success(camera, frame.width, frame.height,
+                                    static_cast<uint64_t>(frame.bgra.size()), elapsed_ms());
+    } else {
+        diagnostics_capture_failure(camera, local_err.empty() ? "capture failed" : local_err, elapsed_ms());
+    }
     return ok;
 }
 

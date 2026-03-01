@@ -2,6 +2,7 @@
 #include "Export.h"
 #include "PluginManager.h"
 
+#include "diagnostics.h"
 #include "http_server.h"
 #include "image_encoder.h"
 
@@ -46,6 +47,8 @@ command_result cmd_start(color_ostream& out, std::vector<std::string>& args) {
         return CR_FAILURE;
     }
 
+    dfcapture_public::diagnostics_log("server started " +
+                                      dfcapture_public::server_url(bind_address, port));
     print_line(out, "dfcapture public server: " +
                     dfcapture_public::server_url(bind_address, port) + "\n");
     return CR_OK;
@@ -58,6 +61,7 @@ command_result cmd_start(color_ostream& out, std::vector<std::string>& args) {
 command_result cmd_stop(color_ostream& out, std::vector<std::string>&) {
 #ifdef _WIN32
     dfcapture_public::stop_server();
+    dfcapture_public::diagnostics_log("server stopped");
     out.print("dfcapture public server stopped.\n");
     return CR_OK;
 #else
@@ -102,6 +106,7 @@ DFhackCExport command_result plugin_init(color_ostream& out, std::vector<PluginC
 
 DFhackCExport command_result plugin_shutdown(color_ostream&) {
 #ifdef _WIN32
+    dfcapture_public::diagnostics_log("plugin shutdown");
     dfcapture_public::stop_server();
     dfcapture_public::shutdown_image_encoder();
 #endif

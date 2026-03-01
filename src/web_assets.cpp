@@ -138,7 +138,7 @@ const char* index_html() {
 
     .map-actions {
       display: grid;
-      grid-template-columns: repeat(2, 32px);
+      grid-template-columns: repeat(3, 36px);
       gap: 4px;
     }
 
@@ -291,6 +291,7 @@ const char* index_html() {
         <button id="surfaceBtn" title="Move to surface elevation">Surf</button>
         <button id="deepBtn" title="Move to deepest discovered elevation">Deep</button>
         <button id="refreshBtn" title="Restart stream">Live</button>
+        <button id="resetBtn" title="Reset this browser camera and diagnostics">Reset</button>
       </div>
     </section>
   </header>
@@ -325,6 +326,7 @@ R"JS(
     let moving = false;
     let hud = null;
     let lastNotifications = null;
+    let lastState = null;
 
     const moodColors = ["#35d64b", "#68da52", "#a3d64b", "#ffd15a", "#ffae42", "#ff7040", "#ff4b4b"];
     const reportColors = [
@@ -437,6 +439,21 @@ R"JS(
       const res = await fetch(`/notifications?player=${encodeURIComponent(player)}`, { cache: "no-store" });
       if (!res.ok) throw new Error(await res.text());
       renderNotifications(await res.json());
+    }
+
+    function renderState(data) {
+      lastState = data;
+      if (!data || !data.capture || !data.capture.failures) return;
+      const c = data.capture;
+      if (c.failures > 0 && c.lastError) {
+        setStatus(`capture warnings: ${c.failures} failures, last: ${c.lastError}`);
+      }
+    }
+
+    async function refreshState() {
+      const res = await fetch(`/state?player=${encodeURIComponent(player)}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      renderState(await res.json());
     }
 
 )JS" +
@@ -577,6 +594,15 @@ R"JS(
       if (hud) setCamera(hud.camera.x, hud.camera.y, hud.minimap.deepestZ).catch((err) => setStatus(err.message));
     });
     document.getElementById("refreshBtn").addEventListener("click", startStream);
+    document.getElementById("resetBtn").addEventListener("click", async () => {
+      try {
+        const cam = await postCamera("/reset", {});
+        setStatus(`${player} reset to ${cam.x}, ${cam.y}, ${cam.z}`);
+        startStream();
+      } catch (err) {
+        setStatus(err.message);
+      }
+    });
 
     minimap.addEventListener("click", (event) => {
       if (!hud || !hud.map) return;
@@ -621,8 +647,10 @@ R"JS(
     startStream();
     refreshHud().catch((err) => setStatus(err.message));
     refreshNotifications().catch(() => {});
+    refreshState().catch(() => {});
     setInterval(() => refreshHud().catch(() => {}), 2000);
     setInterval(() => refreshNotifications().catch(() => {}), 3000);
+    setInterval(() => refreshState().catch(() => {}), 5000);
   </script>
 </body>
 </html>)JS";

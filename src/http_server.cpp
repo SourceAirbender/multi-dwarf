@@ -1,5 +1,7 @@
 #include "http_server.h"
 
+#include "client_state.h"
+#include "diagnostics.h"
 #include "hud.h"
 #include "sdl_capture.h"
 #include "httplib.h"
@@ -15,7 +17,6 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 namespace dfcapture_public {
@@ -27,8 +28,6 @@ std::thread g_server_thread;
 std::atomic<bool> g_running(false);
 int g_port = DEFAULT_STREAM_PORT;
 std::string g_bind_address = DEFAULT_BIND_ADDRESS;
-std::mutex g_camera_mutex;
-std::unordered_map<std::string, Camera> g_player_cameras;
 
 std::string camera_json(const Camera& camera) {
     return "{\"x\":" + std::to_string(camera.x) +
@@ -36,30 +35,19 @@ std::string camera_json(const Camera& camera) {
            ",\"z\":" + std::to_string(camera.z) + "}\n";
 }
 
-bool camera_for_player(const std::string& player, Camera& camera, std::string* err) {
-    {
-        std::lock_guard<std::mutex> lock(g_camera_mutex);
-        auto it = g_player_cameras.find(player);
-        if (it != g_player_cameras.end()) {
-            camera = it->second;
-            return true;
-        }
+std::string clients_json() {
+    std::ostringstream body;
+    auto clients = client_camera_snapshot();
+    body << "{\"count\":" << clients.size() << ",\"clients\":[";
+    for (size_t i = 0; i < clients.size(); ++i) {
+        if (i) body << ",";
+        body << "{\"player\":" << json_string(clients[i].player)
+             << ",\"camera\":{\"x\":" << clients[i].camera.x
+             << ",\"y\":" << clients[i].camera.y
+             << ",\"z\":" << clients[i].camera.z << "}}";
     }
-
-    if (!read_host_camera(camera, err))
-        return false;
-    clamp_camera(camera, nullptr);
-
-    {
-        std::lock_guard<std::mutex> lock(g_camera_mutex);
-        g_player_cameras[player] = camera;
-    }
-    return true;
-}
-
-void set_player_camera(const std::string& player, const Camera& camera) {
-    std::lock_guard<std::mutex> lock(g_camera_mutex);
-    g_player_cameras[player] = camera;
+    body << "]}\n";
+    return body.str();
 }
 
 void register_routes(httplib::Server& server) {
@@ -75,6 +63,61 @@ void register_routes(httplib::Server& server) {
         res.set_content("{\"ok\":true,\"service\":\"dfcapture_public\"}\n",
                         "application/json; charset=utf-8");
     });
+
+    server.Get("/state", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(diagnostics_json(player, camera, diagnostics_snapshot()),
+                        "application/json; charset=utf-8");
+    });
+
+    server.Get("/clients", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(clients_json(), "application/json; charset=utf-8");
+    });
+
+    server.Get("/host-state", [](const httplib::Request&, httplib::Response& res) {
+        HostState state;
+        std::string err;
+        if (!host_state_on_render_thread(state, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + ",\"state\":" +
+                                host_state_json(state) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(host_state_json(state), "application/json; charset=utf-8");
+    });
+
+    auto reset_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        forget_player_camera(player);
+        diagnostics_reset();
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+    };
+    server.Get("/reset", reset_handler);
+    server.Post("/reset", reset_handler);
 
     server.Get("/camera", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
