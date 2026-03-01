@@ -1,14 +1,15 @@
 #include "http_server.h"
 
+#include "hud.h"
 #include "sdl_capture.h"
 #include "httplib.h"
 #include "image_encoder.h"
+#include "json_util.h"
+#include "notifications.h"
 #include "web_assets.h"
 
 #include <atomic>
 #include <chrono>
-#include <cctype>
-#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -28,28 +29,6 @@ int g_port = DEFAULT_STREAM_PORT;
 std::string g_bind_address = DEFAULT_BIND_ADDRESS;
 std::mutex g_camera_mutex;
 std::unordered_map<std::string, Camera> g_player_cameras;
-
-bool query_int(const httplib::Request& req, const char* name, int& value) {
-    if (!req.has_param(name))
-        return false;
-    value = std::atoi(req.get_param_value(name).c_str());
-    return true;
-}
-
-bool is_safe_player_id(const std::string& player) {
-    if (player.empty() || player.size() > 96)
-        return false;
-    for (unsigned char ch : player) {
-        if (!std::isalnum(ch) && ch != '-' && ch != '_')
-            return false;
-    }
-    return true;
-}
-
-std::string query_player(const httplib::Request& req) {
-    std::string player = req.has_param("player") ? req.get_param_value("player") : "default";
-    return is_safe_player_id(player) ? player : "default";
-}
 
 std::string camera_json(const Camera& camera) {
     return "{\"x\":" + std::to_string(camera.x) +
@@ -141,6 +120,45 @@ void register_routes(httplib::Server& server) {
         res.set_content(camera_json(camera), "application/json; charset=utf-8");
     });
 
+    server.Post("/camera/set", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        query_int(req, "x", camera.x);
+        query_int(req, "y", camera.y);
+        query_int(req, "z", camera.z);
+        if (!clamp_camera(camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        set_player_camera(player, camera);
+        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+    });
+
+    server.Post("/camera/home", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        Camera camera;
+        std::string err;
+        if (!read_host_camera(camera, &err) || !clamp_camera(camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        set_player_camera(player, camera);
+        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+    });
+
     server.Get("/frame.jpg", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
         Camera camera;
@@ -212,6 +230,44 @@ void register_routes(httplib::Server& server) {
 
     server.Get("/stream", stream_handler);
     server.Get("/stream.mjpg", stream_handler);
+
+    server.Get("/hud", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        HudState hud;
+        if (!hud_on_render_thread(camera, hud, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(hud_json(player, hud), "application/json; charset=utf-8");
+    });
+
+    server.Get("/notifications", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        NotificationState state;
+        std::string err;
+        if (!notifications_on_render_thread(state, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(notifications_json(player, state), "application/json; charset=utf-8");
+    });
 }
 
 } // namespace
