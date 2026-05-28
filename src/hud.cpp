@@ -300,7 +300,9 @@ std::string hud_json(const std::string& player, const HudState& hud) {
          << "\"player\":" << json_string(player) << ","
          << "\"camera\":{\"x\":" << hud.camera.x
          << ",\"y\":" << hud.camera.y
-         << ",\"z\":" << hud.camera.z << "},"
+         << ",\"z\":" << hud.camera.z
+         << ",\"zoom\":" << (hud.camera.zoom_factor >= 0 ? hud.camera.zoom_factor : 100)
+         << ",\"zoomExplicit\":" << (hud.camera.zoom_factor >= 0 ? "true" : "false") << "},"
          << "\"elevation\":" << hud.elevation << ","
          << "\"map\":{\"w\":" << hud.map_w
          << ",\"h\":" << hud.map_h

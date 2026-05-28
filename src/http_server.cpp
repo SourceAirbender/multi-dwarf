@@ -32,7 +32,10 @@ std::string g_bind_address = DEFAULT_BIND_ADDRESS;
 std::string camera_json(const Camera& camera) {
     return "{\"x\":" + std::to_string(camera.x) +
            ",\"y\":" + std::to_string(camera.y) +
-           ",\"z\":" + std::to_string(camera.z) + "}\n";
+           ",\"z\":" + std::to_string(camera.z) +
+           ",\"zoom\":" + std::to_string(camera.zoom_factor >= 0 ? camera.zoom_factor : 100) +
+           ",\"zoomExplicit\":" + (camera.zoom_factor >= 0 ? std::string("true") : std::string("false")) +
+           "}\n";
 }
 
 std::string clients_json() {
@@ -44,7 +47,10 @@ std::string clients_json() {
         body << "{\"player\":" << json_string(clients[i].player)
              << ",\"camera\":{\"x\":" << clients[i].camera.x
              << ",\"y\":" << clients[i].camera.y
-             << ",\"z\":" << clients[i].camera.z << "}}";
+             << ",\"z\":" << clients[i].camera.z
+             << ",\"zoom\":" << (clients[i].camera.zoom_factor >= 0 ? clients[i].camera.zoom_factor : 100)
+             << ",\"zoomExplicit\":" << (clients[i].camera.zoom_factor >= 0 ? "true" : "false")
+             << "}}";
     }
     body << "]}\n";
     return body.str();
@@ -201,6 +207,23 @@ void register_routes(httplib::Server& server) {
         set_player_camera(player, camera);
         res.set_content(camera_json(camera), "application/json; charset=utf-8");
     });
+
+    auto zoom_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        std::string direction = req.has_param("dir") ? req.get_param_value("dir") : "reset";
+        Camera camera;
+        std::string err;
+        if (!zoom_player_camera(player, direction, camera, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+    };
+    server.Get("/zoom", zoom_handler);
+    server.Post("/zoom", zoom_handler);
 
     server.Get("/frame.jpg", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);

@@ -148,7 +148,9 @@ std::string diagnostics_json(const std::string& player, const Camera& camera,
          << ",\"player\":" << json_string(player)
          << ",\"camera\":{\"x\":" << camera.x
          << ",\"y\":" << camera.y
-         << ",\"z\":" << camera.z << "}"
+         << ",\"z\":" << camera.z
+         << ",\"zoom\":" << (camera.zoom_factor >= 0 ? camera.zoom_factor : 100)
+         << ",\"zoomExplicit\":" << (camera.zoom_factor >= 0 ? "true" : "false") << "}"
          << ",\"capture\":{\"attempts\":" << stats.attempts
          << ",\"successes\":" << stats.successes
          << ",\"failures\":" << stats.failures
@@ -158,7 +160,9 @@ std::string diagnostics_json(const std::string& player, const Camera& camera,
          << ",\"lastDurationMs\":" << stats.last_duration_ms
          << ",\"lastCamera\":{\"x\":" << stats.last_camera.x
          << ",\"y\":" << stats.last_camera.y
-         << ",\"z\":" << stats.last_camera.z << "}"
+         << ",\"z\":" << stats.last_camera.z
+         << ",\"zoom\":" << (stats.last_camera.zoom_factor >= 0 ? stats.last_camera.zoom_factor : 100)
+         << ",\"zoomExplicit\":" << (stats.last_camera.zoom_factor >= 0 ? "true" : "false") << "}"
          << ",\"lastError\":" << json_string(stats.last_error)
          << ",\"lastEventUtc\":" << json_string(stats.last_event_utc)
          << "}}\n";

@@ -2,6 +2,7 @@
 
 #include "sdl_capture.h"
 
+#include <algorithm>
 #include <mutex>
 #include <unordered_map>
 
@@ -42,6 +43,32 @@ void set_player_camera(const std::string& player, const Camera& camera) {
 void forget_player_camera(const std::string& player) {
     std::lock_guard<std::mutex> lock(g_client_mutex);
     g_player_cameras.erase(player);
+}
+
+bool zoom_player_camera(const std::string& player, const std::string& direction,
+                        Camera& camera, std::string* err) {
+    Camera current;
+    if (!camera_for_player(player, current, err))
+        return false;
+
+    std::lock_guard<std::mutex> lock(g_client_mutex);
+    Camera& stored = g_player_cameras[player];
+    if (direction == "reset") {
+        stored.zoom_factor = -1;
+    } else {
+        int zoom = stored.zoom_factor >= 0 ? stored.zoom_factor : 100;
+        if (direction == "in") {
+            zoom -= 20;
+        } else if (direction == "out") {
+            zoom += 20;
+        } else {
+            if (err) *err = "bad zoom direction";
+            return false;
+        }
+        stored.zoom_factor = std::max(40, std::min(300, zoom));
+    }
+    camera = stored;
+    return true;
 }
 
 std::vector<ClientCamera> client_camera_snapshot() {

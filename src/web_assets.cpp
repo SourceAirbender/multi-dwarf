@@ -307,6 +307,9 @@ const char* index_html() {
       <button data-dx="-10" data-dy="0">W</button>
       <button data-dx="0" data-dy="0" data-dz="-1">Dn</button>
       <button data-dx="0" data-dy="10">S</button>
+      <button id="zoomInBtn" title="Zoom in">Z+</button>
+      <button id="zoomResetBtn" title="Reset zoom">100</button>
+      <button id="zoomOutBtn" title="Zoom out">Z-</button>
     </div>
   </main>
   <script>
@@ -535,7 +538,7 @@ R"JS(
 
       drawMoon(data.date.moonIcon);
       drawMinimap(data);
-      setStatus(`${player} camera ${data.camera.x}, ${data.camera.y}, ${data.camera.z} / Elevation ${data.elevation}`);
+      setStatus(`${player} camera ${data.camera.x}, ${data.camera.y}, ${data.camera.z} / Zoom ${data.camera.zoom}% / Elevation ${data.elevation}`);
     }
 
 )JS" +
@@ -575,6 +578,16 @@ R"JS(
       finally { moving = false; }
     }
 
+    async function zoomCamera(dir) {
+      const qs = new URLSearchParams({ player, dir });
+      const res = await fetch(`/zoom?${qs.toString()}`, { method: "POST", cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      const cam = await res.json();
+      setStatus(`${player} zoom ${cam.zoom}%`);
+      refreshHud().catch((err) => setStatus(err.message));
+      return cam;
+    }
+
     document.querySelectorAll("button[data-dx]").forEach((button) => {
       button.addEventListener("click", () => {
         const dx = Number(button.dataset.dx || 0);
@@ -594,6 +607,15 @@ R"JS(
       if (hud) setCamera(hud.camera.x, hud.camera.y, hud.minimap.deepestZ).catch((err) => setStatus(err.message));
     });
     document.getElementById("refreshBtn").addEventListener("click", startStream);
+    document.getElementById("zoomInBtn").addEventListener("click", () => {
+      zoomCamera("in").catch((err) => setStatus(err.message));
+    });
+    document.getElementById("zoomOutBtn").addEventListener("click", () => {
+      zoomCamera("out").catch((err) => setStatus(err.message));
+    });
+    document.getElementById("zoomResetBtn").addEventListener("click", () => {
+      zoomCamera("reset").catch((err) => setStatus(err.message));
+    });
     document.getElementById("resetBtn").addEventListener("click", async () => {
       try {
         const cam = await postCamera("/reset", {});
@@ -636,6 +658,15 @@ R"JS(
       } else if (key === "e") {
         event.preventDefault();
         moveCamera(0, 0, 1).catch((err) => setStatus(err.message));
+      } else if (key === "=" || key === "+") {
+        event.preventDefault();
+        zoomCamera("in").catch((err) => setStatus(err.message));
+      } else if (key === "-" || key === "_") {
+        event.preventDefault();
+        zoomCamera("out").catch((err) => setStatus(err.message));
+      } else if (key === "0") {
+        event.preventDefault();
+        zoomCamera("reset").catch((err) => setStatus(err.message));
       }
     });
 
