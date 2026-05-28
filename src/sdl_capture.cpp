@@ -482,6 +482,149 @@ struct RenderThreadCaptureRequest {
     std::promise<bool> done;
 };
 
+struct OverlayColor {
+    uint8_t b = 0;
+    uint8_t g = 0;
+    uint8_t r = 0;
+};
+
+void blend_pixel(CapturedFrame& frame, int x, int y, OverlayColor color, int alpha) {
+    if (x < 0 || y < 0 || x >= frame.width || y >= frame.height || alpha <= 0)
+        return;
+    alpha = std::max(0, std::min(255, alpha));
+    size_t off = (static_cast<size_t>(y) * frame.width + x) * 4;
+    auto blend = [alpha](uint8_t dst, uint8_t src) -> uint8_t {
+        return static_cast<uint8_t>((dst * (255 - alpha) + src * alpha + 127) / 255);
+    };
+    frame.bgra[off + 0] = blend(frame.bgra[off + 0], color.b);
+    frame.bgra[off + 1] = blend(frame.bgra[off + 1], color.g);
+    frame.bgra[off + 2] = blend(frame.bgra[off + 2], color.r);
+    frame.bgra[off + 3] = 255;
+}
+
+void draw_hline(CapturedFrame& frame, int x1, int x2, int y, OverlayColor color, int alpha) {
+    if (y < 0 || y >= frame.height)
+        return;
+    if (x1 > x2)
+        std::swap(x1, x2);
+    x1 = std::max(0, x1);
+    x2 = std::min(frame.width - 1, x2);
+    for (int x = x1; x <= x2; ++x)
+        blend_pixel(frame, x, y, color, alpha);
+}
+
+void draw_vline(CapturedFrame& frame, int x, int y1, int y2, OverlayColor color, int alpha) {
+    if (x < 0 || x >= frame.width)
+        return;
+    if (y1 > y2)
+        std::swap(y1, y2);
+    y1 = std::max(0, y1);
+    y2 = std::min(frame.height - 1, y2);
+    for (int y = y1; y <= y2; ++y)
+        blend_pixel(frame, x, y, color, alpha);
+}
+
+void draw_rect(CapturedFrame& frame, int x1, int y1, int x2, int y2,
+               OverlayColor color, int alpha) {
+    draw_hline(frame, x1, x2, y1, color, alpha);
+    draw_hline(frame, x1, x2, y2, color, alpha);
+    draw_vline(frame, x1, y1, y2, color, alpha);
+    draw_vline(frame, x2, y1, y2, color, alpha);
+}
+
+void fill_rect(CapturedFrame& frame, int x1, int y1, int x2, int y2,
+               OverlayColor color, int alpha) {
+    if (x1 > x2)
+        std::swap(x1, x2);
+    if (y1 > y2)
+        std::swap(y1, y2);
+    x1 = std::max(0, x1);
+    y1 = std::max(0, y1);
+    x2 = std::min(frame.width - 1, x2);
+    y2 = std::min(frame.height - 1, y2);
+    for (int y = y1; y <= y2; ++y)
+        for (int x = x1; x <= x2; ++x)
+            blend_pixel(frame, x, y, color, alpha);
+}
+
+int tile_to_pixel_x(int tile, int tiles, int width) {
+    return tiles <= 0 ? 0 : (tile * width) / tiles;
+}
+
+int tile_to_pixel_y(int tile, int tiles, int height) {
+    return tiles <= 0 ? 0 : (tile * height) / tiles;
+}
+
+int pixel_to_tile_coord(int pixel, int frame_pixels, int tiles) {
+    if (frame_pixels <= 0 || tiles <= 0)
+        return 0;
+    return std::max(0, std::min(tiles - 1, (pixel * tiles) / frame_pixels));
+}
+
+bool overlay_viewport_dims(const Camera& camera, int& tiles_x, int& tiles_y) {
+    auto gps = df::global::gps;
+    auto vp = gps ? gps->main_viewport : nullptr;
+    if (!gps || !vp || vp->dim_x <= 0 || vp->dim_y <= 0)
+        return false;
+    capture_zoom_reference_if_needed();
+    effective_zoom_dims(camera, vp->dim_x, vp->dim_y, tiles_x, tiles_y);
+    return tiles_x > 0 && tiles_y > 0;
+}
+
+void draw_designation_grid(CapturedFrame& frame, int tiles_x, int tiles_y) {
+    OverlayColor grid{24, 89, 143};
+    int tile_px = std::max(1, frame.width / std::max(1, tiles_x));
+    int tile_py = std::max(1, frame.height / std::max(1, tiles_y));
+    int alpha = tile_px >= 8 && tile_py >= 8 ? 82 : 44;
+    for (int tx = 0; tx <= tiles_x; ++tx)
+        draw_vline(frame, tile_to_pixel_x(tx, tiles_x, frame.width), 0, frame.height - 1, grid, alpha);
+    for (int ty = 0; ty <= tiles_y; ++ty)
+        draw_hline(frame, 0, frame.width - 1, tile_to_pixel_y(ty, tiles_y, frame.height), grid, alpha);
+}
+
+void draw_tile_highlight(CapturedFrame& frame, int tx1, int ty1, int tx2, int ty2,
+                         int tiles_x, int tiles_y, OverlayColor color) {
+    tx1 = std::max(0, std::min(tiles_x - 1, tx1));
+    tx2 = std::max(0, std::min(tiles_x - 1, tx2));
+    ty1 = std::max(0, std::min(tiles_y - 1, ty1));
+    ty2 = std::max(0, std::min(tiles_y - 1, ty2));
+    if (tx1 > tx2)
+        std::swap(tx1, tx2);
+    if (ty1 > ty2)
+        std::swap(ty1, ty2);
+
+    int x1 = tile_to_pixel_x(tx1, tiles_x, frame.width);
+    int y1 = tile_to_pixel_y(ty1, tiles_y, frame.height);
+    int x2 = tile_to_pixel_x(tx2 + 1, tiles_x, frame.width) - 1;
+    int y2 = tile_to_pixel_y(ty2 + 1, tiles_y, frame.height) - 1;
+    fill_rect(frame, x1, y1, x2, y2, color, 34);
+    draw_rect(frame, x1, y1, x2, y2, color, 210);
+    if (x2 - x1 > 7 && y2 - y1 > 7)
+        draw_rect(frame, x1 + 1, y1 + 1, x2 - 1, y2 - 1, color, 210);
+}
+
+void draw_placement_overlay(const Camera& camera, CapturedFrame& frame) {
+    if (!camera.placement_mode || frame.width <= 0 || frame.height <= 0)
+        return;
+
+    int tiles_x = 0;
+    int tiles_y = 0;
+    if (!overlay_viewport_dims(camera, tiles_x, tiles_y))
+        return;
+
+    draw_designation_grid(frame, tiles_x, tiles_y);
+    if (camera.hover_px < 0 || camera.hover_py < 0 ||
+            camera.ui_frame_w <= 0 || camera.ui_frame_h <= 0)
+        return;
+
+    int hx = pixel_to_tile_coord(camera.hover_px, camera.ui_frame_w, tiles_x);
+    int hy = pixel_to_tile_coord(camera.hover_py, camera.ui_frame_h, tiles_y);
+    int dx = camera.drag_active ? pixel_to_tile_coord(camera.drag_px, camera.ui_frame_w, tiles_x) : hx;
+    int dy = camera.drag_active ? pixel_to_tile_coord(camera.drag_py, camera.ui_frame_h, tiles_y) : hy;
+    OverlayColor amber{28, 198, 255};
+    draw_tile_highlight(frame, dx, dy, hx, hy, tiles_x, tiles_y, amber);
+}
+
 bool capture_camera_frame_on_render_thread(const Camera& requested,
                                            CapturedFrame& frame,
                                            std::string* err) {
@@ -536,6 +679,20 @@ bool clamp_camera(Camera& camera, std::string* err) {
     }
     camera = request->camera;
     return true;
+}
+
+bool effective_capture_viewport_dims(const Camera& camera, int& width_tiles,
+                                     int& height_tiles, std::string* err) {
+    auto gps = df::global::gps;
+    auto vp = gps ? gps->main_viewport : nullptr;
+    if (!gps || !vp || vp->dim_x <= 0 || vp->dim_y <= 0) {
+        if (err) *err = "viewport unavailable";
+        return false;
+    }
+
+    capture_zoom_reference_if_needed();
+    effective_zoom_dims(camera, vp->dim_x, vp->dim_y, width_tiles, height_tiles);
+    return width_tiles > 0 && height_tiles > 0;
 }
 
 bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::string* err) {
@@ -617,6 +774,7 @@ bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::strin
             int rc = p_RenderReadPixels(sdl_renderer, nullptr, SDL_PIXELFORMAT_ARGB8888,
                                         next.bgra.data(), width * 4);
             if (rc == 0) {
+                draw_placement_overlay(camera, next);
                 frame = std::move(next);
             } else {
                 ok = false;

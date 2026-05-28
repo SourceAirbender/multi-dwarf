@@ -71,6 +71,49 @@ bool zoom_player_camera(const std::string& player, const std::string& direction,
     return true;
 }
 
+bool set_player_placement_mode(const std::string& player, bool active,
+                               Camera& camera, std::string* err) {
+    Camera current;
+    if (!camera_for_player(player, current, err))
+        return false;
+
+    std::lock_guard<std::mutex> lock(g_client_mutex);
+    Camera& stored = g_player_cameras[player];
+    stored.placement_mode = active ? 1 : 0;
+    if (!active) {
+        stored.hover_px = -1;
+        stored.hover_py = -1;
+        stored.drag_active = 0;
+        stored.drag_px = -1;
+        stored.drag_py = -1;
+    }
+    camera = stored;
+    return true;
+}
+
+bool set_player_placement_cursor(const std::string& player, int hx, int hy,
+                                 int frame_w, int frame_h, bool dragging,
+                                 int drag_x, int drag_y, int build_w, int build_h,
+                                 Camera& camera, std::string* err) {
+    Camera current;
+    if (!camera_for_player(player, current, err))
+        return false;
+
+    std::lock_guard<std::mutex> lock(g_client_mutex);
+    Camera& stored = g_player_cameras[player];
+    stored.hover_px = hx;
+    stored.hover_py = hy;
+    stored.ui_frame_w = std::max(0, frame_w);
+    stored.ui_frame_h = std::max(0, frame_h);
+    stored.drag_active = dragging ? 1 : 0;
+    stored.drag_px = drag_x;
+    stored.drag_py = drag_y;
+    stored.build_w = std::max(0, build_w);
+    stored.build_h = std::max(0, build_h);
+    camera = stored;
+    return true;
+}
+
 std::vector<ClientCamera> client_camera_snapshot() {
     std::vector<ClientCamera> out;
     std::lock_guard<std::mutex> lock(g_client_mutex);

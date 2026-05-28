@@ -168,6 +168,59 @@ const char* index_html() {
       background: rgba(12, 12, 12, 0.92);
     }
 
+    .tool-palette {
+      position: absolute;
+      left: 50%;
+      bottom: 16px;
+      transform: translateX(-50%);
+      display: grid;
+      grid-template-columns: repeat(6, minmax(62px, auto));
+      gap: 5px;
+      padding: 8px;
+      border: 2px solid var(--line);
+      background: rgba(12, 12, 12, 0.92);
+      z-index: 4;
+    }
+
+    .tool-palette .tool {
+      min-width: 62px;
+      height: 30px;
+      padding: 0 7px;
+    }
+
+    .tool-palette .tool.active,
+    .priority button.active {
+      background: #0f6d2a;
+      color: #fff;
+    }
+
+    .priority {
+      display: contents;
+    }
+
+    .priority-label {
+      grid-column: span 2;
+      align-self: center;
+      color: var(--muted);
+      text-align: right;
+      padding-right: 4px;
+    }
+
+    .priority button {
+      min-width: 31px;
+      height: 28px;
+    }
+
+    .selection-box {
+      position: absolute;
+      display: none;
+      pointer-events: none;
+      border: 2px solid #ffd15a;
+      background: rgba(255, 209, 90, 0.16);
+      box-shadow: 0 0 0 1px #000 inset;
+      z-index: 3;
+    }
+
     button {
       height: 32px;
       border: 1px solid var(--line);
@@ -297,9 +350,27 @@ const char* index_html() {
   </header>
   <main class="stage">
     <img class="frame" id="frame" alt="">
+    <div class="selection-box" id="selectionBox"></div>
     <div class="alerts" id="alerts" aria-label="announcement alerts"></div>
     <div class="alert-popover" id="alertPopover"></div>
     <div class="status" id="status">connecting...</div>
+    <div class="tool-palette" id="toolPalette" aria-label="designation tools">
+      <button class="tool" data-tool="dig">Dig</button>
+      <button class="tool" data-tool="channel">Channel</button>
+      <button class="tool" data-tool="ramp">Ramp</button>
+      <button class="tool" data-tool="stairs">Stairs</button>
+      <button class="tool" data-tool="up">Up</button>
+      <button class="tool" data-tool="down">Down</button>
+      <button class="tool" data-tool="smooth">Smooth</button>
+      <button class="tool" data-tool="engrave">Engrave</button>
+      <button class="tool" data-tool="fortify">Fortify</button>
+      <button class="tool" data-tool="track">Track</button>
+      <button class="tool" data-tool="chop">Chop</button>
+      <button class="tool" data-tool="gather">Gather</button>
+      <button class="tool" data-tool="clear">Erase</button>
+      <span class="priority-label">Priority</span>
+      <span class="priority" id="priorityButtons"></span>
+    </div>
     <div class="controls" aria-label="camera controls">
       <button data-dx="0" data-dy="-10">N</button>
       <button data-dx="0" data-dy="0" data-dz="1">Up</button>
@@ -325,11 +396,18 @@ R"JS(
     const minimapCtx = minimap.getContext("2d");
     const moon = document.getElementById("moon");
     const moonCtx = moon.getContext("2d");
+    const selectionBox = document.getElementById("selectionBox");
+    const toolPalette = document.getElementById("toolPalette");
+    const priorityButtons = document.getElementById("priorityButtons");
     let streamToken = 0;
     let moving = false;
     let hud = null;
     let lastNotifications = null;
     let lastState = null;
+    let activeTool = null;
+    let designationPriority = 4;
+    let dragStart = null;
+    let lastCursorSent = 0;
 
     const moodColors = ["#35d64b", "#68da52", "#a3d64b", "#ffd15a", "#ffae42", "#ff7040", "#ff4b4b"];
     const reportColors = [
@@ -353,6 +431,109 @@ R"JS(
 
     function setStatus(text) {
       status.textContent = text;
+    }
+
+    function frameImageRect() {
+      const rect = frame.getBoundingClientRect();
+      const naturalW = frame.naturalWidth || rect.width || 1;
+      const naturalH = frame.naturalHeight || rect.height || 1;
+      const imageRatio = naturalW / naturalH;
+      const rectRatio = rect.width / Math.max(1, rect.height);
+      if (rectRatio > imageRatio) {
+        const height = rect.height;
+        const width = height * imageRatio;
+        const left = rect.left + (rect.width - width) / 2;
+        return { left, top: rect.top, width, height, right: left + width, bottom: rect.top + height };
+      }
+      const width = rect.width;
+      const height = width / imageRatio;
+      const top = rect.top + (rect.height - height) / 2;
+      return { left: rect.left, top, width, height, right: rect.left + width, bottom: top + height };
+    }
+
+    function eventToFramePixel(event) {
+      const rect = frameImageRect();
+      if (event.clientX < rect.left || event.clientY < rect.top ||
+          event.clientX > rect.right || event.clientY > rect.bottom) {
+        return null;
+      }
+      const w = frame.naturalWidth || Math.max(1, Math.round(rect.width));
+      const h = frame.naturalHeight || Math.max(1, Math.round(rect.height));
+      const px = Math.max(0, Math.min(w - 1, Math.floor((event.clientX - rect.left) / rect.width * w)));
+      const py = Math.max(0, Math.min(h - 1, Math.floor((event.clientY - rect.top) / rect.height * h)));
+      return { px, py, w, h, rect };
+    }
+
+    function setActiveTool(tool) {
+      activeTool = activeTool === tool ? null : tool;
+      dragStart = null;
+      selectionBox.style.display = "none";
+      document.querySelectorAll(".tool").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tool === activeTool);
+      });
+      const mode = activeTool ? activeTool : "none";
+      const qs = new URLSearchParams({ player, mode });
+      fetch(`/placement-mode?${qs.toString()}`, { method: "POST", cache: "no-store" }).catch(() => {});
+      setStatus(activeTool ? `${activeTool} designation active` : "designation tool cleared");
+    }
+
+    function updateSelectionBox(a, b) {
+      if (!a || !b) {
+        selectionBox.style.display = "none";
+        return;
+      }
+      const rect = a.rect;
+      const x1 = Math.min(a.px, b.px) / Math.max(1, a.w) * rect.width + rect.left;
+      const y1 = Math.min(a.py, b.py) / Math.max(1, a.h) * rect.height + rect.top;
+      const x2 = (Math.max(a.px, b.px) + 1) / Math.max(1, a.w) * rect.width + rect.left;
+      const y2 = (Math.max(a.py, b.py) + 1) / Math.max(1, a.h) * rect.height + rect.top;
+      selectionBox.style.left = `${Math.round(x1)}px`;
+      selectionBox.style.top = `${Math.round(y1)}px`;
+      selectionBox.style.width = `${Math.max(2, Math.round(x2 - x1))}px`;
+      selectionBox.style.height = `${Math.max(2, Math.round(y2 - y1))}px`;
+      selectionBox.style.display = "block";
+    }
+
+    function sendPlacementCursor(point) {
+      const now = performance.now();
+      if (now - lastCursorSent < 70) return;
+      lastCursorSent = now;
+      const params = point
+        ? {
+            player,
+            hx: point.px,
+            hy: point.py,
+            w: point.w,
+            h: point.h,
+            drag: dragStart ? 1 : 0,
+            dx: dragStart ? dragStart.px : -1,
+            dy: dragStart ? dragStart.py : -1,
+            bw: 0,
+            bh: 0,
+          }
+        : { player, hx: -1, hy: -1, w: 0, h: 0, drag: 0, dx: -1, dy: -1, bw: 0, bh: 0 };
+      const qs = new URLSearchParams(params);
+      fetch(`/placement-cursor?${qs.toString()}`, { method: "POST", cache: "no-store" }).catch(() => {});
+    }
+
+    async function designateRectangle(a, b) {
+      if (!activeTool || !a || !b) return;
+      const qs = new URLSearchParams({
+        player,
+        tool: activeTool,
+        priority: designationPriority,
+        px: a.px,
+        py: a.py,
+        px2: b.px,
+        py2: b.py,
+        w: a.w,
+        h: a.h,
+      });
+      const res = await fetch(`/designate?${qs.toString()}`, { method: "POST", cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setStatus(`${activeTool}: ${data.count} tile${data.count === 1 ? "" : "s"} marked`);
+      refreshHud().catch(() => {});
     }
 
     function reportColor(row) {
@@ -588,6 +769,70 @@ R"JS(
       return cam;
     }
 
+    for (let n = 1; n <= 7; n++) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = String(n);
+      button.className = n === designationPriority ? "active" : "";
+      button.addEventListener("click", () => {
+        designationPriority = n;
+        priorityButtons.querySelectorAll("button").forEach((el) => {
+          el.classList.toggle("active", Number(el.textContent) === n);
+        });
+        setStatus(`designation priority ${n}`);
+      });
+      priorityButtons.appendChild(button);
+    }
+
+    toolPalette.querySelectorAll(".tool").forEach((button) => {
+      button.addEventListener("click", () => setActiveTool(button.dataset.tool));
+    });
+
+    frame.addEventListener("mousedown", (event) => {
+      if (!activeTool) return;
+      const point = eventToFramePixel(event);
+      if (!point) return;
+      event.preventDefault();
+      dragStart = point;
+      updateSelectionBox(point, point);
+      sendPlacementCursor(point);
+    });
+
+    frame.addEventListener("mousemove", (event) => {
+      if (!activeTool) return;
+      const point = eventToFramePixel(event);
+      if (!point) {
+        sendPlacementCursor(null);
+        if (!dragStart) selectionBox.style.display = "none";
+        return;
+      }
+      if (dragStart) updateSelectionBox(dragStart, point);
+      sendPlacementCursor(point);
+    });
+
+    frame.addEventListener("mouseleave", () => {
+      if (!dragStart) {
+        sendPlacementCursor(null);
+        selectionBox.style.display = "none";
+      }
+    });
+
+    window.addEventListener("mouseup", (event) => {
+      if (!activeTool || !dragStart) return;
+      const start = dragStart;
+      dragStart = null;
+      const end = eventToFramePixel(event) || start;
+      updateSelectionBox(start, end);
+      designateRectangle(start, end)
+        .catch((err) => setStatus(err.message.trim ? err.message.trim() : String(err)))
+        .finally(() => {
+          setTimeout(() => {
+            if (!dragStart) selectionBox.style.display = "none";
+          }, 160);
+          sendPlacementCursor(null);
+        });
+    });
+
     document.querySelectorAll("button[data-dx]").forEach((button) => {
       button.addEventListener("click", () => {
         const dx = Number(button.dataset.dx || 0);
@@ -667,6 +912,11 @@ R"JS(
       } else if (key === "0") {
         event.preventDefault();
         zoomCamera("reset").catch((err) => setStatus(err.message));
+      } else if (key === "escape") {
+        if (activeTool) {
+          event.preventDefault();
+          setActiveTool(activeTool);
+        }
       }
     });
 

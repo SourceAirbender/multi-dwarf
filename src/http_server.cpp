@@ -8,6 +8,7 @@
 #include "image_encoder.h"
 #include "json_util.h"
 #include "notifications.h"
+#include "placement.h"
 #include "web_assets.h"
 
 #include <atomic>
@@ -224,6 +225,113 @@ void register_routes(httplib::Server& server) {
     };
     server.Get("/zoom", zoom_handler);
     server.Post("/zoom", zoom_handler);
+
+    auto placement_mode_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        std::string mode = req.has_param("mode") ? req.get_param_value("mode") : "none";
+        bool active = !(mode.empty() || mode == "none" || mode == "0" || mode == "off");
+        Camera camera;
+        std::string err;
+        if (!set_player_placement_mode(player, active, camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"placementMode\":" +
+                            std::string(camera.placement_mode ? "true" : "false") + "}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/placement-mode", placement_mode_handler);
+    server.Post("/placement-mode", placement_mode_handler);
+
+    auto placement_cursor_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int hx = -1;
+        int hy = -1;
+        int frame_w = 0;
+        int frame_h = 0;
+        int drag = 0;
+        int drag_x = -1;
+        int drag_y = -1;
+        int build_w = 0;
+        int build_h = 0;
+        query_int(req, "hx", hx);
+        query_int(req, "hy", hy);
+        query_int(req, "w", frame_w);
+        query_int(req, "h", frame_h);
+        query_int(req, "drag", drag);
+        query_int(req, "dx", drag_x);
+        query_int(req, "dy", drag_y);
+        query_int(req, "bw", build_w);
+        query_int(req, "bh", build_h);
+
+        Camera camera;
+        std::string err;
+        if (!set_player_placement_cursor(player, hx, hy, frame_w, frame_h, drag != 0,
+                                         drag_x, drag_y, build_w, build_h, camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/placement-cursor", placement_cursor_handler);
+    server.Post("/placement-cursor", placement_cursor_handler);
+
+    auto designate_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        DesignationRequest desig;
+        if (!query_int(req, "px", desig.px) ||
+                !query_int(req, "py", desig.py) ||
+                !query_int(req, "w", desig.frame_w) ||
+                !query_int(req, "h", desig.frame_h)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing px/py/w/h\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        desig.px2 = desig.px;
+        desig.py2 = desig.py;
+        query_int(req, "px2", desig.px2);
+        query_int(req, "py2", desig.py2);
+        desig.tool = req.has_param("tool") ? req.get_param_value("tool") : "dig";
+        int marker = 0;
+        int warm_damp = 0;
+        query_int(req, "priority", desig.priority);
+        query_int(req, "marker", marker);
+        query_int(req, "warmdamp", warm_damp);
+        query_int(req, "minemode", desig.mine_mode);
+        desig.marker = marker != 0;
+        desig.warm_damp = warm_damp != 0;
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        DesignationResult result;
+        if (!designate_on_render_thread(camera, desig, result, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"count\":" + std::to_string(result.count) +
+                            ",\"tool\":" + json_string(result.tool) + "}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/designate", designate_handler);
+    server.Post("/designate", designate_handler);
 
     server.Get("/frame.jpg", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
