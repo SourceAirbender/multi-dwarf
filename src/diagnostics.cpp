@@ -86,6 +86,55 @@ struct HostStateRequest {
     std::promise<bool> done;
 };
 
+bool read_viewport_probe(ViewportProbe& probe, std::string* err) {
+    probe = ViewportProbe{};
+    auto gps = df::global::gps;
+    auto enabler = df::global::enabler;
+    probe.has_gps = gps != nullptr;
+    probe.has_renderer = enabler && enabler->renderer;
+
+    if (df::global::window_x) probe.window.x = *df::global::window_x;
+    if (df::global::window_y) probe.window.y = *df::global::window_y;
+    if (df::global::window_z) probe.window.z = *df::global::window_z;
+
+    if (!gps) {
+        if (err) *err = "gps unavailable";
+        return false;
+    }
+
+    probe.gps_dim_x = gps->dimx;
+    probe.gps_dim_y = gps->dimy;
+    probe.tile_pixel_x = gps->tile_pixel_x;
+    probe.tile_pixel_y = gps->tile_pixel_y;
+    probe.screen_pixel_x = gps->screen_pixel_x;
+    probe.screen_pixel_y = gps->screen_pixel_y;
+    probe.viewport_zoom_factor = gps->viewport_zoom_factor;
+
+    auto vp = gps->main_viewport;
+    probe.has_viewport = vp != nullptr;
+    if (vp) {
+        probe.viewport_dim_x = vp->dim_x;
+        probe.viewport_dim_y = vp->dim_y;
+        probe.viewport_screen_x = vp->screen_x;
+        probe.viewport_screen_y = vp->screen_y;
+        probe.viewport_clip_x0 = vp->clipx[0];
+        probe.viewport_clip_x1 = vp->clipx[1];
+        probe.viewport_clip_y0 = vp->clipy[0];
+        probe.viewport_clip_y1 = vp->clipy[1];
+        probe.viewport_flag = vp->flag.whole;
+    }
+
+    if (!probe.has_viewport && err)
+        *err = "main viewport unavailable";
+    return probe.has_viewport;
+}
+
+struct ViewportProbeRequest {
+    ViewportProbe probe;
+    std::string err;
+    std::promise<bool> done;
+};
+
 } // namespace
 
 void diagnostics_log(const std::string& line) {
@@ -200,6 +249,48 @@ std::string host_state_json(const HostState& state) {
          << ",\"h\":" << state.gps_h << "}"
          << ",\"viewport\":{\"w\":" << state.viewport_w
          << ",\"h\":" << state.viewport_h << "}}\n";
+    return body.str();
+}
+
+bool viewport_probe_on_render_thread(ViewportProbe& probe, std::string* err) {
+    auto request = std::make_shared<ViewportProbeRequest>();
+    auto future = request->done.get_future();
+    DFHack::runOnRenderThread([request]() {
+        request->done.set_value(read_viewport_probe(request->probe, &request->err));
+    });
+
+    bool ok = future.get();
+    probe = request->probe;
+    if (!ok && err)
+        *err = request->err;
+    return ok;
+}
+
+std::string viewport_probe_json(const ViewportProbe& probe) {
+    std::ostringstream body;
+    body << "{\"ok\":true"
+         << ",\"hasGps\":" << (probe.has_gps ? "true" : "false")
+         << ",\"hasViewport\":" << (probe.has_viewport ? "true" : "false")
+         << ",\"hasRenderer\":" << (probe.has_renderer ? "true" : "false")
+         << ",\"window\":{\"x\":" << probe.window.x
+         << ",\"y\":" << probe.window.y
+         << ",\"z\":" << probe.window.z << "}"
+         << ",\"gps\":{\"dimX\":" << probe.gps_dim_x
+         << ",\"dimY\":" << probe.gps_dim_y
+         << ",\"tilePixelX\":" << probe.tile_pixel_x
+         << ",\"tilePixelY\":" << probe.tile_pixel_y
+         << ",\"screenPixelX\":" << probe.screen_pixel_x
+         << ",\"screenPixelY\":" << probe.screen_pixel_y
+         << ",\"viewportZoomFactor\":" << probe.viewport_zoom_factor << "}"
+         << ",\"viewport\":{\"dimX\":" << probe.viewport_dim_x
+         << ",\"dimY\":" << probe.viewport_dim_y
+         << ",\"screenX\":" << probe.viewport_screen_x
+         << ",\"screenY\":" << probe.viewport_screen_y
+         << ",\"clipX0\":" << probe.viewport_clip_x0
+         << ",\"clipX1\":" << probe.viewport_clip_x1
+         << ",\"clipY0\":" << probe.viewport_clip_y0
+         << ",\"clipY1\":" << probe.viewport_clip_y1
+         << ",\"flag\":" << probe.viewport_flag << "}}\n";
     return body.str();
 }
 

@@ -226,6 +226,20 @@ void register_routes(httplib::Server& server) {
     server.Get("/zoom", zoom_handler);
     server.Post("/zoom", zoom_handler);
 
+    server.Get("/zoom-probe", [](const httplib::Request&, httplib::Response& res) {
+        ViewportProbe probe;
+        std::string err;
+        if (!viewport_probe_on_render_thread(probe, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) +
+                                ",\"probe\":" + viewport_probe_json(probe) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(viewport_probe_json(probe), "application/json; charset=utf-8");
+    });
+
     auto placement_mode_handler = [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
         std::string mode = req.has_param("mode") ? req.get_param_value("mode") : "none";

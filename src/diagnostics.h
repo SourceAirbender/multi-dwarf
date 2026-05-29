@@ -35,6 +35,29 @@ struct HostState {
     int viewport_h = 0;
 };
 
+struct ViewportProbe {
+    bool has_gps = false;
+    bool has_viewport = false;
+    bool has_renderer = false;
+    Camera window;
+    int gps_dim_x = 0;
+    int gps_dim_y = 0;
+    int tile_pixel_x = 0;
+    int tile_pixel_y = 0;
+    int screen_pixel_x = 0;
+    int screen_pixel_y = 0;
+    int viewport_zoom_factor = 0;
+    int viewport_dim_x = 0;
+    int viewport_dim_y = 0;
+    int viewport_screen_x = 0;
+    int viewport_screen_y = 0;
+    int viewport_clip_x0 = 0;
+    int viewport_clip_x1 = 0;
+    int viewport_clip_y0 = 0;
+    int viewport_clip_y1 = 0;
+    uint32_t viewport_flag = 0;
+};
+
 void diagnostics_log(const std::string& line);
 void diagnostics_capture_attempt(const Camera& camera);
 void diagnostics_capture_success(const Camera& camera, int width, int height,
@@ -49,5 +72,8 @@ std::string diagnostics_json(const std::string& player, const Camera& camera,
 
 bool host_state_on_render_thread(HostState& state, std::string* err = nullptr);
 std::string host_state_json(const HostState& state);
+
+bool viewport_probe_on_render_thread(ViewportProbe& probe, std::string* err = nullptr);
+std::string viewport_probe_json(const ViewportProbe& probe);
 
 } // namespace dfcapture_public
