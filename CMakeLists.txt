@@ -6,6 +6,7 @@ dfhack_plugin(dfcapture_public
     src/diagnostics.cpp
     src/hud.cpp
     src/http_server.cpp
+    src/info_panel.cpp
     src/image_encoder.cpp
     src/json_util.cpp
     src/notifications.cpp

@@ -6,6 +6,7 @@
 #include "sdl_capture.h"
 #include "httplib.h"
 #include "image_encoder.h"
+#include "info_panel.h"
 #include "json_util.h"
 #include "notifications.h"
 #include "placement.h"
@@ -455,6 +456,24 @@ void register_routes(httplib::Server& server) {
 
         res.set_header("Cache-Control", "no-store");
         res.set_content(notifications_json(player, state), "application/json; charset=utf-8");
+    });
+
+    server.Get("/panel", [](const httplib::Request& req, httplib::Response& res) {
+        std::string panel_name = req.has_param("panel") ? req.get_param_value("panel") : "citizens";
+        std::string section = req.has_param("section") ? req.get_param_value("section") : "";
+        std::string detail = req.has_param("detail") ? req.get_param_value("detail") : "";
+
+        InfoPanel panel;
+        std::string err;
+        if (!info_panel_on_render_thread(panel_name, section, detail, panel, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(info_panel_json(panel), "application/json; charset=utf-8");
     });
 }
 

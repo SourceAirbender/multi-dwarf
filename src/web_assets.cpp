@@ -313,6 +313,160 @@ const char* index_html() {
     .alert-line.good {
       color: #35d64b;
     }
+
+    .info-dock {
+      position: absolute;
+      left: 12px;
+      top: 96px;
+      display: grid;
+      gap: 5px;
+      z-index: 3;
+    }
+
+    .info-dock button {
+      width: 118px;
+      height: 28px;
+      text-align: left;
+      padding: 0 8px;
+      background: rgba(12, 12, 12, 0.92);
+    }
+
+    .info-panel {
+      position: absolute;
+      left: 18px;
+      top: 86px;
+      width: min(1120px, calc(100vw - 36px));
+      height: min(680px, calc(100vh - 104px));
+      z-index: 6;
+      border: 2px solid var(--line);
+      background: rgba(12, 12, 12, 0.98);
+      box-shadow: 0 2px 0 #000;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr auto;
+      overflow: hidden;
+    }
+
+    .info-panel[hidden] {
+      display: none;
+    }
+
+    .info-head {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      color: var(--yellow);
+      font-weight: 700;
+    }
+
+    .info-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      padding: 4px 8px 0;
+    }
+
+    .info-tabs button {
+      height: 25px;
+      min-width: 92px;
+      padding: 0 8px;
+      border-color: var(--line);
+      color: #fff;
+      background: #4d3c55;
+    }
+
+    .info-tabs button.active {
+      color: #111;
+      background: #d8e5e6;
+    }
+
+    .info-body {
+      min-height: 0;
+      overflow: auto;
+      padding: 10px;
+    }
+
+    .info-message {
+      margin: 0 0 14px;
+      white-space: pre-wrap;
+    }
+
+    .info-side {
+      float: left;
+      width: 205px;
+      margin: 0 12px 8px 0;
+      display: grid;
+      gap: 4px;
+    }
+
+    .info-side div {
+      border: 1px solid #7d755e;
+      background: #514b58;
+      padding: 7px 10px;
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .info-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    .info-table th {
+      background: #6c4c16;
+      color: #d9c8a2;
+      text-align: left;
+      padding: 5px 8px;
+      border-right: 1px solid var(--line);
+    }
+
+    .info-table td {
+      padding: 7px 8px;
+      border-bottom: 1px solid rgba(194, 135, 19, 0.22);
+      vertical-align: top;
+    }
+
+    .info-table tr:nth-child(even) {
+      background: repeating-linear-gradient(-30deg, rgba(255,255,255,0.025), rgba(255,255,255,0.025) 2px, transparent 2px, transparent 6px);
+    }
+
+    .info-icon {
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--line);
+      display: inline-grid;
+      place-items: center;
+      margin-right: 8px;
+      color: var(--yellow);
+      background: #151515;
+      font-weight: 700;
+      vertical-align: middle;
+    }
+
+    .info-name {
+      color: var(--yellow);
+      font-weight: 700;
+    }
+
+    .info-subtle {
+      color: var(--muted);
+      margin-top: 3px;
+      font-size: 12px;
+    }
+
+    .info-status {
+      color: var(--green);
+      white-space: pre-wrap;
+    }
+
+    .info-footer {
+      padding: 6px 10px;
+      border-top: 1px solid rgba(194, 135, 19, 0.6);
+      color: var(--muted);
+      min-height: 28px;
+    }
   </style>
 </head>
 <body>
@@ -353,6 +507,23 @@ const char* index_html() {
     <div class="selection-box" id="selectionBox"></div>
     <div class="alerts" id="alerts" aria-label="announcement alerts"></div>
     <div class="alert-popover" id="alertPopover"></div>
+    <div class="info-dock" id="infoDock">
+      <button data-panel="citizens" data-section="creatures">Creatures</button>
+      <button data-panel="citizens" data-section="places">Places</button>
+      <button data-panel="objects" data-section="objects">Objects</button>
+      <button data-panel="nobles" data-section="nobles">Nobles</button>
+      <button data-panel="stocks" data-section="stocks">Stocks</button>
+    </div>
+    <section class="info-panel" id="infoPanel" hidden>
+      <div class="info-head">
+        <div id="infoTitle">Info</div>
+        <button id="infoClose" title="Close">X</button>
+      </div>
+      <div class="info-tabs" id="infoPrimaryTabs"></div>
+      <div class="info-tabs" id="infoSectionTabs"></div>
+      <div class="info-body" id="infoBody"></div>
+      <div class="info-footer" id="infoFooter"></div>
+    </section>
     <div class="status" id="status">connecting...</div>
     <div class="tool-palette" id="toolPalette" aria-label="designation tools">
       <button class="tool" data-tool="dig">Dig</button>
@@ -392,6 +563,12 @@ R"JS(
     const status = document.getElementById("status");
     const alertsRail = document.getElementById("alerts");
     const alertPopover = document.getElementById("alertPopover");
+    const infoPanel = document.getElementById("infoPanel");
+    const infoTitle = document.getElementById("infoTitle");
+    const infoPrimaryTabs = document.getElementById("infoPrimaryTabs");
+    const infoSectionTabs = document.getElementById("infoSectionTabs");
+    const infoBody = document.getElementById("infoBody");
+    const infoFooter = document.getElementById("infoFooter");
     const minimap = document.getElementById("minimap");
     const minimapCtx = minimap.getContext("2d");
     const moon = document.getElementById("moon");
@@ -408,6 +585,7 @@ R"JS(
     let designationPriority = 4;
     let dragStart = null;
     let lastCursorSent = 0;
+    let currentPanel = null;
 
     const moodColors = ["#35d64b", "#68da52", "#a3d64b", "#ffd15a", "#ffae42", "#ff7040", "#ff4b4b"];
     const reportColors = [
@@ -591,6 +769,158 @@ R"JS(
       alertPopover.classList.remove("visible");
     }
 
+    function panelIcon(row) {
+      if (row.iconKey) return row.iconKey.slice(0, 2).toUpperCase();
+      if (row.iconSheet === "zone") return "Z";
+      if (row.unitId >= 0) return (row.name || "?").trim().slice(0, 1).toUpperCase();
+      if (row.itemId >= 0) return "I";
+      if (row.buildingId >= 0) return "B";
+      if (row.kind === "written") return "W";
+      return "?";
+    }
+
+    function renderTabBar(container, tabs, activeId, clicker) {
+      container.innerHTML = "";
+      (tabs || []).forEach((tab) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = tab.label || tab.id;
+        button.className = tab.id === activeId ? "active" : "";
+        button.addEventListener("click", () => clicker(tab));
+        container.appendChild(button);
+      });
+    }
+
+    function rowPosition(row) {
+      if (row && row.hasPos) return { x: row.x, y: row.y, z: row.z };
+      return null;
+    }
+
+    function renderInfoPanel(data) {
+      currentPanel = data;
+      infoPanel.hidden = false;
+      infoTitle.textContent = data.title || "Info";
+      infoFooter.textContent = data.footer || "";
+
+      renderTabBar(infoPrimaryTabs, data.primaryTabs, data.section, (tab) => {
+        openPanel(tab.id, tab.id, "");
+      });
+      renderTabBar(infoSectionTabs, data.sectionTabs, data.section, (tab) => {
+        openPanel(data.panel || "citizens", tab.id, "");
+      });
+
+      const detailTabs = document.createElement("div");
+      detailTabs.className = "info-tabs";
+      renderTabBar(detailTabs, data.detailTabs, data.detail, (tab) => {
+        openPanel(data.panel || "citizens", data.section || "", tab.id);
+      });
+
+      infoBody.innerHTML = "";
+      if ((data.detailTabs || []).length) infoBody.appendChild(detailTabs);
+
+      (data.messages || []).forEach((message) => {
+        const div = document.createElement("div");
+        div.className = "info-message";
+        div.textContent = message;
+        infoBody.appendChild(div);
+      });
+
+      if ((data.sideItems || []).length) {
+        const side = document.createElement("div");
+        side.className = "info-side";
+        data.sideItems.forEach((text) => {
+          const item = document.createElement("div");
+          item.textContent = text;
+          side.appendChild(item);
+        });
+        infoBody.appendChild(side);
+      }
+
+      const rows = data.rows || [];
+      const stockItems = data.stockItems || [];
+      if (!rows.length && !stockItems.length) return;
+
+      const table = document.createElement("table");
+      table.className = "info-table";
+      const thead = document.createElement("thead");
+      const header = document.createElement("tr");
+      ["Name", "Cat", "Prof", "Job / Status", ""].forEach((label) => {
+        const th = document.createElement("th");
+        th.textContent = label;
+        header.appendChild(th);
+      });
+      thead.appendChild(header);
+      table.appendChild(thead);
+      const tbody = document.createElement("tbody");
+
+      rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        const name = document.createElement("td");
+        const icon = document.createElement("span");
+        icon.className = "info-icon";
+        icon.textContent = panelIcon(row);
+        name.appendChild(icon);
+        const label = document.createElement("span");
+        label.className = "info-name";
+        label.textContent = row.name || "(unnamed)";
+        name.appendChild(label);
+        if (row.subtitle) {
+          const sub = document.createElement("div");
+          sub.className = "info-subtle";
+          sub.textContent = row.subtitle;
+          name.appendChild(sub);
+        }
+        tr.appendChild(name);
+
+        [row.category, row.profession, [row.job, row.status].filter(Boolean).join("\n")].forEach((text) => {
+          const td = document.createElement("td");
+          td.className = "info-status";
+          td.textContent = text || "";
+          tr.appendChild(td);
+        });
+
+        const actions = document.createElement("td");
+        const pos = rowPosition(row);
+        if (pos) {
+          const center = document.createElement("button");
+          center.type = "button";
+          center.textContent = "Center";
+          center.addEventListener("click", () => setCamera(pos.x, pos.y, pos.z).catch((err) => setStatus(err.message)));
+          actions.appendChild(center);
+        }
+        tr.appendChild(actions);
+        tbody.appendChild(tr);
+      });
+
+      stockItems.forEach((item) => {
+        const tr = document.createElement("tr");
+        const name = document.createElement("td");
+        name.innerHTML = `<span class="info-icon">I</span><span class="info-name"></span>`;
+        name.querySelector(".info-name").textContent = item.name || `Item #${item.itemId}`;
+        tr.appendChild(name);
+        [item.subtitle, String(item.count || 1), item.status, ""].forEach((text) => {
+          const td = document.createElement("td");
+          td.textContent = text || "";
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(tbody);
+      infoBody.appendChild(table);
+    }
+
+    async function openPanel(panelName, section, detail) {
+      const qs = new URLSearchParams({ player, panel: panelName || "citizens" });
+      if (section) qs.set("section", section);
+      if (detail) qs.set("detail", detail);
+      const res = await fetch(`/panel?${qs.toString()}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      renderInfoPanel(await res.json());
+    }
+
+)JS" +
+R"JS(
     function renderNotifications(data) {
       lastNotifications = data;
       alertsRail.innerHTML = "";
@@ -871,6 +1201,16 @@ R"JS(
       }
     });
 
+    document.getElementById("infoClose").addEventListener("click", () => {
+      infoPanel.hidden = true;
+      currentPanel = null;
+    });
+    document.getElementById("infoDock").querySelectorAll("button").forEach((button) => {
+      button.addEventListener("click", () => {
+        openPanel(button.dataset.panel, button.dataset.section, "").catch((err) => setStatus(err.message));
+      });
+    });
+
     minimap.addEventListener("click", (event) => {
       if (!hud || !hud.map) return;
       const rect = minimap.getBoundingClientRect();
@@ -913,7 +1253,11 @@ R"JS(
         event.preventDefault();
         zoomCamera("reset").catch((err) => setStatus(err.message));
       } else if (key === "escape") {
-        if (activeTool) {
+        if (!infoPanel.hidden) {
+          event.preventDefault();
+          infoPanel.hidden = true;
+          currentPanel = null;
+        } else if (activeTool) {
           event.preventDefault();
           setActiveTool(activeTool);
         }
