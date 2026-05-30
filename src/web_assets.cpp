@@ -467,8 +467,220 @@ const char* index_html() {
       color: var(--muted);
       min-height: 28px;
     }
+
+    .unit-panel {
+      position: absolute;
+      right: 18px;
+      top: 86px;
+      width: min(520px, calc(100vw - 36px));
+      height: min(720px, calc(100vh - 104px));
+      z-index: 7;
+      border: 2px solid var(--line);
+      background: rgba(8, 8, 8, 0.985);
+      box-shadow: 0 2px 0 #000;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr auto;
+      overflow: hidden;
+    }
+
+    .unit-panel[hidden] {
+      display: none;
+    }
+
+    .unit-head {
+      position: relative;
+      display: grid;
+      grid-template-columns: 74px 1fr auto;
+      gap: 12px;
+      align-items: start;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .unit-close {
+      position: absolute;
+      right: 0;
+      top: 0;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      line-height: 18px;
+    }
+
+    .unit-portrait {
+      width: 64px;
+      height: 64px;
+      border: 2px solid var(--line);
+      background: #1d1710;
+      color: var(--yellow);
+      display: grid;
+      place-items: center;
+      font-size: 26px;
+      font-weight: 700;
+    }
+
+    .unit-title {
+      color: var(--yellow);
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .unit-meta,
+    .unit-job {
+      color: #fff;
+      margin-bottom: 3px;
+    }
+
+    .unit-job {
+      color: var(--yellow);
+    }
+
+    .unit-flags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 6px;
+    }
+
+    .unit-flag {
+      border: 1px solid #31a843;
+      color: #54ff67;
+      padding: 1px 5px;
+      background: #102611;
+      font-size: 11px;
+    }
+
+    .unit-head-actions {
+      display: grid;
+      gap: 5px;
+      margin-top: 22px;
+    }
+
+    .unit-head-actions button {
+      min-width: 70px;
+      height: 28px;
+    }
+
+    .unit-tabs,
+    .unit-subtabs,
+    .unit-detail-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      padding: 0 6px;
+      background: #130f0a;
+    }
+
+    .unit-tabs button,
+    .unit-subtabs button,
+    .unit-detail-tabs button {
+      height: 24px;
+      min-width: 70px;
+      padding: 0 7px;
+      color: #fff;
+      background: #5b3c60;
+      border-color: var(--line);
+    }
+
+    .unit-subtabs button {
+      background: #78521e;
+    }
+
+    .unit-detail-tabs button {
+      background: #42464b;
+    }
+
+    .unit-tabs button.active,
+    .unit-subtabs button.active,
+    .unit-detail-tabs button.active {
+      color: #111;
+      background: #ffd15a;
+    }
+
+    .unit-body {
+      min-height: 0;
+      overflow: auto;
+      padding: 8px;
+    }
+
+    .unit-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-top: 1px solid var(--line);
+      border-left: 1px solid var(--line);
+    }
+
+    .unit-cell {
+      min-height: 90px;
+      padding: 7px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      white-space: pre-wrap;
+    }
+
+    .unit-cell.wide {
+      grid-column: 1 / -1;
+      min-height: 120px;
+    }
+
+    .unit-line {
+      margin-bottom: 2px;
+      color: #fff;
+    }
+
+    .unit-line.good {
+      color: #00e5c8;
+    }
+
+    .unit-line.bad {
+      color: #ff8a00;
+    }
+
+    .unit-line.need {
+      color: #ffd15a;
+      font-weight: 700;
+    }
+
+    .unit-list {
+      display: grid;
+      gap: 4px;
+    }
+
+    .unit-list-row {
+      padding: 5px 7px;
+      border: 1px solid rgba(194, 135, 19, 0.42);
+      background: rgba(255,255,255,0.025);
+      color: #fff;
+      white-space: pre-wrap;
+    }
+
+    .unit-actions-box {
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      padding: 5px;
+      background: #101010;
+    }
+
+    .unit-action-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: #54ff67;
+    }
+
+    .unit-action-row.muted {
+      color: #777;
+    }
+
+    .unit-footer {
+      padding: 5px 8px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      text-align: right;
+      font-size: 11px;
+    }
   </style>
-</head>
+)HTML") +
+R"HTML(</head>
 <body>
   <header class="topbar">
     <section class="fort">
@@ -524,6 +736,25 @@ const char* index_html() {
       <div class="info-body" id="infoBody"></div>
       <div class="info-footer" id="infoFooter"></div>
     </section>
+    <section class="unit-panel" id="unitPanel" hidden>
+      <button class="unit-close" id="unitClose" title="Close">X</button>
+      <div class="unit-head">
+        <div class="unit-portrait" id="unitPortrait">?</div>
+        <div>
+          <div class="unit-title" id="unitTitle">Unit</div>
+          <div class="unit-meta" id="unitMeta"></div>
+          <div class="unit-job" id="unitJob"></div>
+          <div class="unit-flags" id="unitFlags"></div>
+        </div>
+        <div class="unit-head-actions">
+          <button id="unitCenter">Center</button>
+        </div>
+      </div>
+      <div class="unit-tabs" id="unitTabs"></div>
+      <div class="unit-subtabs" id="unitSubtabs"></div>
+      <div class="unit-body" id="unitBody"></div>
+      <div class="unit-footer" id="unitFooter"></div>
+    </section>
     <div class="status" id="status">connecting...</div>
     <div class="tool-palette" id="toolPalette" aria-label="designation tools">
       <button class="tool" data-tool="dig">Dig</button>
@@ -555,7 +786,7 @@ const char* index_html() {
     </div>
   </main>
   <script>
-)HTML") +
+)HTML" +
 R"JS(
     const params = new URLSearchParams(location.search);
     const player = params.get("player") || "default";
@@ -569,6 +800,17 @@ R"JS(
     const infoSectionTabs = document.getElementById("infoSectionTabs");
     const infoBody = document.getElementById("infoBody");
     const infoFooter = document.getElementById("infoFooter");
+    const unitPanel = document.getElementById("unitPanel");
+    const unitPortrait = document.getElementById("unitPortrait");
+    const unitTitle = document.getElementById("unitTitle");
+    const unitMeta = document.getElementById("unitMeta");
+    const unitJob = document.getElementById("unitJob");
+    const unitFlags = document.getElementById("unitFlags");
+    const unitTabs = document.getElementById("unitTabs");
+    const unitSubtabs = document.getElementById("unitSubtabs");
+    const unitBody = document.getElementById("unitBody");
+    const unitFooter = document.getElementById("unitFooter");
+    const unitCenter = document.getElementById("unitCenter");
     const minimap = document.getElementById("minimap");
     const minimapCtx = minimap.getContext("2d");
     const moon = document.getElementById("moon");
@@ -586,6 +828,9 @@ R"JS(
     let dragStart = null;
     let lastCursorSent = 0;
     let currentPanel = null;
+    let currentUnitData = null;
+    let activeUnitTab = "Overview";
+    let activeUnitDetail = null;
 
     const moodColors = ["#35d64b", "#68da52", "#a3d64b", "#ffd15a", "#ffae42", "#ff7040", "#ff4b4b"];
     const reportColors = [
@@ -769,6 +1014,238 @@ R"JS(
       alertPopover.classList.remove("visible");
     }
 
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+      }[ch]));
+    }
+
+    function unitLineClass(line) {
+      const lower = String(line || "").toLowerCase();
+      if (/unmet need|craft object|pray|acquire|admire|be creative|excitement/.test(lower)) return "need";
+      if (/healthy|strong|agile|good|great|satisfied|fondness|love|euphoric|content/.test(lower)) return "good";
+      if (/poor|weak|clumsy|pain|wound|starv|thirst|dejection|annoyance|anger|afraid|bored|slow/.test(lower)) return "bad";
+      return "";
+    }
+
+    function unitLines(unit, key, fallback = []) {
+      const lines = unit && Array.isArray(unit[key]) ? unit[key] : [];
+      return lines.length ? lines : fallback;
+    }
+
+    function renderUnitLines(lines) {
+      const list = Array.isArray(lines) ? lines : [];
+      if (!list.length) {
+        const empty = document.createElement("div");
+        empty.className = "unit-list-row";
+        empty.textContent = "No entries.";
+        return empty;
+      }
+      const wrap = document.createElement("div");
+      wrap.className = "unit-list";
+      list.forEach((line) => {
+        const div = document.createElement("div");
+        const cls = unitLineClass(line);
+        div.className = `unit-list-row${cls ? " " + cls : ""}`;
+        div.textContent = line;
+        wrap.appendChild(div);
+      });
+      return wrap;
+    }
+
+    function unitDetailTabs(tab) {
+      return ({
+        Health: ["Status", "Wounds", "Treatment", "History", "Description"],
+        Labor: ["Work details", "Workshops", "Locations", "Work animals"],
+        Military: ["Squad", "Uniform", "Kills"],
+        Personality: ["Traits", "Values", "Preferences", "Needs"]
+      }[tab] || []);
+    }
+
+    function unitTabLines(unit, tab, detail) {
+      if (tab === "Relations") return unitLines(unit, "relationLines");
+      if (tab === "Groups") return unitLines(unit, "groupLines");
+      if (tab === "Thoughts") return unitLines(unit, "thoughtLines");
+      if (tab === "Items") return unitLines(unit, "inventoryLines");
+      if (tab === "Skills") return unitLines(unit, "skillLines");
+      if (tab === "Rooms") return unitLines(unit, detail === "Assigned" ? "roomAssignmentLines" : "roomLines");
+      if (tab === "Health") {
+        return unitLines(unit, {
+          Status: "healthStatusLines",
+          Wounds: "healthWoundLines",
+          Treatment: "healthTreatmentLines",
+          History: "healthHistoryLines",
+          Description: "healthDescriptionLines"
+        }[detail] || "healthLines");
+      }
+      if (tab === "Labor") {
+        return unitLines(unit, {
+          "Work details": "laborWorkDetailLines",
+          Workshops: "laborWorkshopLines",
+          Locations: "laborLocationLines",
+          "Work animals": "laborWorkAnimalLines"
+        }[detail] || "laborLines");
+      }
+      if (tab === "Military") {
+        return unitLines(unit, {
+          Squad: "militarySquadLines",
+          Uniform: "militaryUniformLines",
+          Kills: "militaryKillLines"
+        }[detail] || "militaryLines");
+      }
+      if (tab === "Personality") {
+        return unitLines(unit, {
+          Traits: "personalityTraitLines",
+          Values: "personalityValueLines",
+          Preferences: "personalityPreferenceLines",
+          Needs: "personalityNeedLines"
+        }[detail] || "personalityLines");
+      }
+      return [];
+    }
+
+)JS" +
+R"JS(
+    function addUnitCell(grid, lines, extra = "") {
+      const cell = document.createElement("div");
+      cell.className = `unit-cell${extra ? " " + extra : ""}`;
+      const list = Array.isArray(lines) ? lines : [];
+      if (!list.length) {
+        const line = document.createElement("div");
+        line.className = "unit-line";
+        line.textContent = "";
+        cell.appendChild(line);
+      } else {
+        list.forEach((text) => {
+          const line = document.createElement("div");
+          const cls = unitLineClass(text);
+          line.className = `unit-line${cls ? " " + cls : ""}`;
+          line.textContent = text;
+          cell.appendChild(line);
+        });
+      }
+      grid.appendChild(cell);
+    }
+
+    function renderUnitOverview(unit) {
+      const grid = document.createElement("div");
+      grid.className = "unit-grid";
+      const ageSex = `${unit.age || "Age unknown"}, ${unit.sex === "female" ? "female" : unit.sex === "male" ? "male" : "unknown"}`;
+      addUnitCell(grid, [ageSex, unit.training || "", ...unitLines(unit, "overviewRelationLines")].filter(Boolean));
+      addUnitCell(grid, unitLines(unit, "overviewTraitLines", unitLines(unit, "statusLines", [unit.status || "Healthy"])));
+      addUnitCell(grid, ["Health", unit.bodySummary || "No health problems"]);
+      addUnitCell(grid, unitLines(unit, "overviewPositionLines", unit.flags || []));
+      addUnitCell(grid, []);
+      addUnitCell(grid, unitLines(unit, "overviewSquadLines"));
+      addUnitCell(grid, unitLines(unit, "overviewSkillLines"));
+
+      const needCell = document.createElement("div");
+      needCell.className = "unit-cell";
+      unitLines(unit, "overviewNeedLines").forEach((text) => {
+        const line = document.createElement("div");
+        line.className = `unit-line ${unitLineClass(text)}`;
+        line.textContent = text;
+        needCell.appendChild(line);
+      });
+      if (Array.isArray(unit.actions) && unit.actions.length) {
+        const box = document.createElement("div");
+        box.className = "unit-actions-box";
+        unit.actions.forEach((action) => {
+          const row = document.createElement("div");
+          row.className = `unit-action-row${action.available ? "" : " muted"}`;
+          row.innerHTML = `<span><b>${escapeHtml(action.hotkey || "")}</b>: ${escapeHtml(action.label || "")}</span><strong>${escapeHtml(action.value || "")}</strong>`;
+          box.appendChild(row);
+        });
+        needCell.appendChild(box);
+      }
+      grid.appendChild(needCell);
+      addUnitCell(grid, unitLines(unit, "overviewMemoryLines", unitLines(unit, "thoughtLines")), "wide");
+      return grid;
+    }
+
+)JS" +
+R"JS(
+    function renderUnitSheet() {
+      const data = currentUnitData || {};
+      const unit = data.unit || {};
+      const topTabs = ["Relations", "Groups", "Military", "Thoughts", "Personality"];
+      const subTabs = ["Overview", "Items", "Health", "Skills", "Rooms", "Labor"];
+      const details = unitDetailTabs(activeUnitTab);
+      if (details.length && !details.includes(activeUnitDetail)) activeUnitDetail = details[0];
+      if (!details.length) activeUnitDetail = null;
+
+      unitPortrait.textContent = (unit.name || "?").trim().slice(0, 1).toUpperCase() || "?";
+      unitTitle.textContent = unit.name || data.title || "Unit";
+      unitMeta.textContent = [unit.profession, unit.race].filter(Boolean).join(", ");
+      unitJob.textContent = unit.currentJob || "";
+      unitFlags.innerHTML = "";
+      (unit.flags || []).forEach((flag) => {
+        const span = document.createElement("span");
+        span.className = "unit-flag";
+        span.textContent = flag;
+        unitFlags.appendChild(span);
+      });
+
+      const paintTabs = (container, labels) => {
+        container.innerHTML = "";
+        labels.forEach((label) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = activeUnitTab === label ? "active" : "";
+          button.textContent = label;
+          button.addEventListener("click", () => {
+            activeUnitTab = label;
+            activeUnitDetail = null;
+            renderUnitSheet();
+          });
+          container.appendChild(button);
+        });
+      };
+      paintTabs(unitTabs, topTabs);
+      paintTabs(unitSubtabs, subTabs);
+
+      unitBody.innerHTML = "";
+      if (activeUnitTab === "Overview") {
+        unitBody.appendChild(renderUnitOverview(unit));
+      } else {
+        if (details.length) {
+          const detailBar = document.createElement("div");
+          detailBar.className = "unit-detail-tabs";
+          details.forEach((label) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = activeUnitDetail === label ? "active" : "";
+            button.textContent = label;
+            button.addEventListener("click", () => {
+              activeUnitDetail = label;
+              renderUnitSheet();
+            });
+            detailBar.appendChild(button);
+          });
+          unitBody.appendChild(detailBar);
+        }
+        unitBody.appendChild(renderUnitLines(unitTabLines(unit, activeUnitTab, activeUnitDetail)));
+      }
+
+      const tile = data.tile || {};
+      unitFooter.textContent = `Unit id: ${unit.id ?? ""} | Tile: ${tile.x ?? ""}, ${tile.y ?? ""}, ${tile.z ?? ""}`;
+      unitPanel.hidden = false;
+    }
+
+    async function openUnit(unitId) {
+      const qs = new URLSearchParams({ player, id: unitId });
+      const res = await fetch(`/unit?${qs.toString()}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text());
+      currentUnitData = await res.json();
+      activeUnitTab = "Overview";
+      activeUnitDetail = null;
+      renderUnitSheet();
+    }
+
     function panelIcon(row) {
       if (row.iconKey) return row.iconKey.slice(0, 2).toUpperCase();
       if (row.iconSheet === "zone") return "Z";
@@ -855,6 +1332,13 @@ R"JS(
 
       rows.forEach((row) => {
         const tr = document.createElement("tr");
+        if (row.unitId >= 0) {
+          tr.style.cursor = "pointer";
+          tr.title = "Open unit sheet";
+          tr.addEventListener("click", () => {
+            openUnit(row.unitId).catch((err) => setStatus(err.message));
+          });
+        }
         const name = document.createElement("td");
         const icon = document.createElement("span");
         icon.className = "info-icon";
@@ -885,8 +1369,21 @@ R"JS(
           const center = document.createElement("button");
           center.type = "button";
           center.textContent = "Center";
-          center.addEventListener("click", () => setCamera(pos.x, pos.y, pos.z).catch((err) => setStatus(err.message)));
+          center.addEventListener("click", (event) => {
+            event.stopPropagation();
+            setCamera(pos.x, pos.y, pos.z).catch((err) => setStatus(err.message));
+          });
           actions.appendChild(center);
+        }
+        if (row.unitId >= 0) {
+          const open = document.createElement("button");
+          open.type = "button";
+          open.textContent = "Open";
+          open.addEventListener("click", (event) => {
+            event.stopPropagation();
+            openUnit(row.unitId).catch((err) => setStatus(err.message));
+          });
+          actions.appendChild(open);
         }
         tr.appendChild(actions);
         tbody.appendChild(tr);
@@ -1205,6 +1702,16 @@ R"JS(
       infoPanel.hidden = true;
       currentPanel = null;
     });
+    document.getElementById("unitClose").addEventListener("click", () => {
+      unitPanel.hidden = true;
+      currentUnitData = null;
+    });
+    unitCenter.addEventListener("click", () => {
+      const tile = currentUnitData && currentUnitData.tile;
+      if (tile && Number.isFinite(Number(tile.x)) && Number.isFinite(Number(tile.y)) && Number.isFinite(Number(tile.z))) {
+        setCamera(Number(tile.x), Number(tile.y), Number(tile.z)).catch((err) => setStatus(err.message));
+      }
+    });
     document.getElementById("infoDock").querySelectorAll("button").forEach((button) => {
       button.addEventListener("click", () => {
         openPanel(button.dataset.panel, button.dataset.section, "").catch((err) => setStatus(err.message));
@@ -1253,7 +1760,11 @@ R"JS(
         event.preventDefault();
         zoomCamera("reset").catch((err) => setStatus(err.message));
       } else if (key === "escape") {
-        if (!infoPanel.hidden) {
+        if (!unitPanel.hidden) {
+          event.preventDefault();
+          unitPanel.hidden = true;
+          currentUnitData = null;
+        } else if (!infoPanel.hidden) {
           event.preventDefault();
           infoPanel.hidden = true;
           currentPanel = null;

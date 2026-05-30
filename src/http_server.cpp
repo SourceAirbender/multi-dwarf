@@ -10,6 +10,7 @@
 #include "json_util.h"
 #include "notifications.h"
 #include "placement.h"
+#include "unit_sheet.h"
 #include "web_assets.h"
 
 #include <atomic>
@@ -474,6 +475,30 @@ void register_routes(httplib::Server& server) {
 
         res.set_header("Cache-Control", "no-store");
         res.set_content(info_panel_json(panel), "application/json; charset=utf-8");
+    });
+
+    server.Get("/unit", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int unit_id = -1;
+        if (!query_int(req, "id", unit_id)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing id\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        UnitSheet unit;
+        Camera tile;
+        std::string err;
+        if (!unit_sheet_on_render_thread(unit_id, unit, tile, &err)) {
+            res.status = 404;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(unit_sheet_json(player, unit, tile), "application/json; charset=utf-8");
     });
 }
 

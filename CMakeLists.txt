@@ -12,6 +12,7 @@ dfhack_plugin(dfcapture_public
     src/notifications.cpp
     src/placement.cpp
     src/sdl_capture.cpp
+    src/unit_sheet.cpp
     src/web_assets.cpp
     LINK_LIBRARIES gdiplus ole32 ws2_32)
 
