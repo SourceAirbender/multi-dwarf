@@ -1,5 +1,6 @@
 #include "http_server.h"
 
+#include "building_zone.h"
 #include "client_state.h"
 #include "diagnostics.h"
 #include "hud.h"
@@ -7,10 +8,13 @@
 #include "httplib.h"
 #include "image_encoder.h"
 #include "info_panel.h"
+#include "interaction.h"
 #include "json_util.h"
+#include "labor.h"
 #include "notifications.h"
 #include "placement.h"
 #include "unit_sheet.h"
+#include "stockpile_panel.h"
 #include "web_assets.h"
 
 #include <atomic>
@@ -459,6 +463,25 @@ void register_routes(httplib::Server& server) {
         res.set_content(notifications_json(player, state), "application/json; charset=utf-8");
     });
 
+    server.Get("/zones", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string json = zones_json_on_core_thread(player, camera, &err);
+        if (json.empty()) {
+            res.status = 500;
+            res.set_content("zones failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
     server.Get("/panel", [](const httplib::Request& req, httplib::Response& res) {
         std::string panel_name = req.has_param("panel") ? req.get_param_value("panel") : "citizens";
         std::string section = req.has_param("section") ? req.get_param_value("section") : "";
@@ -500,6 +523,565 @@ void register_routes(httplib::Server& server) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(unit_sheet_json(player, unit, tile), "application/json; charset=utf-8");
     });
+
+    auto action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_param("action")) {
+            res.status = 400;
+            res.set_content("missing action\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        std::string err;
+        if (!action_on_core_thread(req.get_param_value("action"), &err)) {
+            res.status = 400;
+            res.set_content("action failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/action", action_handler);
+    server.Post("/action", action_handler);
+
+    auto stock_item_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int item_id = -1;
+        if (!query_int(req, "id", item_id) || !req.has_param("action")) {
+            res.status = 400;
+            res.set_content("missing id/action\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        StockItemActionResult result;
+        if (!stock_item_action_on_core_thread(item_id, req.get_param_value("action"), result)) {
+            res.status = 400;
+            res.set_content("item action failed: " + result.err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        if (result.has_camera) {
+            Camera camera = result.camera;
+            std::string err;
+            if (clamp_camera(camera, &err)) {
+                result.camera = camera;
+                set_player_camera(player, camera);
+            }
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(stock_item_action_json(item_id, result), "application/json; charset=utf-8");
+    };
+    server.Get("/stock-item-action", stock_item_action_handler);
+    server.Post("/stock-item-action", stock_item_action_handler);
+
+    server.Get("/inspect", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int px = 0;
+        int py = 0;
+        int frame_w = 0;
+        int frame_h = 0;
+        if (!query_int(req, "px", px) || !query_int(req, "py", py) ||
+            !query_int(req, "w", frame_w) || !query_int(req, "h", frame_h)) {
+            res.status = 400;
+            res.set_content("missing px/py/w/h\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        InspectResult result;
+        if (!inspect_on_core_thread(camera, px, py, frame_w, frame_h, result, &err)) {
+            res.status = 503;
+            res.set_content("inspect failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(inspect_json(player, result), "application/json; charset=utf-8");
+    });
+
+    server.Get("/hover", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int px = 0;
+        int py = 0;
+        int frame_w = 0;
+        int frame_h = 0;
+        if (!query_int(req, "px", px) || !query_int(req, "py", py) ||
+            !query_int(req, "w", frame_w) || !query_int(req, "h", frame_h)) {
+            res.status = 400;
+            res.set_content("missing px/py/w/h\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        HoverResult result;
+        if (!hover_on_core_thread(camera, px, py, frame_w, frame_h, result, &err)) {
+            res.status = 503;
+            res.set_content("hover failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(hover_json(player, result), "application/json; charset=utf-8");
+    });
+
+    server.Get("/labor", [](const httplib::Request& req, httplib::Response& res) {
+        int detail = -1;
+        query_int(req, "detail", detail);
+        LaborState state;
+        std::string err;
+        if (!build_labor_state(detail, state, &err)) {
+            res.status = 503;
+            res.set_content("labor failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(labor_json(state), "application/json; charset=utf-8");
+    });
+
+    auto labor_toggle_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int detail = -1;
+        int unit_id = -1;
+        int on = 0;
+        if (!query_int(req, "detail", detail) || !query_int(req, "unit", unit_id) ||
+            !query_int(req, "on", on)) {
+            res.status = 400;
+            res.set_content("missing detail/unit/on\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!labor_toggle_impl(detail, unit_id, on != 0, &err)) {
+            res.status = 400;
+            res.set_content("toggle failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/labor-toggle", labor_toggle_handler);
+    server.Post("/labor-toggle", labor_toggle_handler);
+
+    auto labor_mode_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int detail = -1;
+        int mode = -1;
+        if (!query_int(req, "detail", detail) || !query_int(req, "mode", mode)) {
+            res.status = 400;
+            res.set_content("missing detail/mode\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!labor_mode_impl(detail, mode, &err)) {
+            res.status = 400;
+            res.set_content("mode failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/labor-mode", labor_mode_handler);
+    server.Post("/labor-mode", labor_mode_handler);
+
+    auto labor_specialist_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int unit_id = -1;
+        int on = 0;
+        if (!query_int(req, "unit", unit_id) || !query_int(req, "on", on)) {
+            res.status = 400;
+            res.set_content("missing unit/on\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!labor_specialist_impl(unit_id, on != 0, &err)) {
+            res.status = 400;
+            res.set_content("specialist failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/labor-specialist", labor_specialist_handler);
+    server.Post("/labor-specialist", labor_specialist_handler);
+
+    auto labor_create_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string name = req.has_param("name") ? req.get_param_value("name") : "";
+        int index = -1;
+        std::string err;
+        if (!labor_create_impl(name, &index, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"index\":" + std::to_string(index) + "}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/labor-create", labor_create_handler);
+    server.Post("/labor-create", labor_create_handler);
+
+    auto labor_rename_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int detail = -1;
+        if (!query_int(req, "detail", detail) || !req.has_param("name")) {
+            res.status = 400;
+            res.set_content("missing detail/name\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!labor_rename_impl(detail, req.get_param_value("name"), &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/labor-rename", labor_rename_handler);
+    server.Post("/labor-rename", labor_rename_handler);
+
+    auto labor_delete_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int detail = -1;
+        if (!query_int(req, "detail", detail)) {
+            res.status = 400;
+            res.set_content("missing detail\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!labor_delete_impl(detail, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/labor-delete", labor_delete_handler);
+    server.Post("/labor-delete", labor_delete_handler);
+
+    auto labor_task_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int detail = -1;
+        int labor = -1;
+        int on = 0;
+        if (!query_int(req, "detail", detail) || !query_int(req, "labor", labor) ||
+            !query_int(req, "on", on)) {
+            res.status = 400;
+            res.set_content("missing detail/labor/on\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!labor_task_toggle_impl(detail, labor, on != 0, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/labor-task-toggle", labor_task_handler);
+    server.Post("/labor-task-toggle", labor_task_handler);
+
+    server.Get("/building-info", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        BuildingPanelInfo info;
+        if (!building_info_on_core_thread(id, info)) {
+            res.status = 404;
+            res.set_content("{\"error\":\"building not found\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(building_info_json(info) + "\n", "application/json; charset=utf-8");
+    });
+
+    auto building_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string action = req.has_param("action") ? req.get_param_value("action") : "";
+        std::string err;
+        if (!building_action_on_core_thread(id, action, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/building-action", building_action_handler);
+    server.Post("/building-action", building_action_handler);
+
+    server.Get("/zone-info", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        ZonePanelInfo info;
+        if (!zone_info_on_core_thread(id, info)) {
+            res.status = 404;
+            res.set_content("{\"error\":\"zone not found\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(zone_info_json(info) + "\n", "application/json; charset=utf-8");
+    });
+
+    auto zone_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string action = req.has_param("action") ? req.get_param_value("action") : "";
+        std::string err;
+        if (!zone_action_on_core_thread(id, action, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/zone-action", zone_action_handler);
+    server.Post("/zone-action", zone_action_handler);
+
+    server.Get("/zone-units", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = zone_units_json_on_core_thread(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("zone units failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json + "\n", "application/json; charset=utf-8");
+    });
+
+    auto zone_unit_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int unit = -1;
+        int assign = 0;
+        if (!query_int(req, "id", id) || !query_int(req, "unit", unit)) {
+            res.status = 400;
+            res.set_content("missing id/unit\n", "text/plain; charset=utf-8");
+            return;
+        }
+        query_int(req, "assign", assign);
+        std::string kind = req.has_param("kind") ? req.get_param_value("kind") : "unit";
+        std::string err;
+        if (!zone_unit_action_on_core_thread(id, unit, assign != 0, kind, &err)) {
+            res.status = 400;
+            res.set_content("zone unit action failed: " + err + "\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/zone-unit-action", zone_unit_action_handler);
+    server.Post("/zone-unit-action", zone_unit_action_handler);
+
+    server.Get("/zone-owners", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = zone_owners_json_on_core_thread(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("zone owners failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json + "\n", "application/json; charset=utf-8");
+    });
+
+    auto zone_owner_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int unit = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        query_int(req, "unit", unit);
+        std::string err;
+        if (!zone_owner_action_on_core_thread(id, unit, &err)) {
+            res.status = 400;
+            res.set_content("zone owner action failed: " + err + "\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/zone-owner-action", zone_owner_action_handler);
+    server.Post("/zone-owner-action", zone_owner_action_handler);
+
+    server.Get("/stockpile-info", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string json = stockpile_info_json_on_core_thread(id);
+        if (json.empty()) {
+            res.status = 404;
+            res.set_content("not a stockpile\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
+    auto stockpile_rename_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id) || !req.has_param("name")) {
+            res.status = 400;
+            res.set_content("missing id/name\n", "text/plain; charset=utf-8");
+            return;
+        }
+        bool ok = rename_stockpile_on_core_thread(id, req.get_param_value("name"));
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(ok ? "{\"ok\":true}\n" : "{\"ok\":false}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-rename", stockpile_rename_handler);
+    server.Post("/stockpile-rename", stockpile_rename_handler);
+
+    auto stockpile_remove_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        bool ok = remove_stockpile_on_core_thread(id);
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(ok ? "{\"ok\":true}\n" : "{\"ok\":false}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-remove", stockpile_remove_handler);
+    server.Post("/stockpile-remove", stockpile_remove_handler);
+
+    auto stockpile_links_only_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int on = 0;
+        if (!query_int(req, "id", id) || !query_int(req, "on", on)) {
+            res.status = 400;
+            res.set_content("missing id/on\n", "text/plain; charset=utf-8");
+            return;
+        }
+        bool ok = set_stockpile_links_only_on_core_thread(id, on != 0);
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(ok ? "{\"ok\":true}\n" : "{\"ok\":false}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-links-only", stockpile_links_only_handler);
+    server.Post("/stockpile-links-only", stockpile_links_only_handler);
+
+    auto stockpile_storage_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        int barrels = -1;
+        int bins = -1;
+        int wheelbarrows = -1;
+        query_int(req, "barrels", barrels);
+        query_int(req, "bins", bins);
+        query_int(req, "wheelbarrows", wheelbarrows);
+        bool ok = set_stockpile_storage_on_core_thread(id, barrels, bins, wheelbarrows);
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(ok ? "{\"ok\":true}\n" : "{\"ok\":false}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-storage", stockpile_storage_handler);
+    server.Post("/stockpile-storage", stockpile_storage_handler);
+
+    auto stockpile_link_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int target = -1;
+        int on = 1;
+        if (!query_int(req, "id", id) || !query_int(req, "target", target) ||
+            !req.has_param("mode")) {
+            res.status = 400;
+            res.set_content("missing id/target/mode\n", "text/plain; charset=utf-8");
+            return;
+        }
+        query_int(req, "on", on);
+        std::string err;
+        if (!set_stockpile_link_on_core_thread(id, target, req.get_param_value("mode"),
+                                               on != 0, &err)) {
+            res.status = 400;
+            res.set_content("link failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-link", stockpile_link_handler);
+    server.Post("/stockpile-link", stockpile_link_handler);
+
+    auto stockpile_set_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id) || !req.has_param("preset")) {
+            res.status = 400;
+            res.set_content("missing id/preset\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string mode = req.has_param("mode") ? req.get_param_value("mode") : "set";
+        std::string err;
+        if (!set_stockpile_category_on_core_thread(id, req.get_param_value("preset"), mode, &err)) {
+            res.status = 400;
+            res.set_content("set failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-set", stockpile_set_handler);
+    server.Post("/stockpile-set", stockpile_set_handler);
 }
 
 } // namespace

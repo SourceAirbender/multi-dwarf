@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <cstdint>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,8 @@ struct UnitSheet {
 };
 
 UnitSheet build_unit_sheet(df::unit* unit);
+
+void append_unit_sheet_json(std::ostringstream& body, const UnitSheet& unit);
 
 std::string unit_sheet_json(const std::string& player,
                             const UnitSheet& unit,

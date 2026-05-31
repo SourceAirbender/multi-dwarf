@@ -179,6 +179,10 @@ struct RenderThreadUnitRequest {
 
 } // namespace
 
+void append_unit_sheet_json(std::ostringstream& body, const UnitSheet& unit) {
+    append_unit_json(body, unit);
+}
+
 const char* yes_no(bool value) {
     return value ? "Yes" : "No";
 }
@@ -1154,7 +1158,7 @@ std::string unit_sheet_json(const std::string& player,
          << "\"title\":" << json_string(unit.name) << ","
          << "\"tile\":{\"x\":" << tile.x << ",\"y\":" << tile.y << ",\"z\":" << tile.z << "},"
          << "\"unit\":";
-    append_unit_json(body, unit);
+    append_unit_sheet_json(body, unit);
     body << "}\n";
     return body.str();
 }

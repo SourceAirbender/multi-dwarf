@@ -653,6 +653,10 @@ bool read_host_camera(Camera& camera, std::string* err) {
     return run_read_host_camera(camera, err);
 }
 
+std::recursive_mutex& capture_state_mutex() {
+    return g_capture_mutex;
+}
+
 bool clamp_camera(Camera& camera, std::string* err) {
     auto request = std::make_shared<RenderThreadCameraRequest>();
     request->camera = camera;
