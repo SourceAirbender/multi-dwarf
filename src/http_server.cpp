@@ -11,6 +11,7 @@
 #include "interaction.h"
 #include "json_util.h"
 #include "labor.h"
+#include "lua_bridge.h"
 #include "notifications.h"
 #include "placement.h"
 #include "unit_sheet.h"
@@ -19,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -61,6 +63,41 @@ std::string clients_json() {
     }
     body << "]}\n";
     return body.str();
+}
+
+std::string build_options_from_request(const httplib::Request& req) {
+    static const char* option_names[] = {
+        "hollow", "weapon_count",
+        "plate_units", "plate_water", "plate_magma", "plate_track", "plate_citizens",
+        "plate_resets", "unit_min", "unit_max", "water_min", "water_max", "magma_min",
+        "magma_max", "track_min", "track_max", "track_dump", "dump_x", "dump_y",
+        "friction", "speed",
+    };
+    std::ostringstream out;
+    for (auto name : option_names) {
+        int value = 0;
+        if (query_int(req, name, value))
+            out << name << "=" << value << ";";
+    }
+    for (int i = 0; i < 4; ++i) {
+        std::string key = "mat" + std::to_string(i);
+        if (!req.has_param(key.c_str()))
+            continue;
+        std::string value = req.get_param_value(key.c_str());
+        bool clean = value == "closest";
+        if (!clean) {
+            clean = !value.empty() && value.size() < 32;
+            for (char c : value) {
+                if (!(std::isdigit(static_cast<unsigned char>(c)) || c == '-' || c == ':')) {
+                    clean = false;
+                    break;
+                }
+            }
+        }
+        if (clean)
+            out << key << "=" << value << ";";
+    }
+    return out.str();
 }
 
 void register_routes(httplib::Server& server) {
@@ -352,6 +389,160 @@ void register_routes(httplib::Server& server) {
     };
     server.Get("/designate", designate_handler);
     server.Post("/designate", designate_handler);
+
+    server.Get("/lua-ping", [](const httplib::Request& req, httplib::Response& res) {
+        int value = 41;
+        query_int(req, "n", value);
+        int out = 0;
+        std::string err;
+        if (!lua_ping(value, out, &err)) {
+            res.status = 500;
+            res.set_content("lua ping failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"value\":" + std::to_string(out) + "}\n",
+                        "application/json; charset=utf-8");
+    });
+
+    server.Get("/build-catalog", [](const httplib::Request&, httplib::Response& res) {
+        std::string err;
+        std::string json = building_catalog_json_via_lua(&err);
+        if (json.empty()) {
+            res.status = 500;
+            res.set_content("catalog failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
+    server.Get("/build-materials", [](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_param("token")) {
+            res.status = 400;
+            res.set_content("missing token\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = build_materials_json_via_lua(req.get_param_value("token"), &err);
+        if (json.empty()) {
+            res.status = 500;
+            res.set_content("materials failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
+    auto build_place_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int px = 0, py = 0, frame_w = 0, frame_h = 0;
+        if (!query_int(req, "px", px) || !query_int(req, "py", py) ||
+                !query_int(req, "w", frame_w) || !query_int(req, "h", frame_h) ||
+                !req.has_param("token")) {
+            res.status = 400;
+            res.set_content("missing px/py/w/h/token\n", "text/plain; charset=utf-8");
+            return;
+        }
+        int px2 = px, py2 = py, direction = -1;
+        query_int(req, "px2", px2);
+        query_int(req, "py2", py2);
+        query_int(req, "direction", direction);
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        int count = 0;
+        int id = -1;
+        std::string options = build_options_from_request(req);
+        if (!place_building_via_lua(camera, px, py, px2, py2, frame_w, frame_h,
+                                    req.get_param_value("token"), direction, options,
+                                    count, id, &err)) {
+            res.status = 400;
+            res.set_content("building failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"count\":" + std::to_string(count) +
+                        ",\"id\":" + std::to_string(id) + "}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/build-place", build_place_handler);
+    server.Post("/build-place", build_place_handler);
+
+    auto stockpile_create_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int px = 0, py = 0, frame_w = 0, frame_h = 0;
+        if (!query_int(req, "px", px) || !query_int(req, "py", py) ||
+                !query_int(req, "w", frame_w) || !query_int(req, "h", frame_h)) {
+            res.status = 400;
+            res.set_content("missing px/py/w/h\n", "text/plain; charset=utf-8");
+            return;
+        }
+        int px2 = px, py2 = py;
+        query_int(req, "px2", px2);
+        query_int(req, "py2", py2);
+        std::string preset = req.has_param("preset") ? req.get_param_value("preset") : "all";
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        int id = -1;
+        if (!create_stockpile_via_lua(camera, px, py, px2, py2, frame_w, frame_h,
+                                      preset, id, &err)) {
+            res.status = 400;
+            res.set_content("stockpile failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"id\":" + std::to_string(id) + "}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile", stockpile_create_handler);
+    server.Post("/stockpile", stockpile_create_handler);
+
+    auto zone_create_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int px = 0, py = 0, frame_w = 0, frame_h = 0;
+        if (!query_int(req, "px", px) || !query_int(req, "py", py) ||
+                !query_int(req, "w", frame_w) || !query_int(req, "h", frame_h)) {
+            res.status = 400;
+            res.set_content("missing px/py/w/h\n", "text/plain; charset=utf-8");
+            return;
+        }
+        int px2 = px, py2 = py;
+        query_int(req, "px2", px2);
+        query_int(req, "py2", py2);
+        std::string type = req.has_param("type") ? req.get_param_value("type") : "MeetingHall";
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        int id = -1;
+        if (!create_zone_via_lua(camera, px, py, px2, py2, frame_w, frame_h, type, id, &err)) {
+            res.status = 400;
+            res.set_content("zone failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"id\":" + std::to_string(id) + "}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/zone", zone_create_handler);
+    server.Post("/zone", zone_create_handler);
 
     server.Get("/frame.jpg", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
@@ -834,6 +1025,109 @@ void register_routes(httplib::Server& server) {
     server.Get("/building-action", building_action_handler);
     server.Post("/building-action", building_action_handler);
 
+    server.Get("/workshop-info", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = workshop_info_json_via_lua(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("workshop info failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
+    auto workshop_add_job_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id) || !req.has_param("task")) {
+            res.status = 400;
+            res.set_content("missing id/task\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!workshop_add_job_via_lua(id, req.get_param_value("task"), &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/workshop-add-job", workshop_add_job_handler);
+    server.Post("/workshop-add-job", workshop_add_job_handler);
+
+    auto workshop_job_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int job_id = -1;
+        if (!query_int(req, "id", id) || !query_int(req, "job", job_id) ||
+                !req.has_param("action")) {
+            res.status = 400;
+            res.set_content("missing id/job/action\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!workshop_job_action_via_lua(id, job_id, req.get_param_value("action"), &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/workshop-job-action", workshop_job_action_handler);
+    server.Post("/workshop-job-action", workshop_job_action_handler);
+
+    auto workshop_worker_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int unit = -1;
+        int assign = 0;
+        if (!query_int(req, "id", id) || !query_int(req, "unit", unit)) {
+            res.status = 400;
+            res.set_content("missing id/unit\n", "text/plain; charset=utf-8");
+            return;
+        }
+        query_int(req, "assign", assign);
+        std::string err;
+        if (!workshop_worker_action_via_lua(id, unit, assign != 0, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/workshop-worker-action", workshop_worker_action_handler);
+    server.Post("/workshop-worker-action", workshop_worker_action_handler);
+
+    auto workshop_workers_clear_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!workshop_workers_clear_via_lua(id, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/workshop-workers-clear", workshop_workers_clear_handler);
+    server.Post("/workshop-workers-clear", workshop_workers_clear_handler);
+
     server.Get("/zone-info", [](const httplib::Request& req, httplib::Response& res) {
         int id = -1;
         if (!query_int(req, "id", id)) {
@@ -954,6 +1248,48 @@ void register_routes(httplib::Server& server) {
     };
     server.Get("/zone-owner-action", zone_owner_action_handler);
     server.Post("/zone-owner-action", zone_owner_action_handler);
+
+    server.Get("/zone-locations", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = zone_locations_json_via_lua(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("zone locations failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json + "\n", "application/json; charset=utf-8");
+    });
+
+    auto zone_location_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int location = -1;
+        if (!query_int(req, "id", id) || !req.has_param("action")) {
+            res.status = 400;
+            res.set_content("missing id/action\n", "text/plain; charset=utf-8");
+            return;
+        }
+        query_int(req, "location", location);
+        std::string kind = req.has_param("kind") ? req.get_param_value("kind") : "";
+        std::string err;
+        if (!zone_location_action_via_lua(id, req.get_param_value("action"), kind,
+                                          location, &err)) {
+            res.status = 400;
+            res.set_content("zone location action failed: " + err + "\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/zone-location-action", zone_location_action_handler);
+    server.Post("/zone-location-action", zone_location_action_handler);
 
     server.Get("/stockpile-info", [](const httplib::Request& req, httplib::Response& res) {
         int id = -1;
@@ -1082,6 +1418,97 @@ void register_routes(httplib::Server& server) {
     };
     server.Get("/stockpile-set", stockpile_set_handler);
     server.Post("/stockpile-set", stockpile_set_handler);
+
+    auto stockpile_group_from_request = [](const httplib::Request& req) {
+        return req.has_param("group") ? req.get_param_value("group") : std::string();
+    };
+
+    server.Get("/stockpile-cat-groups", [](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_param("cat")) {
+            res.status = 400;
+            res.set_content("missing cat\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = stockpile_groups_via_lua(req.get_param_value("cat"), &err);
+        if (json.empty()) {
+            res.status = 500;
+            res.set_content("groups failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
+    server.Get("/stockpile-items", [stockpile_group_from_request](const httplib::Request& req,
+                                                                 httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id) || !req.has_param("cat")) {
+            res.status = 400;
+            res.set_content("missing id/cat\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = stockpile_items_via_lua(id, req.get_param_value("cat"),
+                                                   stockpile_group_from_request(req), &err);
+        if (json.empty()) {
+            res.status = 500;
+            res.set_content("items failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
+    auto stockpile_toggle_item_handler =
+        [stockpile_group_from_request](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int idx = -1;
+        int on = 0;
+        if (!query_int(req, "id", id) || !req.has_param("cat") ||
+                !query_int(req, "idx", idx)) {
+            res.status = 400;
+            res.set_content("missing id/cat/idx\n", "text/plain; charset=utf-8");
+            return;
+        }
+        query_int(req, "on", on);
+        std::string err;
+        if (!stockpile_toggle_item_via_lua(id, req.get_param_value("cat"),
+                                           stockpile_group_from_request(req),
+                                           idx, on != 0, &err)) {
+            res.status = 400;
+            res.set_content("toggle failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-toggle-item", stockpile_toggle_item_handler);
+    server.Post("/stockpile-toggle-item", stockpile_toggle_item_handler);
+
+    auto stockpile_toggle_all_handler =
+        [stockpile_group_from_request](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int on = 0;
+        if (!query_int(req, "id", id) || !req.has_param("cat")) {
+            res.status = 400;
+            res.set_content("missing id/cat\n", "text/plain; charset=utf-8");
+            return;
+        }
+        query_int(req, "on", on);
+        std::string err;
+        if (!stockpile_toggle_all_via_lua(id, req.get_param_value("cat"),
+                                          stockpile_group_from_request(req),
+                                          on != 0, &err)) {
+            res.status = 400;
+            res.set_content("toggle-all failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-toggle-all", stockpile_toggle_all_handler);
+    server.Post("/stockpile-toggle-all", stockpile_toggle_all_handler);
 }
 
 } // namespace
