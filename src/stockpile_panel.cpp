@@ -60,6 +60,14 @@ bool ptr_vector_remove_all(std::vector<T*>& vec, T* value) {
     return vec.size() != old_size;
 }
 
+template <typename T>
+void ptr_vector_replace_all(std::vector<T*>& vec, T* old_value, T* new_value) {
+    for (auto& entry : vec) {
+        if (entry == old_value)
+            entry = new_value;
+    }
+}
+
 std::string stockpile_building_label(df::building* b) {
     if (!b)
         return "";
@@ -127,6 +135,36 @@ void append_stockpile_link_targets(std::ostringstream& out, df::building_stockpi
         }
     }
     out << "]";
+}
+
+void remove_self_links(df::building_stockpilest* sp) {
+    if (!sp)
+        return;
+    ptr_vector_remove_all(sp->links.give_to_pile, sp);
+    ptr_vector_remove_all(sp->links.take_from_pile, sp);
+    ptr_vector_remove_all(sp->links.give_to_workshop, static_cast<df::building*>(sp));
+    ptr_vector_remove_all(sp->links.take_from_workshop, static_cast<df::building*>(sp));
+}
+
+void replace_stockpile_link_refs(df::building_stockpilest* old_sp,
+                                 df::building_stockpilest* new_sp) {
+    auto world = df::global::world;
+    if (!world || !old_sp || !new_sp)
+        return;
+    for (auto b : world->buildings.all) {
+        if (!b)
+            continue;
+        auto links = b->getStockpileLinks();
+        if (!links)
+            continue;
+        ptr_vector_replace_all(links->give_to_pile, old_sp, new_sp);
+        ptr_vector_replace_all(links->take_from_pile, old_sp, new_sp);
+        ptr_vector_replace_all(links->give_to_workshop, static_cast<df::building*>(old_sp),
+                               static_cast<df::building*>(new_sp));
+        ptr_vector_replace_all(links->take_from_workshop, static_cast<df::building*>(old_sp),
+                               static_cast<df::building*>(new_sp));
+    }
+    remove_self_links(new_sp);
 }
 
 int16_t clamp_storage_value(int value) {
@@ -385,6 +423,51 @@ bool set_stockpile_category_on_core_thread(int32_t id, const std::string& preset
             if (err) *err = "unknown stockpile category: " + preset;
             return false;
         }
+        return true;
+    });
+}
+
+bool finish_stockpile_repaint_on_core_thread(int32_t old_id, int32_t new_id,
+                                             int32_t& final_id, std::string* err) {
+    return run_stockpile_locked([&]() -> bool {
+        auto old_sp = find_stockpile(old_id);
+        auto new_sp = find_stockpile(new_id);
+        if (!old_sp || !new_sp) {
+            if (err) *err = "old or new stockpile not found";
+            return false;
+        }
+
+        const auto settings = old_sp->settings;
+        const auto stockpile_flag = old_sp->stockpile_flag;
+        const auto links = old_sp->links;
+        const auto name = old_sp->name;
+        const int32_t stockpile_number = old_sp->stockpile_number;
+        const int16_t max_barrels = old_sp->storage.max_barrels;
+        const int16_t max_bins = old_sp->storage.max_bins;
+        const int16_t max_wheelbarrows = old_sp->storage.max_wheelbarrows;
+
+        new_sp->settings = settings;
+        new_sp->stockpile_flag = stockpile_flag;
+        new_sp->links = links;
+        new_sp->name = name;
+        new_sp->storage.max_barrels = max_barrels;
+        new_sp->storage.max_bins = max_bins;
+        new_sp->storage.max_wheelbarrows = max_wheelbarrows;
+        new_sp->storage.container_type.clear();
+        new_sp->storage.container_item_id.clear();
+        new_sp->storage.container_x.clear();
+        new_sp->storage.container_y.clear();
+
+        replace_stockpile_link_refs(old_sp, new_sp);
+
+        old_sp->stockpile_number = -1;
+        if (!Buildings::deconstruct(old_sp)) {
+            if (err) *err = "old stockpile could not be removed";
+            return false;
+        }
+
+        new_sp->stockpile_number = stockpile_number;
+        final_id = new_sp->id;
         return true;
     });
 }

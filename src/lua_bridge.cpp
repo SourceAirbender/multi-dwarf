@@ -410,4 +410,226 @@ bool zone_location_action_via_lua(int32_t zone_id, const std::string& action,
     return result_ok;
 }
 
+std::string order_json_via_lua(const char* function_name, std::string* err) {
+    diagnostics_log(std::string("orders endpoint begin: ") + function_name);
+    std::string json = json_returning_lua(function_name, err);
+    if (json.empty()) {
+        diagnostics_log(std::string("orders endpoint failed: ") + function_name +
+                        ": " + (err ? *err : ""));
+    } else {
+        diagnostics_log(std::string("orders endpoint end: ") + function_name +
+                        " bytes=" + std::to_string(json.size()));
+    }
+    return json;
+}
+
+std::string order_json_via_lua_str(const char* function_name, const std::string& arg,
+                                   std::string* err) {
+    std::string json;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua(function_name, std::make_tuple(arg), 1,
+            [&](lua_State* L) {
+                if (lua_isstring(L, -1))
+                    json = lua_tostring(L, -1);
+            }, err);
+    });
+    return ok ? json : "";
+}
+
+bool create_order_via_lua(const std::string& key, int32_t amount,
+                          const std::string& frequency, int32_t workshop_id,
+                          std::string* msg, std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("create_order", std::make_tuple(key, amount, frequency, workshop_id), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok) {
+        if (err) *err = result_msg.empty() ? "create order failed" : result_msg;
+        return false;
+    }
+    if (msg) *msg = result_msg;
+    return true;
+}
+
+bool import_order_preset_via_lua(const std::string& name, std::string* msg,
+                                 std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("import_order_preset", std::make_tuple(name), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok) {
+        if (err) *err = result_msg.empty() ? "import failed" : result_msg;
+        return false;
+    }
+    if (msg) *msg = result_msg;
+    return true;
+}
+
+bool cancel_order_via_lua(int32_t id, std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("cancel_order", std::make_tuple(id), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "cancel failed" : result_msg;
+    return result_ok;
+}
+
+bool adjust_order_via_lua(int32_t id, int32_t amount, const std::string& frequency,
+                          std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("adjust_order", std::make_tuple(id, amount, frequency), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "adjust failed" : result_msg;
+    return result_ok;
+}
+
+bool add_item_condition_via_lua(int32_t id, const std::string& compare, int32_t value,
+                                const std::string& item, const std::string& material,
+                                const std::string& adjective, std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("add_item_condition",
+            std::make_tuple(id, compare, value, item, material, adjective), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "add condition failed" : result_msg;
+    return result_ok;
+}
+
+bool add_order_condition_via_lua(int32_t id, int32_t other_id, const std::string& type,
+                                 std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("add_order_condition", std::make_tuple(id, other_id, type), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "add dependency failed" : result_msg;
+    return result_ok;
+}
+
+bool remove_condition_via_lua(int32_t id, const std::string& kind, int32_t index,
+                              std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("remove_condition", std::make_tuple(id, kind, index), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "remove condition failed" : result_msg;
+    return result_ok;
+}
+
+bool set_order_max_workshops_via_lua(int32_t id, int32_t max_workshops,
+                                     std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("set_order_max_workshops", std::make_tuple(id, max_workshops), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "update failed" : result_msg;
+    return result_ok;
+}
+
+bool set_order_workshop_via_lua(int32_t id, int32_t workshop_id, std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("set_order_workshop", std::make_tuple(id, workshop_id), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "update failed" : result_msg;
+    return result_ok;
+}
+
+bool reorder_order_via_lua(int32_t id, int32_t direction, std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("reorder_order", std::make_tuple(id, direction), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "reorder failed" : result_msg;
+    return result_ok;
+}
+
 } // namespace dfcapture_public

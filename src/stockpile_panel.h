@@ -14,5 +14,7 @@ bool set_stockpile_link_on_core_thread(int32_t id, int32_t target_id, const std:
                                        bool on, std::string* err);
 bool set_stockpile_category_on_core_thread(int32_t id, const std::string& preset,
                                            const std::string& mode, std::string* err);
+bool finish_stockpile_repaint_on_core_thread(int32_t old_id, int32_t new_id,
+                                             int32_t& final_id, std::string* err);
 
 } // namespace dfcapture_public

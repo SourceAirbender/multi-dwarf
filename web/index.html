@@ -1,0 +1,176 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DFCapture</title>
+<link rel="stylesheet" href="/css/dfcapture.css">
+</head>
+<body tabindex="0">
+<img id="view" tabindex="0" alt="">
+<canvas id="zoneOverlay" aria-hidden="true"></canvas>
+<div id="hud">
+  <div id="leftBadges">
+    <button class="badge alert-badge" data-panel="alerts" title="Announcements">
+      <span class="announcement-main-icon" aria-hidden="true"></span>
+    </button>
+  </div>
+  <div id="topbar" class="df-panel">
+    <div class="fort-lines">
+      <div id="fortName">Fortress</div>
+      <div id="siteName">Site</div>
+      <div id="rankName">Outpost</div>
+    </div>
+    <div class="status-group">
+      <span class="label">Pop</span>
+      <div class="moods" id="moods">
+        <span class="mood-cell"><span class="mood m0">&#9786;</span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood m1">&#9786;</span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood m2">&#9786;</span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood m3">&#9786;</span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood m4">&#9786;</span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood m5">&#9786;</span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood m6">&#9786;</span><span class="mood-n">0</span></span>
+      </div>
+      <span id="population">0</span>
+    </div>
+    <button class="top-button" data-panel="stocks">Stocks</button>
+    <div class="status-group hide-small"><span class="label">Food</span><span id="food" class="gold">~0</span></div>
+    <div class="status-group hide-small"><span class="label gold">Drink</span><span id="drink">~0</span></div>
+    <div class="moon" id="moon"></div>
+    <div class="fort-lines">
+      <div><span id="dateDay">1st</span> <span id="dateMonth">Granite</span></div>
+      <div id="dateSeason">Early Spring</div>
+      <div>Year <span id="dateYear">0</span></div>
+    </div>
+  </div>
+  <div id="pauseRow">
+    <button class="square-button" data-action="pause" title="Pause">&#10074;&#10074;</button>
+    <button class="square-button" data-action="play" title="Play">&#9654;</button>
+    <button class="square-button" id="settingsBtn" title="Settings">&#9881;</button>
+  </div>
+  <div id="settingsMenu">
+    <h3>Settings</h3>
+    <div class="set-row" id="setInstantDig" title="Toggle how dig/zone/stockpile selections are drawn while you drag">
+      <div class="set-toggle"></div>
+      <div class="set-label">
+        <b>Instant designations</b>
+        <span>Draw the drag selection in your browser with no lag. Off = Dwarf Fortress' grid (smoother look, slight delay while dragging).</span>
+      </div>
+    </div>
+    <div class="set-row" id="setPredictivePan" title="Hide camera-pan latency by shifting the current frame immediately while the server catches up">
+      <div class="set-toggle"></div>
+      <div class="set-label">
+        <b>Predictive panning</b>
+        <span>Pan the camera instantly by sliding the current frame, then snap to the server frame as it catches up. Off = wait for each panned frame.</span>
+      </div>
+    </div>
+    <div class="set-row" id="setUnitImages" title="Toggle native unit portrait/body image requests">
+      <div class="set-toggle"></div>
+      <div class="set-label">
+        <b>Unit images</b>
+        <span>Show native portraits and body sprites in unit lists. Off = text glyphs only, avoiding DF unit texture generation.</span>
+      </div>
+    </div>
+  </div>
+  <div id="rightHud">
+    <div id="minimap" class="df-panel">
+      <canvas id="minimapGrid" title="Click to center your camera here"></canvas>
+      <div id="elevation">Elevation 0</div>
+      <div id="minimapBtns">
+        <button class="square-button" data-recenter="surface" title="Recenter on the surface at this location">&#9650;</button>
+        <button class="square-button" data-recenter="deepest" title="Recenter on the deepest discovered area">&#9660;</button>
+      </div>
+    </div>
+    <div id="zButtons">
+      <button class="square-button" data-move-z="1" title="Up one elevation">+</button>
+      <button class="square-button" data-move-z="-1" title="Down one elevation">-</button>
+      <button class="square-button" data-panel="water" title="Liquids">~</button>
+    </div>
+  </div>
+  <div id="digSubmenu" class="tool-group" aria-hidden="true">
+    <button class="tool-button" data-dig-tool="dig" title="Regular dig"></button>
+    <button class="tool-button" data-dig-tool="stairs" title="Dig stairwell"></button>
+    <button class="tool-button" data-dig-tool="ramp" title="Dig ramp"></button>
+    <button class="tool-button" data-dig-tool="channel" title="Dig channel"></button>
+    <button class="tool-button" data-dig-tool="remove" title="Remove constructions"></button>
+    <button class="dig-expand" data-dig-expand title="More dig options (priority, marker, mine mode)">&#9656;</button>
+    <div class="dig-adv">
+      <button class="dig-mode" data-dig-mode="0" title="Dig every tile selected (v)">All</button>
+      <button class="dig-mode" data-dig-mode="1" title="Dig only ore/gems selected, and automine any of the same type uncovered (Shift+V)">Auto</button>
+      <button class="dig-mode" data-dig-mode="2" title="Dig only ore and gems selected (o)">Ore</button>
+      <button class="dig-mode" data-dig-mode="3" title="Dig only gems selected">Gem</button>
+      <span class="dig-sep"></span>
+      <button class="dig-opt" data-dig-opt="marker" title="Marker mode: place designations as blueprint markers (not active until toggled live)">&#9873;</button>
+      <button class="dig-opt" data-dig-opt="warmdamp" title="Mark for uninterrupted digging through damp or warm tiles (Ctrl+d)">&#8779;</button>
+      <span class="dig-sep"></span>
+      <div class="dig-prio" title="Designation priority (1 = highest, default 4)">
+        <button data-dig-prio="1">1</button><button data-dig-prio="2">2</button><button data-dig-prio="3">3</button><button data-dig-prio="4">4</button><button data-dig-prio="5">5</button><button data-dig-prio="6">6</button><button data-dig-prio="7">7</button>
+      </div>
+    </div>
+  </div>
+  <div id="plantSubmenu" class="tool-group" aria-hidden="true">
+    <button class="tool-button" data-plant-tool="chop" title="Set tree chopping orders"></button>
+    <button class="tool-button" data-plant-tool="gather" title="Set plant gathering orders"></button>
+    <button class="dig-expand" data-plant-expand title="More plant order options (priority, marker)">&#9656;</button>
+    <div class="dig-adv plant-adv">
+      <button class="dig-opt" data-dig-opt="marker" title="Blueprint mode: place plant orders as inactive markers">M</button>
+      <span class="dig-sep"></span>
+      <div class="dig-prio" title="Designation priority (1 = highest, default 4)">
+        <button data-dig-prio="1">1</button><button data-dig-prio="2">2</button><button data-dig-prio="3">3</button><button data-dig-prio="4">4</button><button data-dig-prio="5">5</button><button data-dig-prio="6">6</button><button data-dig-prio="7">7</button>
+      </div>
+    </div>
+  </div>
+  <div id="smoothSubmenu" class="tool-group" aria-hidden="true">
+    <button class="tool-button" data-smooth-tool="smooth" title="Smooth rough stone"></button>
+    <button class="tool-button" data-smooth-tool="engrave" title="Engrave artwork into smooth stone"></button>
+    <button class="tool-button" data-smooth-tool="track" title="Carve minecart track in stone floor or ramp"></button>
+    <button class="tool-button" data-smooth-tool="fortify" title="Carve fortification in smooth wall"></button>
+    <button class="dig-expand" data-smooth-expand title="More smoothing order options (priority)">&#9656;</button>
+    <div class="dig-adv smooth-adv">
+      <div class="dig-prio" title="Designation priority (1 = highest, default 4)">
+        <button data-dig-prio="1">1</button><button data-dig-prio="2">2</button><button data-dig-prio="3">3</button><button data-dig-prio="4">4</button><button data-dig-prio="5">5</button><button data-dig-prio="6">6</button><button data-dig-prio="7">7</button>
+      </div>
+    </div>
+  </div>
+  <div id="bottomBar">
+    <div class="tool-group" id="leftTools">
+      <button class="tool-button" data-panel="citizens" title="Citizen information">U</button>
+      <button class="tool-button" data-panel="orders" title="Task information">T</button>
+      <button class="tool-button" data-panel="locations" title="Place information">P</button>
+      <button class="tool-button" data-panel="labor" title="Labor">L</button>
+      <button class="tool-button" data-panel="workorders" title="Work orders">W</button>
+      <button class="tool-button" data-panel="nobles" title="Nobles and administrators">N</button>
+      <button class="tool-button" data-panel="objects" title="Objects">O</button>
+      <button class="tool-button" data-panel="justice" title="Justice">J</button>
+    </div>
+    <div class="tool-group" id="designationBar">
+      <button class="tool-button" data-dig-menu title="Digging orders"></button>
+      <button class="tool-button" data-designation-tool="chop" title="Chop trees"></button>
+      <button class="tool-button" data-designation-tool="gather" title="Gather plants"></button>
+      <button class="tool-button" data-designation-tool="smooth" title="Smooth stone"></button>
+      <button class="tool-button" data-designation-tool="erase" title="Erase designations"></button>
+    </div>
+    <div class="tool-group" id="rightTools">
+      <button class="tool-button" data-panel="build" title="Place Building">B</button>
+      <button class="tool-button" data-panel="stockpile" title="Stockpiles">P</button>
+      <button class="tool-button" data-panel="zone" title="Zones">Z</button>
+      <button class="tool-button" data-action="reset" title="Reset this camera to host">R</button>
+    </div>
+  </div>
+</div>
+<div id="selection" aria-live="polite"></div>
+<div id="clientPanel" aria-live="polite"></div>
+<div id="digSelect"></div>
+<div id="tileFlash"></div>
+<div id="hoverInfo"></div>
+<div id="alertStack" aria-live="polite"></div>
+<div id="alertPopup"></div>
+<script src="/js/dfcapture-core.js"></script>
+<script src="/js/dfcapture-building-zone-stockpile-panels.js"></script>
+<script src="/js/dfcapture-unit-hud-notifications.js"></script>
+<script src="/js/dfcapture-build-info-panels.js"></script>
+<script src="/js/dfcapture-labor-work-orders.js"></script>
+<script src="/js/dfcapture-controls-placement.js"></script>
+</body>
+</html>

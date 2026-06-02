@@ -19,6 +19,7 @@ dfhack_plugin(dfcapture_public
     src/stockpile_panel.cpp
     src/unit_sheet.cpp
     src/web_assets.cpp
+    src/work_orders.cpp
     LINK_LIBRARIES gdiplus ole32 ws2_32 lua)
 
 target_include_directories(dfcapture_public PRIVATE

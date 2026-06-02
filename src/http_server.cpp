@@ -17,6 +17,7 @@
 #include "unit_sheet.h"
 #include "stockpile_panel.h"
 #include "web_assets.h"
+#include "work_orders.h"
 
 #include <atomic>
 #include <chrono>
@@ -101,6 +102,9 @@ std::string build_options_from_request(const httplib::Request& req) {
 }
 
 void register_routes(httplib::Server& server) {
+    server.set_mount_point("/asset", "data/vanilla/vanilla_interface/graphics/images");
+    server.set_mount_point("/", web_root());
+
     server.Get("/", [](const httplib::Request&, httplib::Response& res) {
         res.set_redirect("/view");
     });
@@ -1291,6 +1295,8 @@ void register_routes(httplib::Server& server) {
     server.Get("/zone-location-action", zone_location_action_handler);
     server.Post("/zone-location-action", zone_location_action_handler);
 
+    register_work_order_routes(server);
+
     server.Get("/stockpile-info", [](const httplib::Request& req, httplib::Response& res) {
         int id = -1;
         if (!query_int(req, "id", id)) {
@@ -1509,6 +1515,56 @@ void register_routes(httplib::Server& server) {
     };
     server.Get("/stockpile-toggle-all", stockpile_toggle_all_handler);
     server.Post("/stockpile-toggle-all", stockpile_toggle_all_handler);
+
+    auto stockpile_repaint_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int id = -1;
+        int px = 0;
+        int py = 0;
+        int frame_w = 0;
+        int frame_h = 0;
+        if (!query_int(req, "id", id) ||
+                !query_int(req, "px", px) || !query_int(req, "py", py) ||
+                !query_int(req, "w", frame_w) || !query_int(req, "h", frame_h)) {
+            res.status = 400;
+            res.set_content("missing id/px/py/w/h\n", "text/plain; charset=utf-8");
+            return;
+        }
+        int px2 = px;
+        int py2 = py;
+        query_int(req, "px2", px2);
+        query_int(req, "py2", py2);
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        int new_id = -1;
+        if (!create_stockpile_via_lua(camera, px, py, px2, py2, frame_w, frame_h,
+                                      "all", new_id, &err)) {
+            res.status = 400;
+            res.set_content("repaint failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        int final_id = new_id;
+        if (!finish_stockpile_repaint_on_core_thread(id, new_id, final_id, &err)) {
+            remove_stockpile_on_core_thread(new_id);
+            res.status = 400;
+            res.set_content("repaint failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"id\":" + std::to_string(final_id) + "}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/stockpile-repaint", stockpile_repaint_handler);
+    server.Post("/stockpile-repaint", stockpile_repaint_handler);
 }
 
 } // namespace

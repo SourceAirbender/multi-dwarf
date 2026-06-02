@@ -46,4 +46,28 @@ bool zone_location_action_via_lua(int32_t zone_id, const std::string& action,
                                   const std::string& kind, int32_t location_id,
                                   std::string* err = nullptr);
 
+std::string order_json_via_lua(const char* function_name, std::string* err = nullptr);
+std::string order_json_via_lua_str(const char* function_name, const std::string& arg,
+                                   std::string* err = nullptr);
+bool create_order_via_lua(const std::string& key, int32_t amount, const std::string& frequency,
+                          int32_t workshop_id, std::string* msg = nullptr,
+                          std::string* err = nullptr);
+bool import_order_preset_via_lua(const std::string& name, std::string* msg = nullptr,
+                                 std::string* err = nullptr);
+bool cancel_order_via_lua(int32_t id, std::string* err = nullptr);
+bool adjust_order_via_lua(int32_t id, int32_t amount, const std::string& frequency,
+                          std::string* err = nullptr);
+bool add_item_condition_via_lua(int32_t id, const std::string& compare, int32_t value,
+                                const std::string& item, const std::string& material,
+                                const std::string& adjective, std::string* err = nullptr);
+bool add_order_condition_via_lua(int32_t id, int32_t other_id, const std::string& type,
+                                 std::string* err = nullptr);
+bool remove_condition_via_lua(int32_t id, const std::string& kind, int32_t index,
+                              std::string* err = nullptr);
+bool set_order_max_workshops_via_lua(int32_t id, int32_t max_workshops,
+                                     std::string* err = nullptr);
+bool set_order_workshop_via_lua(int32_t id, int32_t workshop_id,
+                                std::string* err = nullptr);
+bool reorder_order_via_lua(int32_t id, int32_t direction, std::string* err = nullptr);
+
 } // namespace dfcapture_public

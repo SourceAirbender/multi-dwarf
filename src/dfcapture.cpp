@@ -5,6 +5,7 @@
 #include "diagnostics.h"
 #include "http_server.h"
 #include "image_encoder.h"
+#include "web_assets.h"
 
 #include <cstdlib>
 #include <string>
@@ -40,6 +41,14 @@ command_result cmd_start(color_ostream& out, std::vector<std::string>& args) {
     }
     if (args.size() >= 2)
         bind_address = args[1];
+
+    std::string missing;
+    if (!dfcapture_public::web_assets_ok(&missing)) {
+        out.printerr("dfcapture-public-start: web UI not found: %s\n", missing.c_str());
+        out.printerr("copy this repo's web/ folder to <Dwarf Fortress>/hack/dfcapture-public-web/\n");
+        dfcapture_public::diagnostics_log("web assets missing: " + missing);
+        return CR_FAILURE;
+    }
 
     std::string err;
     if (!dfcapture_public::start_server(port, bind_address, &err)) {
