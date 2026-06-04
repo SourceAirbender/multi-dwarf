@@ -75,5 +75,7 @@ std::string host_state_json(const HostState& state);
 
 bool viewport_probe_on_render_thread(ViewportProbe& probe, std::string* err = nullptr);
 std::string viewport_probe_json(const ViewportProbe& probe);
+bool grid_probe_on_render_thread(std::string& json, std::string* err = nullptr);
+bool build_probe_on_render_thread(std::string& json, std::string* err = nullptr);
 
 } // namespace dfcapture_public

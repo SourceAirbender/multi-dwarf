@@ -15,6 +15,7 @@
 #include "notifications.h"
 #include "placement.h"
 #include "unit_sheet.h"
+#include "unit_portrait.h"
 #include "stockpile_panel.h"
 #include "web_assets.h"
 #include "work_orders.h"
@@ -285,6 +286,24 @@ void register_routes(httplib::Server& server) {
         }
         res.set_header("Cache-Control", "no-store");
         res.set_content(viewport_probe_json(probe), "application/json; charset=utf-8");
+    });
+
+    server.Get("/grid-probe", [](const httplib::Request&, httplib::Response& res) {
+        std::string json;
+        std::string err;
+        bool ok = grid_probe_on_render_thread(json, &err);
+        res.set_header("Cache-Control", "no-store");
+        res.status = ok ? 200 : 500;
+        res.set_content(json + "\n", "application/json; charset=utf-8");
+    });
+
+    server.Get("/build-probe", [](const httplib::Request&, httplib::Response& res) {
+        std::string json;
+        std::string err;
+        bool ok = build_probe_on_render_thread(json, &err);
+        res.set_header("Cache-Control", "no-store");
+        res.status = ok ? 200 : 500;
+        res.set_content(json + "\n", "application/json; charset=utf-8");
     });
 
     auto placement_mode_handler = [](const httplib::Request& req, httplib::Response& res) {
@@ -647,7 +666,8 @@ void register_routes(httplib::Server& server) {
         std::string player = query_player(req);
         NotificationState state;
         std::string err;
-        if (!notifications_on_render_thread(state, &err)) {
+        auto dismissed = dismissed_alert_keys_for_player(player);
+        if (!notifications_on_render_thread(dismissed, state, &err)) {
             res.status = 503;
             res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
                             "application/json; charset=utf-8");
@@ -657,6 +677,26 @@ void register_routes(httplib::Server& server) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(notifications_json(player, state), "application/json; charset=utf-8");
     });
+
+    auto notification_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        std::string action = req.has_param("action") ? req.get_param_value("action") : "";
+        if (action == "dismiss") {
+            if (!req.has_param("keys")) {
+                res.status = 400;
+                res.set_content("missing keys\n", "text/plain; charset=utf-8");
+                return;
+            }
+            remember_dismissed_alert_keys(player, req.get_param_value("keys"));
+            res.set_header("Cache-Control", "no-store");
+            res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+            return;
+        }
+        res.status = 400;
+        res.set_content("bad notification action\n", "text/plain; charset=utf-8");
+    };
+    server.Get("/notification-action", notification_action_handler);
+    server.Post("/notification-action", notification_action_handler);
 
     server.Get("/zones", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
@@ -717,6 +757,43 @@ void register_routes(httplib::Server& server) {
 
         res.set_header("Cache-Control", "no-store");
         res.set_content(unit_sheet_json(player, unit, tile), "application/json; charset=utf-8");
+    });
+
+    server.Get("/unit-portrait", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        int unit_id = -1;
+        if (!query_int(req, "id", unit_id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        CapturedFrame frame;
+        int32_t texpos = -1;
+        std::string source;
+        std::string err;
+        bool icon_mode = req.has_param("mode") && req.get_param_value("mode") == "icon";
+        bool generate = req.has_param("generate") &&
+            (req.get_param_value("generate") == "1" ||
+             req.get_param_value("generate") == "true" ||
+             req.get_param_value("generate") == "yes");
+        if (!unit_portrait_on_render_thread(unit_id, icon_mode, generate,
+                                            frame, texpos, source, &err)) {
+            res.status = 404;
+            res.set_content("portrait failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        std::vector<uint8_t> png;
+        if (!encode_png(frame, png, &err)) {
+            res.status = 503;
+            res.set_content("portrait encode failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+
+        res.set_header("X-DFCapture-Texpos", std::to_string(texpos));
+        res.set_header("X-DFCapture-Portrait-Source", source);
+        res.set_content(reinterpret_cast<const char*>(png.data()), png.size(), "image/png");
     });
 
     auto action_handler = [](const httplib::Request& req, httplib::Response& res) {

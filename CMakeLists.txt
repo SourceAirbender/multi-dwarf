@@ -17,6 +17,7 @@ dfhack_plugin(dfcapture_public
     src/placement.cpp
     src/sdl_capture.cpp
     src/stockpile_panel.cpp
+    src/unit_portrait.cpp
     src/unit_sheet.cpp
     src/web_assets.cpp
     src/work_orders.cpp

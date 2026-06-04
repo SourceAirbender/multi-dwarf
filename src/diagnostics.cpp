@@ -1,24 +1,31 @@
 #include "diagnostics.h"
 
 #include "json_util.h"
+#include "sdl_capture.h"
 #include "modules/DFSDL.h"
 #include "modules/Gui.h"
 
+#include "df/buildreq.h"
 #include "df/enabler.h"
+#include "df/gamest.h"
 #include "df/global_objects.h"
 #include "df/graphic.h"
 #include "df/graphic_viewportst.h"
+#include "df/main_interface.h"
 #include "df/viewscreen.h"
 #include "df/world.h"
 
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <fstream>
 #include <future>
 #include <iomanip>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 namespace dfcapture_public {
 namespace {
@@ -131,6 +138,129 @@ bool read_viewport_probe(ViewportProbe& probe, std::string* err) {
 
 struct ViewportProbeRequest {
     ViewportProbe probe;
+    std::string err;
+    std::promise<bool> done;
+};
+
+std::string histogram_json(int32_t* buf, int tiles) {
+    if (!buf)
+        return "null";
+
+    std::map<int32_t, int> counts;
+    for (int i = 0; i < tiles; ++i)
+        counts[buf[i]]++;
+
+    std::vector<std::pair<int32_t, int>> entries(counts.begin(), counts.end());
+    std::sort(entries.begin(), entries.end(),
+        [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::ostringstream body;
+    body << "[";
+    for (size_t i = 0; i < entries.size() && i < 12; ++i) {
+        if (i) body << ",";
+        body << "{\"texpos\":" << entries[i].first
+             << ",\"count\":" << entries[i].second << "}";
+    }
+    body << "]";
+    return body.str();
+}
+
+bool build_grid_probe_json(std::string& json, std::string* err) {
+    auto gps = df::global::gps;
+    auto game = df::global::game;
+    if (!gps || !gps->main_viewport) {
+        json = "{\"error\":\"no gps/viewport\"}";
+        if (err) *err = "no gps/viewport";
+        return false;
+    }
+
+    auto vp = gps->main_viewport;
+    int tiles = vp->dim_x * vp->dim_y;
+    if (tiles < 1 || tiles > 4000000) {
+        json = "{\"error\":\"bad dims\"}";
+        if (err) *err = "bad dims";
+        return false;
+    }
+
+    std::ostringstream body;
+    body << "{\"dim_x\":" << vp->dim_x
+         << ",\"dim_y\":" << vp->dim_y
+         << ",\"tiles\":" << tiles;
+    if (game) {
+        auto& mi = game->main_interface;
+        body << ",\"main_designation_selected\":" << static_cast<int>(mi.main_designation_selected)
+             << ",\"bottom_mode_selected\":" << static_cast<int>(mi.bottom_mode_selected);
+    }
+    body << ",\"interface_hist\":" << histogram_json(vp->screentexpos_interface, tiles)
+         << ",\"designation_hist\":" << histogram_json(vp->screentexpos_designation, tiles)
+         << "}";
+    json = body.str();
+    return true;
+}
+
+bool build_build_probe_json(std::string& json, std::string* err) {
+    auto gps = df::global::gps;
+    if (!gps || !gps->main_viewport) {
+        json = "{\"error\":\"no gps/viewport\"}";
+        if (err) *err = "no gps/viewport";
+        return false;
+    }
+
+    auto vp = gps->main_viewport;
+    int dimx = vp->dim_x;
+    int dimy = vp->dim_y;
+    int tiles = dimx * dimy;
+    if (tiles < 1 || tiles > 4000000) {
+        json = "{\"error\":\"bad dims\"}";
+        if (err) *err = "bad dims";
+        return false;
+    }
+
+    std::ostringstream body;
+    auto dump_layer = [&](const char* name, int32_t* buf) {
+        body << "\"" << name << "\":";
+        if (!buf) {
+            body << "null,";
+            return;
+        }
+        body << "[";
+        int emitted = 0;
+        for (int x = 0; x < dimx && emitted < 60; ++x) {
+            for (int y = 0; y < dimy && emitted < 60; ++y) {
+                int32_t value = buf[x * dimy + y];
+                if (value == 0)
+                    continue;
+                if (emitted) body << ",";
+                body << "{\"x\":" << x
+                     << ",\"y\":" << y
+                     << ",\"t\":" << value << "}";
+                ++emitted;
+            }
+        }
+        body << "],";
+    };
+
+    body << "{\"dim_x\":" << dimx << ",\"dim_y\":" << dimy << ",";
+    auto game = df::global::game;
+    auto build = df::global::buildreq;
+    if (game)
+        body << "\"bottom_mode\":" << static_cast<int>(game->main_interface.bottom_mode_selected) << ",";
+    if (build)
+        body << "\"build_type\":" << static_cast<int>(build->building_type)
+             << ",\"build_subtype\":" << build->building_subtype << ",";
+    dump_layer("building_one", vp->screentexpos_building_one);
+    dump_layer("building_two", vp->screentexpos_building_two);
+    dump_layer("interface", vp->screentexpos_interface);
+    dump_layer("designation", vp->screentexpos_designation);
+    dump_layer("item", vp->screentexpos_item);
+    dump_layer("signpost", vp->screentexpos_signpost);
+    body << "\"end\":true}";
+    json = body.str();
+    return true;
+}
+
+struct JsonProbeRequest {
+    std::string json;
     std::string err;
     std::promise<bool> done;
 };
@@ -292,6 +422,38 @@ std::string viewport_probe_json(const ViewportProbe& probe) {
          << ",\"clipY1\":" << probe.viewport_clip_y1
          << ",\"flag\":" << probe.viewport_flag << "}}\n";
     return body.str();
+}
+
+bool grid_probe_on_render_thread(std::string& json, std::string* err) {
+    std::lock_guard<std::recursive_mutex> lock(capture_state_mutex());
+    auto request = std::make_shared<JsonProbeRequest>();
+    auto future = request->done.get_future();
+    DFHack::runOnRenderThread([request]() {
+        request->done.set_value(build_grid_probe_json(request->json, &request->err));
+    });
+
+    bool ok = future.get();
+    json = request->json;
+    diagnostics_log("GRID-PROBE " + json);
+    if (!ok && err)
+        *err = request->err;
+    return ok;
+}
+
+bool build_probe_on_render_thread(std::string& json, std::string* err) {
+    std::lock_guard<std::recursive_mutex> lock(capture_state_mutex());
+    auto request = std::make_shared<JsonProbeRequest>();
+    auto future = request->done.get_future();
+    DFHack::runOnRenderThread([request]() {
+        request->done.set_value(build_build_probe_json(request->json, &request->err));
+    });
+
+    bool ok = future.get();
+    json = request->json;
+    diagnostics_log("BUILD-PROBE " + json);
+    if (!ok && err)
+        *err = request->err;
+    return ok;
 }
 
 } // namespace dfcapture_public
