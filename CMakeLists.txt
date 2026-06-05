@@ -14,6 +14,7 @@ dfhack_plugin(dfcapture_public
     src/labor.cpp
     src/lua_bridge.cpp
     src/notifications.cpp
+    src/overlay_control.cpp
     src/placement.cpp
     src/sdl_capture.cpp
     src/stockpile_panel.cpp

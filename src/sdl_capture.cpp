@@ -2,6 +2,8 @@
 
 #include "diagnostics.h"
 #include "image_encoder.h"
+#include "Core.h"
+#include "PluginManager.h"
 #include "modules/DFSDL.h"
 #include "modules/Gui.h"
 
@@ -28,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -63,20 +66,35 @@ std::atomic<int> g_ref_dim_y(0);
 #ifdef _WIN32
 volatile uint32_t g_seh_code = 0;
 void* g_seh_at = nullptr;
+void* g_seh_access = nullptr;
+
+const DWORD DFCAPTURE_INVALID_PARAMETER_EXCEPTION = 0xE0424643u;
 
 static int dfcapture_public_seh_filter(_EXCEPTION_POINTERS* ep) {
     g_seh_code = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0;
     g_seh_at = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : nullptr;
+    g_seh_access = (ep && ep->ExceptionRecord &&
+                    ep->ExceptionRecord->NumberParameters >= 2)
+        ? reinterpret_cast<void*>(ep->ExceptionRecord->ExceptionInformation[1])
+        : nullptr;
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void __cdecl dfcapture_public_invalid_parameter_handler(
+        const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
+    RaiseException(DFCAPTURE_INVALID_PARAMETER_EXCEPTION, EXCEPTION_NONCONTINUABLE, 0, nullptr);
 }
 
 static int call_viewscreen_render_seh(df::viewscreen* viewscreen) {
     int fault = 0;
+    _invalid_parameter_handler old_handler =
+        _set_thread_local_invalid_parameter_handler(dfcapture_public_invalid_parameter_handler);
     __try {
         viewscreen->render(0);
     } __except(dfcapture_public_seh_filter(GetExceptionInformation())) {
         fault = 1;
     }
+    _set_thread_local_invalid_parameter_handler(old_handler);
     return fault;
 }
 
@@ -145,12 +163,23 @@ bool render_current_viewscreen(std::string* err) {
         return false;
     }
 
+    auto* plugins = DFHack::Core::getInstance().getPluginManager();
+    DFHack::Plugin* overlay = plugins ? plugins->getPluginByName("overlay") : nullptr;
+    if (overlay && overlay->is_enabled()) {
+        if (err) {
+            *err = "overlay plugin is enabled; independent capture refuses to render "
+                   "through overlay Lua hooks";
+        }
+        return false;
+    }
+
 #ifdef _WIN32
     if (call_viewscreen_render_seh(viewscreen) != 0) {
         if (err) {
             std::ostringstream msg;
             msg << "viewscreen render fault code=0x" << std::hex << g_seh_code
-                << " at=" << g_seh_at;
+                << " at=" << g_seh_at
+                << " access=0x" << reinterpret_cast<uintptr_t>(g_seh_access);
             *err = msg.str();
         }
         return false;

@@ -5,6 +5,7 @@
 #include "diagnostics.h"
 #include "http_server.h"
 #include "image_encoder.h"
+#include "overlay_control.h"
 #include "web_assets.h"
 
 #include <cstdlib>
@@ -50,8 +51,22 @@ command_result cmd_start(color_ostream& out, std::vector<std::string>& args) {
         return CR_FAILURE;
     }
 
+    if (dfcapture_public::server_running()) {
+        out.printerr("dfcapture-public-start: server is already running\n");
+        return CR_FAILURE;
+    }
+
+    std::string overlay_note;
+    if (!dfcapture_public::disable_overlay_for_stream(out, &overlay_note)) {
+        out.printerr("dfcapture-public-start: cannot stream -- %s\n", overlay_note.c_str());
+        dfcapture_public::diagnostics_log("stream start failed: overlay could not be disabled: " +
+                                          overlay_note);
+        return CR_FAILURE;
+    }
+
     std::string err;
     if (!dfcapture_public::start_server(port, bind_address, &err)) {
+        dfcapture_public::restore_overlay_after_stream(&out);
         out.printerr("dfcapture-public-start: %s\n", err.c_str());
         return CR_FAILURE;
     }
@@ -60,6 +75,8 @@ command_result cmd_start(color_ostream& out, std::vector<std::string>& args) {
                                       dfcapture_public::server_url(bind_address, port));
     print_line(out, "dfcapture public server: " +
                     dfcapture_public::server_url(bind_address, port) + "\n");
+    if (!overlay_note.empty())
+        print_line(out, "dfcapture public: " + overlay_note + "\n");
     return CR_OK;
 #else
     out.printerr("dfcapture public server is currently Windows-only.\n");
@@ -70,6 +87,7 @@ command_result cmd_start(color_ostream& out, std::vector<std::string>& args) {
 command_result cmd_stop(color_ostream& out, std::vector<std::string>&) {
 #ifdef _WIN32
     dfcapture_public::stop_server();
+    dfcapture_public::restore_overlay_after_stream(&out);
     dfcapture_public::diagnostics_log("server stopped");
     out.print("dfcapture public server stopped.\n");
     return CR_OK;
@@ -117,6 +135,7 @@ DFhackCExport command_result plugin_shutdown(color_ostream&) {
 #ifdef _WIN32
     dfcapture_public::diagnostics_log("plugin shutdown");
     dfcapture_public::stop_server();
+    dfcapture_public::restore_overlay_after_stream();
     dfcapture_public::shutdown_image_encoder();
 #endif
     return CR_OK;
