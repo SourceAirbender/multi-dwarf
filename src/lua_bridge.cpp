@@ -1,4 +1,4 @@
-#include "lua_bridge.h"
+﻿#include "lua_bridge.h"
 
 #include "Core.h"
 #include "LuaTools.h"
@@ -14,10 +14,10 @@
 
 using namespace DFHack;
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
-constexpr const char* LUA_MODULE = "plugins.dfcapture_public";
+constexpr const char* LUA_MODULE = "plugins.dfcapture";
 
 std::recursive_mutex g_lua_bridge_mutex;
 
@@ -632,4 +632,4 @@ bool reorder_order_via_lua(int32_t id, int32_t direction, std::string* err) {
     return result_ok;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

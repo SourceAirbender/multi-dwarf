@@ -1,10 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include "camera.h"
 
 #include <string>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct HudState {
     Camera camera;
@@ -42,4 +42,4 @@ struct HudState {
 bool hud_on_render_thread(const Camera& camera, HudState& hud, std::string* err = nullptr);
 std::string hud_json(const std::string& player, const HudState& hud);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

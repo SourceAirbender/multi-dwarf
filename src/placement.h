@@ -1,10 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include "camera.h"
 
 #include <string>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct DesignationRequest {
     int px = 0;
@@ -28,4 +28,4 @@ struct DesignationResult {
 bool designate_on_render_thread(const Camera& camera, const DesignationRequest& request,
                                 DesignationResult& result, std::string* err = nullptr);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

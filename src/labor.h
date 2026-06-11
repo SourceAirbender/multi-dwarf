@@ -1,10 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct LaborRow {
     int id = 0;
@@ -60,4 +60,4 @@ bool labor_rename_impl(int detail, const std::string& requested_name, std::strin
 bool labor_delete_impl(int detail, std::string* err = nullptr);
 bool labor_task_toggle_impl(int detail, int labor, bool on, std::string* err = nullptr);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

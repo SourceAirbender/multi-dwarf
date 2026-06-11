@@ -1,9 +1,9 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <string>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 std::string stockpile_info_json_on_core_thread(int32_t id);
 bool rename_stockpile_on_core_thread(int32_t id, const std::string& name);
@@ -17,4 +17,4 @@ bool set_stockpile_category_on_core_thread(int32_t id, const std::string& preset
 bool finish_stockpile_repaint_on_core_thread(int32_t old_id, int32_t new_id,
                                              int32_t& final_id, std::string* err);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

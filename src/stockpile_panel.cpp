@@ -1,4 +1,4 @@
-#include "stockpile_panel.h"
+﻿#include "stockpile_panel.h"
 
 #include "Core.h"
 #include "json_util.h"
@@ -22,7 +22,7 @@
 
 using namespace DFHack;
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::recursive_mutex g_stockpile_mutex;
@@ -472,4 +472,4 @@ bool finish_stockpile_repaint_on_core_thread(int32_t old_id, int32_t new_id,
     });
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

@@ -1,13 +1,13 @@
-#include "web_assets.h"
+﻿#include "web_assets.h"
 
 #include <fstream>
 #include <sstream>
 #include <string>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 namespace {
-constexpr const char* kWebRoot = "hack/dfcapture-public-web";
+constexpr const char* kWebRoot = "hack/dfcapture-web";
 }
 
 const char* web_root() {
@@ -29,9 +29,9 @@ std::string index_html() {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         return std::string(
-            "<!doctype html><html><head><meta charset=\"utf-8\"><title>dfcapture public</title></head>"
+            "<!doctype html><html><head><meta charset=\"utf-8\"><title>dfcapture</title></head>"
             "<body style=\"font:14px/1.5 ui-monospace,Consolas,monospace;background:#161413;color:#f2e6cf;padding:28px\">"
-            "<h1 style=\"color:#ffb74d\">dfcapture public: web UI not found</h1>"
+            "<h1 style=\"color:#ffb74d\">dfcapture: web UI not found</h1>"
             "<p>Could not open <code>") + path + "</code> "
             "(relative to the Dwarf Fortress folder).</p>"
             "<p>Copy this repository's <code>web/</code> directory to "
@@ -43,4 +43,4 @@ std::string index_html() {
     return ss.str();
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

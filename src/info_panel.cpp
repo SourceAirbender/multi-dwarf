@@ -58,7 +58,7 @@
 
 using namespace DFHack;
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::recursive_mutex g_info_panel_mutex;
@@ -1612,4 +1612,4 @@ bool info_panel_on_render_thread(const std::string& panel_name,
     return true;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "frame.h"
 
@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 constexpr int DEFAULT_JPEG_QUALITY = 82;
 
@@ -16,4 +16,4 @@ bool encode_jpeg(const CapturedFrame& frame, std::vector<uint8_t>& jpeg,
 bool encode_png(const CapturedFrame& frame, std::vector<uint8_t>& png, std::string* err = nullptr);
 void shutdown_image_encoder();
 
-} // namespace dfcapture_public
+} // namespace dfcapture

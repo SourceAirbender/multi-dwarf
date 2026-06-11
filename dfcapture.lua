@@ -5,7 +5,7 @@
 -- tested high-level APIs here, which is far less error-prone than replicating the
 -- raws-dependent logic in C++. Called from C++ via Lua::CallLuaModuleFunction.
 
-local _ENV = mkmodule('plugins.dfcapture_public')
+local _ENV = mkmodule('plugins.dfcapture')
 
 -- Trivial round-trip used to verify the C++ -> Lua bridge in isolation.
 function ping(n)

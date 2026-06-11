@@ -1,4 +1,4 @@
-#include "json_util.h"
+﻿#include "json_util.h"
 
 #include "MiscUtils.h"
 
@@ -6,7 +6,7 @@
 #include <cstdlib>
 #include <iomanip>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 bool query_int(const httplib::Request& req, const char* name, int& value) {
     if (!req.has_param(name))
@@ -66,4 +66,4 @@ void append_json_string_array(std::ostringstream& body, const std::vector<std::s
     body << "]";
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

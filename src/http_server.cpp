@@ -1,4 +1,4 @@
-#include "http_server.h"
+﻿#include "http_server.h"
 
 #include "building_zone.h"
 #include "client_state.h"
@@ -30,7 +30,7 @@
 #include <thread>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::mutex g_server_mutex;
@@ -40,8 +40,9 @@ std::atomic<bool> g_running(false);
 int g_port = DEFAULT_STREAM_PORT;
 std::string g_bind_address = DEFAULT_BIND_ADDRESS;
 
-std::string camera_json(const Camera& camera) {
-    return "{\"x\":" + std::to_string(camera.x) +
+std::string camera_json(const std::string& player, const Camera& camera) {
+    return "{\"player\":" + json_string(player) +
+           ",\"x\":" + std::to_string(camera.x) +
            ",\"y\":" + std::to_string(camera.y) +
            ",\"z\":" + std::to_string(camera.z) +
            ",\"zoom\":" + std::to_string(camera.zoom_factor >= 0 ? camera.zoom_factor : 100) +
@@ -115,7 +116,7 @@ void register_routes(httplib::Server& server) {
     });
 
     server.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content("{\"ok\":true,\"service\":\"dfcapture_public\"}\n",
+        res.set_content("{\"ok\":true,\"service\":\"dfcapture\"}\n",
                         "application/json; charset=utf-8");
     });
 
@@ -133,11 +134,6 @@ void register_routes(httplib::Server& server) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(diagnostics_json(player, camera, diagnostics_snapshot()),
                         "application/json; charset=utf-8");
-    });
-
-    server.Get("/clients", [](const httplib::Request&, httplib::Response& res) {
-        res.set_header("Cache-Control", "no-store");
-        res.set_content(clients_json(), "application/json; charset=utf-8");
     });
 
     server.Get("/host-state", [](const httplib::Request&, httplib::Response& res) {
@@ -169,7 +165,7 @@ void register_routes(httplib::Server& server) {
         }
 
         res.set_header("Cache-Control", "no-store");
-        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+        res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
     };
     server.Get("/reset", reset_handler);
     server.Post("/reset", reset_handler);
@@ -184,7 +180,7 @@ void register_routes(httplib::Server& server) {
                             "application/json; charset=utf-8");
             return;
         }
-        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+        res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
     });
 
     server.Post("/camera", [](const httplib::Request& req, httplib::Response& res) {
@@ -226,77 +222,7 @@ void register_routes(httplib::Server& server) {
 
         set_player_camera(player, camera);
         res.set_header("Cache-Control", "no-store");
-        res.set_content(camera_json(camera), "application/json; charset=utf-8");
-    });
-
-    server.Post("/camera/move", [](const httplib::Request& req, httplib::Response& res) {
-        std::string player = query_player(req);
-        Camera camera;
-        std::string err;
-        if (!camera_for_player(player, camera, &err)) {
-            res.status = 503;
-            res.set_content("{\"ok\":false,\"error\":\"" + err + "\"}\n",
-                            "application/json; charset=utf-8");
-            return;
-        }
-
-        int dx = 0;
-        int dy = 0;
-        int dz = 0;
-        query_int(req, "dx", dx);
-        query_int(req, "dy", dy);
-        query_int(req, "dz", dz);
-        camera.x += dx;
-        camera.y += dy;
-        camera.z += dz;
-        if (!clamp_camera(camera, &err)) {
-            res.status = 503;
-            res.set_content("{\"ok\":false,\"error\":\"" + err + "\"}\n",
-                            "application/json; charset=utf-8");
-            return;
-        }
-
-        set_player_camera(player, camera);
-        res.set_content(camera_json(camera), "application/json; charset=utf-8");
-    });
-
-    server.Post("/camera/set", [](const httplib::Request& req, httplib::Response& res) {
-        std::string player = query_player(req);
-        Camera camera;
-        std::string err;
-        if (!camera_for_player(player, camera, &err)) {
-            res.status = 503;
-            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
-                            "application/json; charset=utf-8");
-            return;
-        }
-
-        query_int(req, "x", camera.x);
-        query_int(req, "y", camera.y);
-        query_int(req, "z", camera.z);
-        if (!clamp_camera(camera, &err)) {
-            res.status = 503;
-            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
-                            "application/json; charset=utf-8");
-            return;
-        }
-
-        set_player_camera(player, camera);
-        res.set_content(camera_json(camera), "application/json; charset=utf-8");
-    });
-
-    server.Post("/camera/home", [](const httplib::Request& req, httplib::Response& res) {
-        std::string player = query_player(req);
-        Camera camera;
-        std::string err;
-        if (!read_host_camera(camera, &err) || !clamp_camera(camera, &err)) {
-            res.status = 503;
-            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
-                            "application/json; charset=utf-8");
-            return;
-        }
-        set_player_camera(player, camera);
-        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+        res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
     });
 
     auto zoom_handler = [](const httplib::Request& req, httplib::Response& res) {
@@ -311,7 +237,7 @@ void register_routes(httplib::Server& server) {
             return;
         }
         res.set_header("Cache-Control", "no-store");
-        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+        res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
     };
     server.Get("/zoom", zoom_handler);
     server.Post("/zoom", zoom_handler);
@@ -609,6 +535,8 @@ void register_routes(httplib::Server& server) {
     server.Get("/zone", zone_create_handler);
     server.Post("/zone", zone_create_handler);
 
+    register_work_order_routes(server);
+
     server.Get("/frame.jpg", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
         Camera camera;
@@ -679,7 +607,6 @@ void register_routes(httplib::Server& server) {
     };
 
     server.Get("/stream", stream_handler);
-    server.Get("/stream.mjpg", stream_handler);
 
     server.Get("/hud", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
@@ -1745,4 +1672,4 @@ void stop_server() {
     g_running = false;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

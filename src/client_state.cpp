@@ -1,4 +1,4 @@
-#include "client_state.h"
+﻿#include "client_state.h"
 
 #include "sdl_capture.h"
 
@@ -6,7 +6,7 @@
 #include <mutex>
 #include <unordered_map>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::mutex g_client_mutex;
@@ -123,4 +123,4 @@ std::vector<ClientCamera> client_camera_snapshot() {
     return out;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

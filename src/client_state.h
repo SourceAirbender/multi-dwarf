@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 
 #include "camera.h"
 
 #include <string>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct ClientCamera {
     std::string player;
@@ -25,4 +25,4 @@ bool set_player_placement_cursor(const std::string& player, int hx, int hy,
                                  Camera& camera, std::string* err = nullptr);
 std::vector<ClientCamera> client_camera_snapshot();
 
-} // namespace dfcapture_public
+} // namespace dfcapture

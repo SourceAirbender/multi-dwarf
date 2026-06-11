@@ -1,4 +1,4 @@
-#include "diagnostics.h"
+﻿#include "diagnostics.h"
 
 #include "json_util.h"
 #include "sdl_capture.h"
@@ -27,7 +27,7 @@
 #include <sstream>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::mutex g_diag_mutex;
@@ -269,7 +269,7 @@ struct JsonProbeRequest {
 
 void diagnostics_log(const std::string& line) {
     std::lock_guard<std::mutex> lock(g_diag_mutex);
-    std::ofstream out("dfcapture_public.log", std::ios::app);
+    std::ofstream out("dfcapture.log", std::ios::app);
     if (out)
         out << utc_now() << " " << line << "\n";
 }
@@ -456,4 +456,4 @@ bool build_probe_on_render_thread(std::string& json, std::string* err) {
     return ok;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

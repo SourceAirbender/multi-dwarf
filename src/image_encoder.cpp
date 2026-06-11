@@ -1,4 +1,4 @@
-#include "image_encoder.h"
+﻿#include "image_encoder.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -16,7 +16,7 @@
 #include <fstream>
 #include <mutex>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 #ifdef _WIN32
@@ -217,4 +217,4 @@ void shutdown_image_encoder() {
 #endif
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

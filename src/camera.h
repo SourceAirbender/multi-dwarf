@@ -1,6 +1,6 @@
-#pragma once
+﻿#pragma once
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct Camera {
     int x = 0;
@@ -20,4 +20,4 @@ struct Camera {
     int build_h = 0;
 };
 
-} // namespace dfcapture_public
+} // namespace dfcapture

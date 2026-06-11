@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 
 #include "camera.h"
 
 #include <cstdint>
 #include <string>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 bool lua_ping(int value, int& out_value, std::string* err = nullptr);
 
@@ -70,4 +70,4 @@ bool set_order_workshop_via_lua(int32_t id, int32_t workshop_id,
                                 std::string* err = nullptr);
 bool reorder_order_via_lua(int32_t id, int32_t direction, std::string* err = nullptr);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

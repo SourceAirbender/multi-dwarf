@@ -1,11 +1,11 @@
-#include "work_orders.h"
+﻿#include "work_orders.h"
 
 #include "json_util.h"
 #include "lua_bridge.h"
 
 #include <string>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 void set_no_store_json(httplib::Response& res, const std::string& json) {
@@ -255,4 +255,4 @@ void register_work_order_routes(httplib::Server& server) {
     server.Post("/order-reorder", order_reorder_handler);
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

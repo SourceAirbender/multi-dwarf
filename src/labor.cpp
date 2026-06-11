@@ -1,4 +1,4 @@
-#include "labor.h"
+﻿#include "labor.h"
 
 #include "Core.h"
 #include "json_util.h"
@@ -25,7 +25,7 @@
 
 using namespace DFHack;
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::recursive_mutex g_labor_mutex;
@@ -573,4 +573,4 @@ bool labor_task_toggle_impl(int detail, int labor, bool on, std::string* err) {
     });
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

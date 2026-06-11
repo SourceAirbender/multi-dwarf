@@ -1,4 +1,4 @@
-#include "unit_portrait.h"
+﻿#include "unit_portrait.h"
 
 #include "diagnostics.h"
 #include "sdl_capture.h"
@@ -39,7 +39,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 constexpr uint32_t SDL_PIXELFORMAT_ARGB8888 = 0x16362004u;
@@ -862,4 +862,4 @@ bool unit_portrait_on_render_thread(int32_t unit_id,
     return ok;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

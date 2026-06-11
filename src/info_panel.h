@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct InfoTab {
     std::string id;
@@ -73,4 +73,4 @@ bool info_panel_on_render_thread(const std::string& panel_name,
                                  InfoPanel& panel,
                                  std::string* err = nullptr);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

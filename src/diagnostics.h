@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 
 #include "camera.h"
 
 #include <cstdint>
 #include <string>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct CaptureDiagnostics {
     uint64_t attempts = 0;
@@ -78,4 +78,4 @@ std::string viewport_probe_json(const ViewportProbe& probe);
 bool grid_probe_on_render_thread(std::string& json, std::string* err = nullptr);
 bool build_probe_on_render_thread(std::string& json, std::string* err = nullptr);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

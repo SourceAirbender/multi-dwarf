@@ -1,4 +1,4 @@
-#include "building_zone.h"
+﻿#include "building_zone.h"
 
 #include "Core.h"
 #include "json_util.h"
@@ -37,7 +37,7 @@
 
 using namespace DFHack;
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::recursive_mutex g_building_zone_mutex;
@@ -1090,4 +1090,4 @@ std::string zones_json_on_core_thread(const std::string& player, const Camera& c
     return body.str();
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

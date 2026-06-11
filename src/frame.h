@@ -1,9 +1,9 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct CapturedFrame {
     int width = 0;
@@ -11,4 +11,4 @@ struct CapturedFrame {
     std::vector<uint8_t> bgra;
 };
 
-} // namespace dfcapture_public
+} // namespace dfcapture

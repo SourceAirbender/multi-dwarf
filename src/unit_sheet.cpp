@@ -59,7 +59,7 @@
 
 using namespace DFHack;
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::recursive_mutex g_unit_sheet_mutex;
@@ -1203,4 +1203,4 @@ bool unit_sheet_on_render_thread(int32_t unit_id,
     return true;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

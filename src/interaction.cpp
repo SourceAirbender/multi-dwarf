@@ -1,4 +1,4 @@
-#include "interaction.h"
+﻿#include "interaction.h"
 
 #include "Core.h"
 #include "TileTypes.h"
@@ -33,7 +33,7 @@
 
 using namespace DFHack;
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::recursive_mutex g_interaction_mutex;
@@ -646,4 +646,4 @@ std::string stock_item_action_json(int32_t item_id, const StockItemActionResult&
     return body.str();
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

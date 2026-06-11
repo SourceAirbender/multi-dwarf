@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "camera.h"
 
@@ -7,7 +7,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct NotificationReport {
     int32_t id = -1;
@@ -66,4 +66,4 @@ std::string notifications_json(const std::string& player, const NotificationStat
 void remember_dismissed_alert_keys(const std::string& player, const std::string& raw_keys);
 std::unordered_set<std::string> dismissed_alert_keys_for_player(const std::string& player);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

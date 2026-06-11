@@ -1,4 +1,4 @@
-#include "sdl_capture.h"
+﻿#include "sdl_capture.h"
 
 #include "diagnostics.h"
 #include "image_encoder.h"
@@ -43,7 +43,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 constexpr uint32_t SDL_PIXELFORMAT_ARGB8888 = 0x16362004u;
@@ -130,7 +130,7 @@ void* g_seh_access = nullptr;
 
 const DWORD DFCAPTURE_INVALID_PARAMETER_EXCEPTION = 0xE0424643u;
 
-static int dfcapture_public_seh_filter(_EXCEPTION_POINTERS* ep) {
+static int dfcapture_seh_filter(_EXCEPTION_POINTERS* ep) {
     g_seh_code = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0;
     g_seh_at = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : nullptr;
     g_seh_access = (ep && ep->ExceptionRecord &&
@@ -140,7 +140,7 @@ static int dfcapture_public_seh_filter(_EXCEPTION_POINTERS* ep) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
-static void __cdecl dfcapture_public_invalid_parameter_handler(
+static void __cdecl dfcapture_invalid_parameter_handler(
         const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
     RaiseException(DFCAPTURE_INVALID_PARAMETER_EXCEPTION, EXCEPTION_NONCONTINUABLE, 0, nullptr);
 }
@@ -148,10 +148,10 @@ static void __cdecl dfcapture_public_invalid_parameter_handler(
 static int call_viewscreen_render_seh(df::viewscreen* viewscreen) {
     int fault = 0;
     _invalid_parameter_handler old_handler =
-        _set_thread_local_invalid_parameter_handler(dfcapture_public_invalid_parameter_handler);
+        _set_thread_local_invalid_parameter_handler(dfcapture_invalid_parameter_handler);
     __try {
         viewscreen->render(0);
-    } __except(dfcapture_public_seh_filter(GetExceptionInformation())) {
+    } __except(dfcapture_seh_filter(GetExceptionInformation())) {
         fault = 1;
     }
     _set_thread_local_invalid_parameter_handler(old_handler);
@@ -163,7 +163,7 @@ static bool call_set_viewport_zoom_factor_seh(df::renderer* renderer, int32_t fa
     __try {
         renderer->set_viewport_zoom_factor(factor);
         ok = true;
-    } __except(dfcapture_public_seh_filter(GetExceptionInformation())) {
+    } __except(dfcapture_seh_filter(GetExceptionInformation())) {
         ok = false;
     }
     return ok;
@@ -174,7 +174,7 @@ static bool call_update_full_viewport_seh(df::renderer* renderer, df::graphic_vi
     __try {
         renderer->update_full_viewport(vp);
         ok = true;
-    } __except(dfcapture_public_seh_filter(GetExceptionInformation())) {
+    } __except(dfcapture_seh_filter(GetExceptionInformation())) {
         ok = false;
     }
     return ok;
@@ -200,7 +200,7 @@ static int call_native_sequence_seh(uintptr_t map_renderer) {
         stage = 4;
         p_NativeBlit(map_renderer);
         result = 0;
-    } __except(dfcapture_public_seh_filter(GetExceptionInformation())) {
+    } __except(dfcapture_seh_filter(GetExceptionInformation())) {
         result = stage;
     }
 
@@ -872,7 +872,7 @@ bool draw_designation_grid_seh(df::graphic_viewportst* vp, const Camera& camera)
             }
         }
         ok = true;
-    } __except(dfcapture_public_seh_filter(GetExceptionInformation())) {
+    } __except(dfcapture_seh_filter(GetExceptionInformation())) {
         ok = false;
     }
     return ok;
@@ -1029,6 +1029,12 @@ bool run_read_host_camera(Camera& camera, std::string* err) {
         request->camera.z = *df::global::window_z;
         request->done.set_value(true);
     });
+
+    if (future.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+        if (err) *err = "timed out reading host camera on render thread";
+        diagnostics_log("WARN: timed out reading host camera on render thread");
+        return false;
+    }
 
     bool ok = future.get();
     if (!ok) {
@@ -1202,6 +1208,12 @@ bool capture_camera_frame_on_render_thread(const Camera& requested,
         request->done.set_value(capture_camera_frame(request->camera, request->frame, &request->err));
     });
 
+    if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        if (err) *err = "timed out capturing frame on render thread";
+        diagnostics_log("WARN: timed out capturing frame on render thread");
+        return false;
+    }
+
     bool ok = future.get();
     if (!ok) {
         if (err) *err = request->err;
@@ -1227,6 +1239,9 @@ bool clamp_camera(Camera& camera, std::string* err) {
     auto future = request->done.get_future();
 
     DFHack::runOnRenderThread([request]() {
+#ifdef _WIN32
+        __try {
+#endif
         auto world = df::global::world;
         if (!world) {
             request->err = "world/map not available";
@@ -1238,7 +1253,19 @@ bool clamp_camera(Camera& camera, std::string* err) {
         request->camera.y = std::max(0, std::min(request->camera.y, std::max(0, world->map.y_count - 1)));
         request->camera.z = std::max(0, std::min(request->camera.z, std::max(0, world->map.z_count - 1)));
         request->done.set_value(true);
+#ifdef _WIN32
+        } __except(dfcapture_seh_filter(GetExceptionInformation())) {
+            request->err = "SEH fault while clamping camera";
+            request->done.set_value(false);
+        }
+#endif
     });
+
+    if (future.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+        if (err) *err = "timed out clamping camera on render thread";
+        diagnostics_log("WARN: timed out clamping camera on render thread");
+        return false;
+    }
 
     bool ok = future.get();
     if (!ok) {
@@ -1630,4 +1657,4 @@ bool capture_camera_jpeg(const Camera& camera, std::vector<uint8_t>& jpeg, std::
     return encode_jpeg(frame, jpeg, DEFAULT_JPEG_QUALITY, err);
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

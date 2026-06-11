@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "httplib.h"
 
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct BuildingPanelInfo {
     int32_t id = -1;
@@ -68,4 +68,4 @@ bool zone_owner_action_on_core_thread(int32_t zone_id, int32_t unit_id, std::str
 std::string zones_json_on_core_thread(const std::string& player, const Camera& camera,
                                       std::string* err = nullptr);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

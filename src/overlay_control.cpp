@@ -1,4 +1,4 @@
-#include "overlay_control.h"
+﻿#include "overlay_control.h"
 
 #include "diagnostics.h"
 
@@ -7,7 +7,7 @@
 
 #include <mutex>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::mutex g_overlay_mutex;
@@ -33,10 +33,10 @@ bool disable_overlay_for_stream(DFHack::color_ostream& out, std::string* note) {
     }
 
     g_overlay_disabled_by_dfcapture = true;
-    diagnostics_log("DIAG: disabled DFHack overlay while dfcapture public stream is running; "
+    diagnostics_log("DIAG: disabled DFHack overlay while dfcapture stream is running; "
                     "offscreen viewscreen rendering would otherwise invoke overlay Lua.");
     if (note) {
-        *note = "DFHack overlay was disabled while dfcapture public is streaming; "
+        *note = "DFHack overlay was disabled while dfcapture is streaming; "
                 "it will be restored when the stream stops.";
     }
     return true;
@@ -54,13 +54,13 @@ void restore_overlay_after_stream(DFHack::color_ostream* out) {
         DFHack::color_ostream& con = out ? *out : core.getConsole();
         auto rc = core.runCommand(con, "enable overlay");
         if (rc != DFHack::CR_OK || !overlay->is_enabled()) {
-            diagnostics_log("WARN: dfcapture public could not restore DFHack overlay after stream stop.");
+            diagnostics_log("WARN: dfcapture could not restore DFHack overlay after stream stop.");
             return;
         }
     }
 
     g_overlay_disabled_by_dfcapture = false;
-    diagnostics_log("DIAG: restored DFHack overlay after dfcapture public stream stop.");
+    diagnostics_log("DIAG: restored DFHack overlay after dfcapture stream stop.");
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

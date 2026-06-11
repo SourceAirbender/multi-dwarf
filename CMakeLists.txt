@@ -1,4 +1,4 @@
-project(dfcapture_public)
+project(dfcapture)
 
 dfhack_plugin(dfcapture_public
     src/building_zone.cpp
@@ -27,7 +27,9 @@ dfhack_plugin(dfcapture_public
 target_include_directories(dfcapture_public PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../dfplex-src/server/cpp-httplib")
 
+set_target_properties(dfcapture_public PROPERTIES OUTPUT_NAME dfcapture)
+
 if(INSTALL_DATA_FILES)
-    install(FILES dfcapture_public.lua
+    install(FILES dfcapture.lua
         DESTINATION ${DFHACK_LUA_DESTINATION}/plugins)
 endif()

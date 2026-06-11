@@ -11,7 +11,7 @@ namespace df {
 struct unit;
 }
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct UnitAction {
     std::string hotkey;
@@ -86,4 +86,4 @@ bool unit_sheet_on_render_thread(int32_t unit_id,
                                  Camera& tile,
                                  std::string* err = nullptr);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

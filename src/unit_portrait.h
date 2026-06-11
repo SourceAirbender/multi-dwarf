@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 
 #include "frame.h"
 
 #include <cstdint>
 #include <string>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 bool unit_portrait_on_render_thread(int32_t unit_id,
                                     bool allow_icon_fallbacks,
@@ -15,4 +15,4 @@ bool unit_portrait_on_render_thread(int32_t unit_id,
                                     std::string& source,
                                     std::string* err = nullptr);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

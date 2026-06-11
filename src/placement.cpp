@@ -1,4 +1,4 @@
-#include "placement.h"
+﻿#include "placement.h"
 
 #include "diagnostics.h"
 #include "sdl_capture.h"
@@ -27,7 +27,7 @@
 #include <mutex>
 #include <sstream>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 using DFHack::DFCoord;
@@ -454,4 +454,4 @@ bool designate_on_render_thread(const Camera& camera, const DesignationRequest& 
     return ok;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

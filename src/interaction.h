@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "camera.h"
 #include "unit_sheet.h"
@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace dfcapture_public {
+namespace dfcapture {
 
 struct InspectResult {
     Camera camera;
@@ -86,4 +86,4 @@ std::string inspect_json(const std::string& player, const InspectResult& result)
 std::string hover_json(const std::string& player, const HoverResult& result);
 std::string stock_item_action_json(int32_t item_id, const StockItemActionResult& result);
 
-} // namespace dfcapture_public
+} // namespace dfcapture

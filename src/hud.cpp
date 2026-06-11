@@ -1,4 +1,4 @@
-#include "hud.h"
+﻿#include "hud.h"
 
 #include "TileTypes.h"
 #include "json_util.h"
@@ -28,7 +28,7 @@
 #include <mutex>
 #include <sstream>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 std::recursive_mutex g_hud_mutex;
@@ -335,4 +335,4 @@ std::string hud_json(const std::string& player, const HudState& hud) {
     return body.str();
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture

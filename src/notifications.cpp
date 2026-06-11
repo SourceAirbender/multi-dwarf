@@ -1,4 +1,4 @@
-#include "notifications.h"
+﻿#include "notifications.h"
 
 #include "json_util.h"
 #include "MiscUtils.h"
@@ -22,7 +22,7 @@
 #include <sstream>
 #include <unordered_map>
 
-namespace dfcapture_public {
+namespace dfcapture {
 namespace {
 
 using namespace DFHack;
@@ -391,4 +391,4 @@ std::unordered_set<std::string> dismissed_alert_keys_for_player(const std::strin
     return it->second;
 }
 
-} // namespace dfcapture_public
+} // namespace dfcapture
