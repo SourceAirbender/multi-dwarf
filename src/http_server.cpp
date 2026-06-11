@@ -187,6 +187,48 @@ void register_routes(httplib::Server& server) {
         res.set_content(camera_json(camera), "application/json; charset=utf-8");
     });
 
+    server.Post("/camera", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+
+        bool has_absolute = req.has_param("x") || req.has_param("y") || req.has_param("z");
+        if (has_absolute) {
+            query_int(req, "x", camera.x);
+            query_int(req, "y", camera.y);
+            query_int(req, "z", camera.z);
+        } else {
+            int dx = 0;
+            int dy = 0;
+            int dz = 0;
+            query_int(req, "dx", dx);
+            query_int(req, "dy", dy);
+            query_int(req, "dz", dz);
+            camera.x += dx;
+            camera.y += dy;
+            camera.z += dz;
+        }
+
+        if (camera.z < 0)
+            camera.z = 0;
+        if (!clamp_camera(camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+
+        set_player_camera(player, camera);
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(camera_json(camera), "application/json; charset=utf-8");
+    });
+
     server.Post("/camera/move", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
         Camera camera;
