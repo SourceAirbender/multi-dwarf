@@ -1378,9 +1378,19 @@ bool capture_current_frame(CapturedFrame& frame, bool include_ui = true,
 bool capture_shifted(const Camera& camera, CapturedFrame& frame,
                      bool include_ui = true, std::string* err = nullptr,
                      bool restore_host_buffers = true) {
+    // capture_shifted always runs ON the render thread (via capture_camera_frame_on_render_thread,
+    // or the capture/capture-at commands' runOnRenderThread). Read the host camera DIRECTLY here:
+    // calling the marshaling read_host_camera() would queue ANOTHER render-thread task behind this
+    // one, which can never run while we're occupying the render thread -> 3s self-deadlock timeout
+    // ("timed out reading host camera on render thread") -> every frame fails -> black webview.
     Camera saved;
-    if (!read_host_camera(saved, err))
+    if (!df::global::window_x || !df::global::window_y || !df::global::window_z) {
+        if (err) *err = "DF window coordinates are unavailable";
         return false;
+    }
+    saved.x = *df::global::window_x;
+    saved.y = *df::global::window_y;
+    saved.z = *df::global::window_z;
 
     bool needs_full_host_restore = false;
 
