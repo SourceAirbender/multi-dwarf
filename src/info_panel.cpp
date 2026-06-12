@@ -1294,13 +1294,47 @@ std::vector<df::artifact_record*> all_world_artifacts() {
     return out;
 }
 
+// --- Fort scoping ------------------------------------------------------------------------
+// Base DF's fortress Objects screen lists only objects present at / claimed by YOUR fort, not
+// every artifact in world history. world->artifacts.all is the whole world (hundreds, all the
+// worldgen relics held by figures elsewhere), so a fresh fort must show (almost) none.
+int32_t fortress_site_id() {
+    auto pi = df::global::plotinfo;
+    return (pi && pi->main.fortress_site) ? pi->main.fortress_site->id : -1;
+}
+bool item_on_local_map(df::item* item) {
+    if (!item || item->flags.bits.removed || item->flags.bits.garbage_collect)
+        return false;
+    df::coord pos = Items::getPosition(item);
+    return pos.x >= 0 && pos.y >= 0 && pos.z >= 0;
+}
+bool artifact_at_fort(df::artifact_record* a) {
+    if (!a)
+        return false;
+    if (item_on_local_map(a->item))         // physically present on the fortress map
+        return true;
+    int32_t fs = fortress_site_id();         // or recorded as located/stored at the fort site
+    return fs >= 0 && (a->site == fs || a->storage_site == fs);
+}
+std::vector<df::artifact_record*> fort_artifacts() {
+    std::vector<df::artifact_record*> out;
+    for (auto a : all_world_artifacts())
+        if (artifact_at_fort(a))
+            out.push_back(a);
+    return out;
+}
+
 std::vector<df::artifact_record*> symbol_artifacts() {
     std::vector<df::artifact_record*> out;
     auto world = df::global::world;
-    if (!world)
+    auto plotinfo = df::global::plotinfo;
+    if (!world || !plotinfo)
         return out;
     for (auto entity : world->entities.all) {
         if (!entity)
+            continue;
+        // Only the player's own civilization / fortress group, not every entity in the world.
+        if (entity->id != plotinfo->civ_id && entity->id != plotinfo->group_id)
             continue;
         for (auto claim : entity->artifact_claims) {
             if (!claim || claim->claim_type != df::artifact_claim_type::Symbol)
@@ -1316,6 +1350,8 @@ std::vector<df::artifact_record*> symbol_artifacts() {
 std::vector<df::artifact_record*> named_object_artifacts() {
     std::vector<df::artifact_record*> out;
     for (auto artifact : all_world_artifacts()) {
+        if (!artifact_at_fort(artifact))
+            continue;
         if (is_written_artifact(artifact))
             continue;
         if (artifact_has_claim_type(artifact, df::artifact_claim_type::Symbol))
@@ -1368,7 +1404,7 @@ void build_objects_panel(InfoPanel& panel) {
     if (panel.detail.empty())
         panel.detail = "artifacts";
     if (panel.detail == "artifacts") {
-        add_artifact_rows(panel, all_world_artifacts(), "Artifact", 120);
+        add_artifact_rows(panel, fort_artifacts(), "Artifact", 120);
     } else if (panel.detail == "symbols") {
         add_artifact_rows(panel, symbol_artifacts(), "Symbol", 120);
         for (auto& row : panel.rows) {
@@ -1379,14 +1415,14 @@ void build_objects_panel(InfoPanel& panel) {
         add_artifact_rows(panel, named_object_artifacts(), "Named object", 120);
     } else if (panel.detail == "written") {
         for (auto artifact : all_world_artifacts()) {
-            if (is_written_artifact(artifact)) {
+            if (artifact_at_fort(artifact) && is_written_artifact(artifact)) {
                 panel.rows.push_back(row_for_artifact(artifact, "Written object"));
                 if (panel.rows.size() >= 120)
                     break;
             }
         }
-        if (panel.rows.empty())
-            build_written_content_panel(panel);
+        // No unfiltered world fallback: base DF lists only written works present at the fort,
+        // so dumping world->written_contents.all here flooded the tab with every book in history.
     }
 
     if (panel.rows.empty()) {

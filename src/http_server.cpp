@@ -513,7 +513,10 @@ void register_routes(httplib::Server& server) {
         int px2 = px, py2 = py;
         query_int(req, "px2", px2);
         query_int(req, "py2", py2);
-        std::string type = req.has_param("type") ? req.get_param_value("type") : "MeetingHall";
+        // The web sends the zone kind as the short key `zone` (e.g. zone=pen); Lua create_zone maps
+        // it (meeting->MeetingHall, pen->Pen, ...). The refactor read "type" here, which the web
+        // never sends -> it always fell back to the default -> every zone became a Meeting Area.
+        std::string zonetype = req.has_param("zone") ? req.get_param_value("zone") : "meeting";
 
         Camera camera;
         std::string err;
@@ -523,7 +526,7 @@ void register_routes(httplib::Server& server) {
             return;
         }
         int id = -1;
-        if (!create_zone_via_lua(camera, px, py, px2, py2, frame_w, frame_h, type, id, &err)) {
+        if (!create_zone_via_lua(camera, px, py, px2, py2, frame_w, frame_h, zonetype, id, &err)) {
             res.status = 400;
             res.set_content("zone failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
