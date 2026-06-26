@@ -41,6 +41,12 @@ In-game, open the DFHack launcher (**Ctrl-Shift-D**) and run **`gui/dfcapture`**
 window lets you **Start/Stop** the server, pick the **port**, choose **who can connect**
 (your network vs. this PC only (for testing))
 
+![GUI1](img/gui1.png)
+
+and
+
+![GUI2](img/gui2.png)
+
 Give every viewer a link with their **own unique name** on the end:
 
 - **You** connect at `http://localhost:8765/view?player=YOURNAME`.

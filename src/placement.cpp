@@ -23,12 +23,17 @@
 #include "diagnostics.h"
 #include "sdl_capture.h"
 
+#include "Core.h"
 #include "TileTypes.h"
 #include "modules/Designations.h"
 #include "modules/DFSDL.h"
+#include "modules/Job.h"
 #include "modules/MapCache.h"
 
 #include "df/global_objects.h"
+#include "df/job.h"
+#include "df/job_list_link.h"
+#include "df/job_type.h"
 #include "df/plant.h"
 #include "df/plant_tree_info.h"
 #include "df/tile_designation.h"
@@ -46,6 +51,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 namespace dfcapture {
 namespace {
@@ -67,6 +73,29 @@ std::recursive_mutex g_designation_mutex;
 
 int clamp_int(int value, int low, int high) {
     return std::max(low, std::min(high, value));
+}
+
+// Job types DF queues from dig/chop/gather/track/engrave designations. Once you press play,
+// designations turn into these jobs and the tiles' designation bits clear -- so the eraser must
+// cancel these jobs too, not just clear the bits. This is what DF's native erase does.
+bool is_designation_job(df::job_type jt) {
+    switch (jt) {
+    case df::job_type::Dig:
+    case df::job_type::CarveUpwardStaircase:
+    case df::job_type::CarveDownwardStaircase:
+    case df::job_type::CarveUpDownStaircase:
+    case df::job_type::CarveRamp:
+    case df::job_type::DigChannel:
+    case df::job_type::CarveFortification:
+    case df::job_type::CarveTrack:
+    case df::job_type::DetailWall:
+    case df::job_type::DetailFloor:
+    case df::job_type::FellTree:
+    case df::job_type::GatherPlants:
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool dig_from_tool(const std::string& tool, df::tile_dig_designation& out) {
@@ -246,6 +275,9 @@ struct RenderDesignationRequest {
     DesignationResult result;
     std::string err;
     std::promise<bool> done;
+    // World-tile box of the selection, recorded by apply_designation so the post-render
+    // eraser job-cancel pass can run under CoreSuspender. box_x2 < box_x1 means "not set".
+    int box_x1 = 0, box_y1 = 0, box_x2 = -1, box_y2 = -1, box_z = 0;
 };
 
 bool apply_tile_designations(RenderDesignationRequest& req, MapExtras::MapCache& map,
@@ -417,6 +449,12 @@ bool apply_designation(RenderDesignationRequest& req) {
     int wy2 = req.camera.y + ty2;
     int wz = req.camera.z;
 
+    // Record the world box so the eraser's post-render job-cancel pass knows what to clear,
+    // even when the tile pass below changes nothing (the "designation became a job" case).
+    req.box_x1 = wx1; req.box_y1 = wy1;
+    req.box_x2 = wx2; req.box_y2 = wy2;
+    req.box_z = wz;
+
     MapExtras::MapCache map;
     bool changed = false;
 
@@ -468,6 +506,43 @@ bool designate_on_render_thread(const Camera& camera, const DesignationRequest& 
     });
 
     bool ok = future.get();
+
+    // Eraser: cancel the dig/chop/gather JOBS in the box -- off the render thread, under
+    // CoreSuspender (main parked) so unlinking from the job list can't race DF's job manager
+    // during play. Runs even when the tile pass found nothing (n==0): that is exactly the case
+    // where pressing play turned the designations into jobs and cleared the tiles' dig bits, so
+    // only clearing designation bits did nothing.
+    if (kind == DesignationKind::Clear &&
+            req->box_x2 >= req->box_x1 && req->box_y2 >= req->box_y1) {
+        int canceled = 0;
+        {
+            std::lock_guard<std::recursive_mutex> cap_lock(capture_state_mutex());
+            DFHack::CoreSuspender suspend;
+            auto world = df::global::world;
+            if (world) {
+                std::vector<df::job*> to_cancel;
+                for (auto* link = world->jobs.list.next; link; link = link->next) {
+                    df::job* job = link->item;
+                    if (!job)
+                        continue;
+                    if (job->pos.z == req->box_z &&
+                            job->pos.x >= req->box_x1 && job->pos.x <= req->box_x2 &&
+                            job->pos.y >= req->box_y1 && job->pos.y <= req->box_y2 &&
+                            is_designation_job(job->job_type)) {
+                        to_cancel.push_back(job);
+                    }
+                }
+                for (df::job* job : to_cancel)
+                    if (DFHack::Job::removeJob(job))
+                        ++canceled;
+            }
+        }
+        if (canceled > 0) {
+            ok = true;
+            req->result.count += canceled;
+        }
+    }
+
     result = req->result;
     if (!ok && err)
         *err = req->err;
