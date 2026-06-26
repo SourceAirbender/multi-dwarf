@@ -4,7 +4,7 @@ A [DFHack](https://github.com/DFHack/dfhack) plugin that lets several people wat
 play **one shared Dwarf Fortress** from a web browser. The host runs the game & everyone
 else opens a URL and gets their own independent camera, designations, menus, and HUD streamed live.
 
-> **Version 0.7.5-beta** — built against **DFHack 53.15-r1** (Windows 64-bit).
+[Video showcase of the mod -older version though-](https://www.youtube.com/watch?v=5uvzqwSsfbQ)
 
 ## Important Notes
 
