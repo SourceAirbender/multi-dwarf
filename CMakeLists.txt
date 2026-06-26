@@ -45,11 +45,13 @@ dfhack_plugin(dfcapture_public
     LINK_LIBRARIES gdiplus ole32 ws2_32 lua)
 
 target_include_directories(dfcapture_public PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../dfplex-src/server/cpp-httplib")
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-httplib")
 
 set_target_properties(dfcapture_public PROPERTIES OUTPUT_NAME dfcapture)
 
 if(INSTALL_DATA_FILES)
     install(FILES dfcapture.lua
         DESTINATION ${DFHACK_LUA_DESTINATION}/plugins)
+    install(FILES scripts/gui/dfcapture.lua
+        DESTINATION ${DFHACK_DATA_DESTINATION}/scripts/gui)
 endif()
