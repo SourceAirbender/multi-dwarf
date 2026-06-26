@@ -6,9 +6,6 @@ else opens a URL and gets their own independent camera, designations, menus, and
 
 [Video showcase of the mod -older version though-](https://www.youtube.com/watch?v=5uvzqwSsfbQ)
 
-If you want to support me:
-[Venmo](https://venmo.com/gaberios019)
-[Ko-fi](https://ko-fi.com/airbending_gabrielr)
 
 ## Important Notes
 
