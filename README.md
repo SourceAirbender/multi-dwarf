@@ -52,7 +52,7 @@ Give every viewer a link with their **own unique name** on the end:
 - **You** connect at `http://localhost:8765/view?player=YOURNAME`.
 - **Friends** connect at `http://<your-LAN-IP>:8765/view?player=THEIRNAME` (find `<your-LAN-IP>`
   by running `ipconfig` and reading the IPv4 Address; they must be on the same network or reach
-  you through a forwarded port / VPN).
+  you through a forwarded port / VPN). I use PiVPN / WireGuard. Tailscale also works.
 - Example after starting the server: http://192.168.1.202:8765/view?player=player1
 
 Use a different name per viewer. You can use the same link as the host locally to see what your remote player is seeing, if you want.
