@@ -16,6 +16,9 @@ opens the Residents menu, or when both the host & remote player have the same un
 
 Please collect crash logs and include them when submitting issues, lots to work on still!
 
+If the remote player interacts with the game while the game is saving on the host side, your game will probably crash!
+
+
 ## Install
 
 1. Download the latest `dfcapture-…-DFHack-53.15-r1.zip` from the
