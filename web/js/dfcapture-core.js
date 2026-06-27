@@ -202,12 +202,6 @@
       scheduleFrame(500);
     }
   }
-  loadFrame();
-  loadHud();
-  loadNotifications();
-  setInterval(loadHud, 1000);
-  setInterval(loadNotifications, 500);
-
   const step = 10;
   const zstep = 1;
   let queued = { dx: 0, dy: 0, dz: 0 };
@@ -259,6 +253,76 @@
     } catch (_) {}
     loadHud();
     if (zoneOverlayEnabled) loadZones();
+  }
+
+  function isTextEditingTarget(target) {
+    const tag = target && target.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!target?.isContentEditable;
+  }
+
+  function handleCameraKey(event) {
+    if (!event || isTextEditingTarget(event.target)) return false;
+    if (event.altKey || event.metaKey || event.ctrlKey) return false;
+    switch (event.key) {
+      case "ArrowLeft": case "a": case "A": case "h": case "H":
+        queueMove(-step, 0, 0); return true;
+      case "ArrowRight": case "d": case "D": case "l": case "L":
+        queueMove(step, 0, 0); return true;
+      case "ArrowUp": case "w": case "W": case "k": case "K":
+        queueMove(0, -step, 0); return true;
+      case "ArrowDown": case "s": case "S": case "j": case "J":
+        queueMove(0, step, 0); return true;
+      case "PageUp": case ">": case "e": case "E":
+        queueMove(0, 0, zstep); return true;
+      case "PageDown": case "<": case "q": case "Q":
+        queueMove(0, 0, -zstep); return true;
+      case "[": case "=": case "+":
+        sendZoom("in"); return true;
+      case "]": case "-": case "_":
+        sendZoom("out"); return true;
+      case "Home": case "r": case "R":
+        resetToHost(); return true;
+      default:
+        return false;
+    }
+  }
+
+  if (!window.__dfcaptureCoreCameraControlsBound) {
+    window.__dfcaptureCoreCameraControlsBound = true;
+    addEventListener("keydown", event => {
+      if (handleCameraKey(event)) {
+        focusPage();
+        event.__dfcaptureCameraHandled = true;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    }, { capture: true });
+    addEventListener("wheel", event => {
+      if (event.target.closest("#clientPanel.visible, #selection.visible, #alertPopup"))
+        return;
+      focusPage();
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.shiftKey) {
+        sendZoom(event.deltaY < 0 ? "in" : "out");
+      } else {
+        queueMove(0, 0, event.deltaY < 0 ? zstep : -zstep);
+      }
+    }, { passive: false, capture: true });
+  }
+
+  function startDfcapture() {
+    if (window.__dfcaptureStarted) return;
+    window.__dfcaptureStarted = true;
+    loadFrame();
+    if (typeof loadHud === "function") {
+      loadHud();
+      setInterval(loadHud, 1000);
+    }
+    if (typeof loadNotifications === "function") {
+      loadNotifications();
+      setInterval(loadNotifications, 500);
+    }
   }
 
   function imagePixelFromEvent(event) {

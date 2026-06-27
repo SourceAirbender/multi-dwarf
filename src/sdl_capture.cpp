@@ -39,6 +39,7 @@
 #include "df/main_interface.h"
 #include "df/renderer.h"
 #include "df/viewscreen.h"
+#include "df/viewscreen_dwarfmodest.h"
 #include "df/world.h"
 
 #ifdef _WIN32
@@ -201,7 +202,7 @@ static bool call_update_full_viewport_seh(df::renderer* renderer, df::graphic_vi
 }
 
 static uint8_t g_dummy_follow[0x4000] = {0};
-constexpr uintptr_t VIEW_FOLLOW_RVA = 0x23d2df0;
+constexpr uintptr_t VIEW_FOLLOW_RVA = 0x23d9db0; // DF 53.15 (was 0x23d2df0 on Steam 53.14)
 
 static int call_native_sequence_seh(uintptr_t map_renderer) {
     void** p_follow = reinterpret_cast<void**>(g_exe_base + VIEW_FOLLOW_RVA);
@@ -384,10 +385,14 @@ bool resolve_render_map(std::string* err = nullptr) {
         return false;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(exe);
-    const uintptr_t CLEAR_RVA = 0x8ba0f0;
-    const uintptr_t SETUP_RVA = 0x7febc0;
-    const uintptr_t FILL_RVA = 0xe915c0;
-    const uintptr_t BLIT_RVA = 0xaec020;
+    // DF 53.15 (Steam) native map-render RVAs. Re-derived 2026-06-27 after DF updated
+    // 53.14 -> 53.15 (the engine moved this machine code, which silently broke per-player
+    // pan/zoom). The prologue signatures below are byte-identical across the two builds;
+    // only the addresses moved. Old 53.14 values kept in comments for reference.
+    const uintptr_t CLEAR_RVA = 0x8bcb60; // 53.14 was 0x8ba0f0
+    const uintptr_t SETUP_RVA = 0x801630; // 53.14 was 0x7febc0
+    const uintptr_t FILL_RVA = 0xe949e0;  // 53.14 was 0xe915c0
+    const uintptr_t BLIT_RVA = 0xaeead0;  // 53.14 was 0xaec020
 
     struct Probe {
         uintptr_t rva;
@@ -409,7 +414,7 @@ bool resolve_render_map(std::string* err = nullptr) {
         if (std::memcmp(reinterpret_cast<const uint8_t*>(base + p.rva), p.sig, p.n) != 0) {
             if (err) {
                 *err = std::string("native map render: prologue mismatch for ") +
-                       p.name + " (binary differs from Steam 53.14)";
+                       p.name + " (binary differs from Steam 53.15)";
             }
             return false;
         }
@@ -417,7 +422,7 @@ bool resolve_render_map(std::string* err = nullptr) {
 
     uintptr_t map_renderer = core.vinfo->getAddress("map_renderer");
     if (!map_renderer)
-        map_renderer = base + 0x2388300;
+        map_renderer = base + 0x238f2c0; // DF 53.15 (was 0x2388300); normally resolved via the symbol above
 
     g_map_renderer_addr = map_renderer;
     g_exe_base = base;
@@ -427,7 +432,7 @@ bool resolve_render_map(std::string* err = nullptr) {
     p_NativeBlit = reinterpret_cast<pfn_NativeBlit>(base + BLIT_RVA);
     g_render_map_mode = RenderMapMode::NativeSequence;
     if (!g_warned_recovered_render_map.exchange(true)) {
-        diagnostics_log("DIAG: resolved DF 53.14 native map-render sequence "
+        diagnostics_log("DIAG: resolved DF 53.15 native map-render sequence "
                         "(clear/setup/fill/blit) -- independent map render, no UI state.");
     }
     return true;
@@ -933,8 +938,8 @@ bool render_map_for_current_window(std::string* err = nullptr) {
     int fault = call_native_sequence_seh(g_map_renderer_addr);
     if (fault != 0) {
         static const char* stage_name[] = {
-            "none", "clear(0x8ba0f0)", "setup(0x7febc0)",
-            "fill(0xe915c0)", "blit(0xaec020)"
+            "none", "clear(0x8bcb60)", "setup(0x801630)",
+            "fill(0xe949e0)", "blit(0xaeead0)"
         };
         static std::atomic<uint32_t> fault_count{0};
         if ((fault_count.fetch_add(1) % 600) == 0) {
@@ -1403,6 +1408,22 @@ bool capture_shifted(const Camera& camera, CapturedFrame& frame,
     // calling the marshaling read_host_camera() would queue ANOTHER render-thread task behind this
     // one, which can never run while we're occupying the render thread -> 3s self-deadlock timeout
     // ("timed out reading host camera on render thread") -> every frame fails -> black webview.
+#ifdef _WIN32
+    // HARD GATE (crash fix 2026-06-27): only run the native map render while a fortress map view
+    // is actually live. During title/load/save -- and especially world TEARDOWN when a fort is
+    // exited (top viewscreen becomes viewscreen_titlest / viewscreen_game_cleanerst) -- DF's MAIN
+    // thread frees the map + renderer while this render thread would still be reading them. That
+    // produced the null/wild-pointer "NATIVE FAULT @ fill/blit" entries in dfcapture.log AND, more
+    // seriously, a crash on DF's own main thread mid-teardown ("Advancing unit moves") that our
+    // SEH cannot catch (SEH only guards THIS thread; it can't stop the main thread from faulting
+    // on a map we race). getViewscreenByType<dwarfmodest>(0) scans the whole viewscreen stack, so
+    // it stays valid under menus/overlays during play and is null only when there is genuinely no
+    // live fort -- exactly the moments we must not touch the map.
+    if (!DFHack::Gui::getViewscreenByType<df::viewscreen_dwarfmodest>(0)) {
+        if (err) *err = "no live fortress view (capture skipped during menu/load/teardown)";
+        return false;
+    }
+#endif
     Camera saved;
     if (!df::global::window_x || !df::global::window_y || !df::global::window_z) {
         if (err) *err = "DF window coordinates are unavailable";

@@ -132,6 +132,11 @@ void register_routes(httplib::Server& server) {
     });
 
     server.Get("/view", [](const httplib::Request&, httplib::Response& res) {
+        // Never let the browser cache the page itself. Otherwise a stale index.html keeps
+        // loading old (cached) JS even after an update -- which is how an already-removed
+        // feature can appear to "persist" across reloads and even across browsers. The
+        // versioned <script>/<link> URLs in index.html handle freshness of the assets.
+        res.set_header("Cache-Control", "no-store, must-revalidate");
         res.set_content(index_html(), "text/html; charset=utf-8");
     });
 
