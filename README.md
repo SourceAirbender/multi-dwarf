@@ -21,7 +21,7 @@ Please collect crash logs and include them when submitting issues, lots to work 
 1. Download the latest `dfcapture-…-DFHack-53.15-r1.zip` from the
    [**Releases**](../../releases) page.
 2. Extract it, then copy the **`hack`** folder into your Dwarf Fortress directory — the
-   one that already contains a `hack` folder (your DFHack install).
+   one that already contains a `hack` folder (your DFHack install). This mod doesn't currently work with the Steam version of DFHack. DFHack has to be installed the old way, directly into your Dwarf Fortress directory
 3. Start the game through DFHack as usual.
 
 
