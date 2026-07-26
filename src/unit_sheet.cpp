@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,7 +21,11 @@
 #include "unit_sheet.h"
 
 #include "json_util.h"
+#include "render_thread_wait.h"
+#include "save_barrier.h"
+#include "sdl_capture.h"
 
+#include "Core.h"
 #include "MiscUtils.h"
 #include "modules/Buildings.h"
 #include "modules/DFSDL.h"
@@ -94,6 +98,7 @@ void append_unit_json(std::ostringstream& body, const UnitSheet& unit) {
          << "\"portraitTexpos\":" << unit.portrait_texpos << ","
          << "\"sheetIconTexpos\":" << unit.sheet_icon_texpos << ","
          << "\"name\":" << json_string(unit.name) << ","
+         << "\"nickname\":" << json_string(unit.nickname) << ","
          << "\"race\":" << json_string(unit.race) << ","
          << "\"profession\":" << json_string(unit.profession) << ","
          << "\"currentJob\":" << json_string(unit.current_job) << ","
@@ -1101,6 +1106,7 @@ UnitSheet build_unit_sheet(df::unit* unit) {
     sheet.name = Units::getReadableName(unit);
     if (sheet.name.empty())
         sheet.name = Units::getRaceReadableName(unit);
+    sheet.nickname = unit->name.nickname;
     sheet.race = Units::getRaceReadableName(unit);
     sheet.profession = Units::getProfessionName(unit);
     sheet.current_job = unit_current_job_label(unit);
@@ -1194,6 +1200,11 @@ bool unit_sheet_on_render_thread(int32_t unit_id,
     auto future = request->done.get_future();
 
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         try {
             auto found = df::unit::find(request->unit_id);
             if (!found) {
@@ -1213,13 +1224,44 @@ bool unit_sheet_on_render_thread(int32_t unit_id,
         }
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "unit-sheet render-thread request timed out or was abandoned";
+        return false;
+    }
     if (!ok) {
         if (err) *err = request->err.empty() ? "unit sheet failed" : request->err;
         return false;
     }
     unit = std::move(request->unit);
     tile = request->tile;
+    return true;
+}
+
+bool set_unit_nickname_on_core_thread(int32_t unit_id,
+                                      const std::string& nickname,
+                                      std::string* err) {
+    std::lock_guard<std::recursive_mutex> module_lock(g_unit_sheet_mutex);
+    std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
+    DFHack::CoreSuspender suspend;
+    if (save_barrier_active()) {
+        if (err) *err = "Dwarf Fortress is saving or unloading";
+        return false;
+    }
+    auto unit = df::unit::find(unit_id);
+    if (!unit) {
+        if (err) *err = "unit not found";
+        return false;
+    }
+    if (nickname.size() > 64) {
+        if (err) *err = "nickname is longer than 64 characters";
+        return false;
+    }
+    if (nickname.find_first_of("\r\n\t") != std::string::npos) {
+        if (err) *err = "nickname contains unsupported control characters";
+        return false;
+    }
+    unit->name.nickname = nickname;
     return true;
 }
 

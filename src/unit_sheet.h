@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -46,6 +46,7 @@ struct UnitSheet {
     int32_t portrait_texpos = -1;
     int32_t sheet_icon_texpos = -1;
     std::string name;
+    std::string nickname;
     std::string race;
     std::string profession;
     std::string current_job;
@@ -105,5 +106,9 @@ bool unit_sheet_on_render_thread(int32_t unit_id,
                                  UnitSheet& unit,
                                  Camera& tile,
                                  std::string* err = nullptr);
+
+bool set_unit_nickname_on_core_thread(int32_t unit_id,
+                                      const std::string& nickname,
+                                      std::string* err = nullptr);
 
 } // namespace dfcapture

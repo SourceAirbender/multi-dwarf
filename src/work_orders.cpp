@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -20,10 +20,12 @@
 
 #include "work_orders.h"
 
+#include "attribution.h"
 #include "json_util.h"
 #include "lua_bridge.h"
 
 #include <string>
+#include <vector>
 
 namespace dfcapture {
 namespace {
@@ -65,6 +67,7 @@ void register_work_order_routes(httplib::Server& server) {
                         "order workshops failed");
 
     auto order_create_handler = [](const httplib::Request& req, httplib::Response& res) {
+        const std::string player = query_player(req);
         if (!req.has_param("key")) {
             text_error(res, 400, "missing key");
             return;
@@ -79,11 +82,14 @@ void register_work_order_routes(httplib::Server& server) {
 
         std::string msg;
         std::string err;
+        std::vector<int32_t> created_ids;
         if (!create_order_via_lua(req.get_param_value("key"), amount, frequency,
-                                  workshop_id, &msg, &err)) {
+                                  workshop_id, &msg, &err, &created_ids)) {
             text_error(res, 400, "create order failed: " + err);
             return;
         }
+        for (int32_t id : created_ids)
+            attrib_stamp(AttribKind::Order, id, player);
         set_no_store_json(res, "{\"ok\":true,\"msg\":" + json_string(msg) + "}\n");
     };
     server.Get("/order-create", order_create_handler);
@@ -162,6 +168,35 @@ void register_work_order_routes(httplib::Server& server) {
     };
     server.Get("/order-condition-item-add", order_cond_item_handler);
     server.Post("/order-condition-item-add", order_cond_item_handler);
+
+    auto order_cond_item_edit_handler = [](const httplib::Request& req,
+                                             httplib::Response& res) {
+        int id = -1;
+        int index = -1;
+        int value = 0;
+        if (!query_int(req, "id", id) || !query_int(req, "idx", index) ||
+                !req.has_param("item")) {
+            text_error(res, 400, "missing id/idx/item");
+            return;
+        }
+        query_int(req, "value", value);
+        const std::string compare =
+            req.has_param("compare") ? req.get_param_value("compare") : "AtMost";
+        const std::string material =
+            req.has_param("material") ? req.get_param_value("material") : "";
+        const std::string adjective =
+            req.has_param("adjective") ? req.get_param_value("adjective") : "";
+        std::string err;
+        if (!edit_item_condition_via_lua(
+                id, index, compare, value, req.get_param_value("item"),
+                material, adjective, &err)) {
+            text_error(res, 400, "edit condition failed: " + err);
+            return;
+        }
+        set_no_store_json(res, "{\"ok\":true}\n");
+    };
+    server.Get("/order-condition-item-edit", order_cond_item_edit_handler);
+    server.Post("/order-condition-item-edit", order_cond_item_edit_handler);
 
     server.Get("/condition-materials", [](const httplib::Request& req, httplib::Response& res) {
         std::string item = req.has_param("item") ? req.get_param_value("item") : "";

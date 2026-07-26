@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2025 - 2026 Gabriel Rios
+// Copyright (C) 2025 - 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,13 +24,17 @@
 #include "modules/DFSDL.h"
 
 #include "diagnostics.h"
+#include "attribution.h"
 #include "http_server.h"
 #include "image_encoder.h"
+#include "lua_bridge.h"
 #include "overlay_control.h"
+#include "save_barrier.h"
 #include "sdl_capture.h"
 #include "web_assets.h"
 
 #include "df/global_objects.h"
+#include "df/world.h"
 
 #include <cstdlib>
 #include <string>
@@ -39,6 +43,7 @@
 using namespace DFHack;
 
 DFHACK_PLUGIN("dfcapture");
+DFHACK_PLUGIN_IS_ENABLED(is_enabled);
 
 namespace {
 
@@ -184,6 +189,9 @@ command_result cmd_status(color_ostream& out, std::vector<std::string>&) {
 } // namespace
 
 DFhackCExport command_result plugin_init(color_ostream& out, std::vector<PluginCommand>& commands) {
+    is_enabled = true;
+    dfcapture::save_barrier_set_world_loaded(Core::getInstance().isWorldLoaded());
+
     commands.push_back(PluginCommand(
         "capture",
         "Path-2 test: render the current view offscreen and save dfcapture_test.bmp",
@@ -211,10 +219,43 @@ DFhackCExport command_result plugin_init(color_ostream& out, std::vector<PluginC
 
 DFhackCExport command_result plugin_shutdown(color_ostream&) {
 #ifdef _WIN32
+    is_enabled = false;
+    dfcapture::save_barrier_shutdown();
     dfcapture::diagnostics_log("plugin shutdown");
     dfcapture::stop_server();
     dfcapture::restore_overlay_after_stream();
     dfcapture::shutdown_image_encoder();
 #endif
+    return CR_OK;
+}
+
+DFhackCExport command_result plugin_onstatechange(color_ostream&, state_change_event event) {
+    if (event == SC_WORLD_UNLOADED)
+        dfcapture::save_barrier_set_world_loaded(false);
+    else if (event == SC_WORLD_LOADED) {
+        dfcapture::save_barrier_set_world_loaded(true);
+        if (df::global::world)
+            dfcapture::attrib_note_world(df::global::world->cur_savegame.save_dir);
+        int holders = 0;
+        int categories = 0;
+        std::string repair_err;
+        if (dfcapture::repair_stockpile_settings_via_lua(holders, categories, &repair_err)) {
+            dfcapture::diagnostics_log("stockpile-repair-on-load: healed " +
+                std::to_string(holders) + " holder(s), " +
+                std::to_string(categories) + " category list(s)");
+        } else {
+            dfcapture::diagnostics_log("stockpile-repair-on-load FAILED: " + repair_err);
+        }
+    }
+    return CR_OK;
+}
+
+DFhackCExport command_result plugin_save_site_data(color_ostream&) {
+    dfcapture::save_barrier_begin();
+    return CR_OK;
+}
+
+DFhackCExport command_result plugin_onupdate(color_ostream&) {
+    dfcapture::save_barrier_update();
     return CR_OK;
 }

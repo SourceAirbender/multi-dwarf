@@ -1,7 +1,7 @@
-<!doctype html>
+﻿<!doctype html>
 <!--
   dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-  Copyright (C) 2026 Gabriel Rios
+  Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU Affero General Public License as published by
@@ -25,9 +25,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DFCapture</title>
-<link rel="stylesheet" href="/css/dfcapture.css?v=0.7.6-beta">
+<link rel="stylesheet" href="/css/dfcapture.css?v=0.9.43-coop-parity">
 </head>
 <body tabindex="0">
+<!-- Crisp-text filter: 1-bits the glyph-mask alpha to undo Chrome/DirectWrite ClearType smear so
+     the DFCurses bitmap font renders sharp. Referenced by --df-text-crisp in dfcapture.css. Must be
+     inline in this document (Chrome does not support external/data-URL filter refs). If removed it
+     degrades to a harmless no-op: a missing filter ref renders the text unfiltered, never blank. -->
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <filter id="dfcap-crisp" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+    <feComponentTransfer><feFuncA type="discrete" tableValues="0 0 0 1"/></feComponentTransfer>
+  </filter>
+</svg>
 <img id="view" tabindex="0" alt="">
 <canvas id="zoneOverlay" aria-hidden="true"></canvas>
 <div id="hud">
@@ -36,24 +45,34 @@
       <span class="announcement-main-icon" aria-hidden="true"></span>
     </button>
   </div>
+  <!-- Utility strip: panels this build adds that are NOT Dwarf Fortress toolbar concepts. Kept
+       OFF the bottom bar entirely (it is DF's, and its groups are absolutely positioned, so a
+       fourth group there collided with the left one) and stacked down the left edge instead. -->
+  <div class="tool-group extra-tools" id="extraTools">
+    <button class="tool-button aux-tool aux-reports" data-panel="reports" title="Reports and announcements" aria-label="Reports and announcements"></button>
+    <button class="tool-button aux-tool aux-hospital" data-panel="hospital" title="Hospital" aria-label="Hospital"></button>
+    <button class="tool-button aux-tool aux-trade" data-panel="tradedepot" title="Trade depot" aria-label="Trade depot"></button>
+    <button class="tool-button aux-tool aux-diplo" data-panel="diplo" title="Diplomacy" aria-label="Diplomacy"></button>
+    <button class="tool-button aux-tool aux-vote" data-panel="vote" title="Fortress vote" aria-label="Fortress vote"></button>
+    <button class="tool-button aux-tool aux-console" data-panel="console" title="DFHack console" aria-label="DFHack console"></button>
+  </div>
   <div id="topbar" class="df-panel">
     <div class="fort-lines">
       <div id="fortName">Fortress</div>
       <div id="siteName">Site</div>
       <div id="rankName">Outpost</div>
     </div>
-    <div class="status-group">
-      <span class="label">Pop</span>
+    <div class="status-group" id="popGroup">
+      <span class="mood-cell pop-cell"><span class="label">Pop</span><span id="population" class="mood-n">0</span></span>
       <div class="moods" id="moods">
-        <span class="mood-cell"><span class="mood m0">&#9786;</span><span class="mood-n">0</span></span>
-        <span class="mood-cell"><span class="mood m1">&#9786;</span><span class="mood-n">0</span></span>
-        <span class="mood-cell"><span class="mood m2">&#9786;</span><span class="mood-n">0</span></span>
-        <span class="mood-cell"><span class="mood m3">&#9786;</span><span class="mood-n">0</span></span>
-        <span class="mood-cell"><span class="mood m4">&#9786;</span><span class="mood-n">0</span></span>
-        <span class="mood-cell"><span class="mood m5">&#9786;</span><span class="mood-n">0</span></span>
-        <span class="mood-cell"><span class="mood m6">&#9786;</span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood-icon" data-mood-icon="0"></span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood-icon" data-mood-icon="1"></span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood-icon" data-mood-icon="2"></span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood-icon" data-mood-icon="3"></span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood-icon" data-mood-icon="4"></span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood-icon" data-mood-icon="5"></span><span class="mood-n">0</span></span>
+        <span class="mood-cell"><span class="mood-icon" data-mood-icon="6"></span><span class="mood-n">0</span></span>
       </div>
-      <span id="population">0</span>
     </div>
     <button class="top-button" data-panel="stocks">Stocks</button>
     <div class="status-group hide-small"><span class="label">Food</span><span id="food" class="gold">~0</span></div>
@@ -66,9 +85,10 @@
     </div>
   </div>
   <div id="pauseRow">
-    <button class="square-button" data-action="pause" title="Pause">&#10074;&#10074;</button>
-    <button class="square-button" data-action="play" title="Play">&#9654;</button>
-    <button class="square-button" id="settingsBtn" title="Settings">&#9881;</button>
+    <button class="square-button native-top-art pause-art" data-action="pause" title="Pause"></button>
+    <button class="square-button native-top-art play-art" data-action="play" title="Play"></button>
+    <button class="square-button native-top-art settings-art" id="settingsBtn" title="Settings"></button>
+    <button class="square-button native-top-art help-art" id="helpBtn" data-panel="help" title="Help"></button>
   </div>
   <div id="settingsMenu">
     <h3>Settings</h3>
@@ -93,21 +113,73 @@
         <span>Show native portraits and body sprites in unit lists. Off = text glyphs only, avoiding DF unit texture generation.</span>
       </div>
     </div>
+    <div class="set-row" id="setFortressHotkeys" title="Choose shared or private camera locations">
+      <div class="set-toggle"></div>
+      <div class="set-label">
+        <b>Shared fortress locations</b>
+        <span id="hotkeyModeDescription">Using the fort's 16 shared locations stored in this save.</span>
+      </div>
+    </div>
+    <div class="set-row set-row-zoom" id="setZoomRow" title="Map zoom">
+      <div class="set-label">
+        <b>Map zoom</b>
+        <span>Change how much of the map this player's independent camera can see.</span>
+      </div>
+      <div class="zoom-controls">
+        <button type="button" id="zoomOutBtn" title="Zoom out">&minus;</button>
+        <span id="zoomReadout">100%</span>
+        <button type="button" id="zoomInBtn" title="Zoom in">+</button>
+        <button type="button" id="zoomResetBtn" title="Reset map zoom">Reset</button>
+      </div>
+    </div>
+    <div class="set-row set-row-zoom" id="setUiScaleRow" title="Client interface scale">
+      <div class="set-label">
+        <b>UI scale</b>
+        <span>Resize the browser interface without changing the rendered map.</span>
+      </div>
+      <div class="zoom-controls">
+        <button type="button" id="uiScaleOutBtn" title="Smaller interface">&minus;</button>
+        <span id="uiScaleReadout">100%</span>
+        <button type="button" id="uiScaleInBtn" title="Larger interface">+</button>
+        <button type="button" id="uiScaleResetBtn" title="Reset interface scale">Reset</button>
+      </div>
+    </div>
+    <div class="set-row set-command-row" id="openAnalyticsRow" title="Show browser-player activity">
+      <div class="set-label"><b>Player activity</b><span>Buildings, stockpiles, zones, and work orders attributed to browser players.</span></div>
+    </div>
+    <div class="set-row set-command-row" id="openObligationsRow" title="Show fort obligations">
+      <div class="set-label"><b>Obligations board</b><span>Noble mandates, petitions, guild halls, and temple agreements.</span></div>
+    </div>
+    <div class="set-row set-command-row" id="resetPanelLayoutRow" title="Restore default panel positions">
+      <div class="set-label"><b>Reset panel layout</b><span>Forget moved and resized browser windows.</span></div>
+    </div>
+    <div class="set-row" id="resetCameraRow" title="Reset this independent camera to the host view">
+      <div class="set-label"><b>Reset camera to host view</b></div>
+    </div>
   </div>
   <div id="rightHud">
+    <div id="minimapToolCol">
+      <button class="minimap-art recenter-hotkeys" id="recenterLocationsBtn" title="Saved camera locations"></button>
+      <button class="minimap-art recenter-surface" data-recenter="surface" title="Recenter on the surface at this location"></button>
+      <button class="minimap-art recenter-deepest" data-recenter="deepest" title="Recenter on the deepest discovered area"></button>
+      <button class="minimap-z-step" data-move-z="1" title="Up one elevation">+</button>
+      <button class="minimap-z-step" data-move-z="-1" title="Down one elevation">-</button>
+      <button class="minimap-art clear-follow" id="followBtn" title="Stop following player" hidden></button>
+    </div>
     <div id="minimap" class="df-panel">
       <canvas id="minimapGrid" title="Click to center your camera here"></canvas>
       <div id="elevation">Elevation 0</div>
-      <div id="minimapBtns">
-        <button class="square-button" data-recenter="surface" title="Recenter on the surface at this location">&#9650;</button>
-        <button class="square-button" data-recenter="deepest" title="Recenter on the deepest discovered area">&#9660;</button>
-      </div>
     </div>
-    <div id="zButtons">
-      <button class="square-button" data-move-z="1" title="Up one elevation">+</button>
-      <button class="square-button" data-move-z="-1" title="Down one elevation">-</button>
-      <button class="square-button" data-panel="water" title="Liquids">~</button>
+    <div id="bmRow" hidden title="Camera bookmarks: click a slot to save/jump, right-click to clear"></div>
+  </div>
+  <div id="zScrollbar" title="Drag or scroll to change elevation">
+    <button type="button" class="z-scroll-step z-scroll-up" data-z-meter-step="1" title="Up one elevation" aria-label="Up one elevation"></button>
+    <div id="zScrollTrack">
+      <div id="zLevelBands" aria-hidden="true"></div>
+      <div id="zPeerMarkers"></div>
+      <div id="zScrollMarker" title="Your camera elevation"></div>
     </div>
+    <button type="button" class="z-scroll-step z-scroll-down" data-z-meter-step="-1" title="Down one elevation" aria-label="Down one elevation"></button>
   </div>
   <div id="digSubmenu" class="tool-group" aria-hidden="true">
     <button class="tool-button" data-dig-tool="dig" title="Regular dig"></button>
@@ -142,6 +214,22 @@
       </div>
     </div>
   </div>
+  <div id="trafficSubmenu" class="tool-group" aria-hidden="true">
+    <button class="tool-button text-tool" data-traffic-tool="high" title="High traffic — prefer this path">Hi</button>
+    <button class="tool-button text-tool" data-traffic-tool="normal" title="Normal traffic">No</button>
+    <button class="tool-button text-tool" data-traffic-tool="low" title="Low traffic — avoid">Lo</button>
+    <button class="tool-button text-tool" data-traffic-tool="restricted" title="Restricted — avoid strongly">Re</button>
+  </div>
+  <div id="itemDesigSubmenu" class="tool-group" aria-hidden="true">
+    <button class="tool-button" data-itemdesig-tool="claim" title="Claim forbidden items"></button>
+    <button class="tool-button" data-itemdesig-tool="forbid" title="Forbid items"></button>
+    <button class="tool-button" data-itemdesig-tool="dump" title="Designate items for dumping"></button>
+    <button class="tool-button" data-itemdesig-tool="undump" title="Cancel dump designations"></button>
+    <button class="tool-button" data-itemdesig-tool="melt" title="Designate items for melting"></button>
+    <button class="tool-button" data-itemdesig-tool="unmelt" title="Cancel melt designations"></button>
+    <button class="tool-button" data-itemdesig-tool="unhide" title="Set items visible"></button>
+    <button class="tool-button" data-itemdesig-tool="hide" title="Hide items"></button>
+  </div>
   <div id="smoothSubmenu" class="tool-group" aria-hidden="true">
     <button class="tool-button" data-smooth-tool="smooth" title="Smooth rough stone"></button>
     <button class="tool-button" data-smooth-tool="engrave" title="Engrave artwork into smooth stone"></button>
@@ -165,18 +253,36 @@
       <button class="tool-button" data-panel="objects" title="Objects">O</button>
       <button class="tool-button" data-panel="justice" title="Justice">J</button>
     </div>
-    <div class="tool-group" id="designationBar">
-      <button class="tool-button" data-dig-menu title="Digging orders"></button>
-      <button class="tool-button" data-designation-tool="chop" title="Chop trees"></button>
-      <button class="tool-button" data-designation-tool="gather" title="Gather plants"></button>
-      <button class="tool-button" data-designation-tool="smooth" title="Smooth stone"></button>
-      <button class="tool-button" data-designation-tool="erase" title="Erase designations"></button>
+    <!-- Centre cluster: one continuous gold frame with flush cells. Dark dividers retain the
+         semantic tool groups without breaking the strip into disconnected boxes. -->
+    <div class="tool-group" id="centerTools">
+      <div class="tool-subgroup" id="designationBar">
+        <button class="tool-button" data-dig-menu title="Digging orders"></button>
+        <button class="tool-button" data-designation-tool="chop" title="Chop trees"></button>
+        <button class="tool-button" data-designation-tool="gather" title="Gather plants"></button>
+        <button class="tool-button" data-designation-tool="smooth" title="Smooth stone"></button>
+        <button class="tool-button" data-designation-tool="erase" title="Erase designations"></button>
+      </div>
+      <div class="tool-subgroup" id="structureTools">
+        <button class="tool-button" data-panel="build" title="Place Building">B</button>
+        <button class="tool-button" data-panel="stockpile" title="Stockpiles">P</button>
+        <button class="tool-button" data-panel="zone" title="Zones">Z</button>
+      </div>
+      <div class="tool-subgroup" id="modeTools">
+        <button class="tool-button" data-panel="burrows" title="Burrows">Bu</button>
+        <button class="tool-button" data-panel="hauling" title="Hauling routes">Ha</button>
+        <button class="tool-button" data-designation-tool="traffic" title="Traffic (movement cost)"></button>
+      </div>
+      <div class="tool-subgroup" id="itemDesigTools">
+        <button class="tool-button" data-designation-tool="itemdesig" title="Item designations"></button>
+      </div>
     </div>
+    <!-- Bottom-right keeps DF's Squads and World map art and joins the multiplayer reset control
+         into the same black strip. -->
     <div class="tool-group" id="rightTools">
-      <button class="tool-button" data-panel="build" title="Place Building">B</button>
-      <button class="tool-button" data-panel="stockpile" title="Stockpiles">P</button>
-      <button class="tool-button" data-panel="zone" title="Zones">Z</button>
-      <button class="tool-button" data-action="reset" title="Reset this camera to host">R</button>
+      <button class="tool-button" data-panel="squads" title="Squads (military)">S</button>
+      <button class="tool-button" data-panel="worldmap" title="World map">&#8776;</button>
+      <button class="tool-button reset-host-tool" data-action="reset" title="Reset this camera to host" aria-label="Reset this camera to host"></button>
     </div>
   </div>
 </div>
@@ -187,12 +293,36 @@
 <div id="hoverInfo"></div>
 <div id="alertStack" aria-live="polite"></div>
 <div id="alertPopup"></div>
-<script src="/js/dfcapture-core.js?v=0.7.6-beta"></script>
-<script src="/js/dfcapture-building-zone-stockpile-panels.js?v=0.7.6-beta"></script>
-<script src="/js/dfcapture-unit-hud-notifications.js?v=0.7.6-beta"></script>
-<script src="/js/dfcapture-build-info-panels.js?v=0.7.6-beta"></script>
-<script src="/js/dfcapture-labor-work-orders.js?v=0.7.6-beta"></script>
-<script src="/js/dfcapture-controls-placement.js?v=0.7.6-beta"></script>
+<script src="/js/dfcapture-session.js?v=0.9.41-audio-stream"></script>
+<script src="/js/dfcapture-audio.js?v=0.9.41-audio-stream"></script>
+<script src="/js/dfcapture-core.js?v=0.9.43-coop-parity"></script>
+<script src="/js/dfcapture-building-zone-stockpile-panels.js?v=0.9.38-building-controls"></script>
+<script src="/js/dfcapture-unit-hud-notifications.js?v=0.9.43-coop-parity"></script>
+<script src="/js/dfcapture-build-info-panels.js?v=0.9.38-building-controls"></script>
+<script src="/js/dfcapture-location-panel.js?v=0.9.36-location-depth"></script>
+<script src="/js/dfcapture-labor-work-orders.js?v=0.9.39-production-editors"></script>
+<script src="/js/dfcapture-squads.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-worldmap.js?v=0.9.43-coop-parity"></script>
+<script src="/js/dfcapture-hospital.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-kitchen.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-tradedepot.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-console.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-help-corpus.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-help-curated.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-help.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-reports.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-fortadmin.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-diplo.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-vote.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-stoneuse.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-burrows.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-hauling.js?v=0.9.39-production-editors"></script>
+<script src="/js/dfcapture-minimap.js?v=0.9.31-elevation-meter"></script>
+<script src="/js/dfcapture-controls-placement.js?v=0.9.35-zone-management"></script>
+<script src="/js/dfcapture-chat.js?v=0.9.27-chat-pings"></script>
+<script src="/js/dfcapture-coop-parity.js?v=0.9.44-hotkey-mode"></script>
+<script src="/js/dfcapture-panel-frame.js?v=0.9.43-coop-parity"></script>
+<script src="/js/dfcapture-touch.js?v=0.9.43-coop-parity"></script>
 <script>startDfcapture();</script>
 </body>
 </html>

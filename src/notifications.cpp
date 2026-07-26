@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,6 +21,8 @@
 #include "notifications.h"
 
 #include "json_util.h"
+#include "render_thread_wait.h"
+#include "save_barrier.h"
 #include "MiscUtils.h"
 #include "modules/DFSDL.h"
 #include "modules/Units.h"
@@ -307,12 +309,21 @@ bool notifications_on_render_thread(const std::unordered_set<std::string>& dismi
     auto future = request->done.get_future();
 
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         request->done.set_value(build_notifications(request->dismissed,
                                                     request->state,
                                                     &request->err));
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "notifications render-thread request timed out or was abandoned";
+        return false;
+    }
     if (!ok) {
         if (err) *err = request->err;
         return false;

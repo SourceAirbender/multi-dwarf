@@ -1,0 +1,6 @@
+# Keep working documentation OUT of the public repo.
+# Only README.md is published (LICENSE and NOTICE have no .md extension and are unaffected).
+# Integration blueprints, maps, and dev notes stay local. If you ever want a specific doc
+# tracked, un-ignore it explicitly, e.g.:   !CONTRIBUTING.md
+*.md
+!/README.md

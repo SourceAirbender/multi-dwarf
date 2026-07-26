@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -19,9 +19,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 #include "stockpile_panel.h"
+#include "ui_cache_purge.h"
 
 #include "Core.h"
 #include "json_util.h"
+#include "save_barrier.h"
 #include "sdl_capture.h"
 
 #include "modules/Buildings.h"
@@ -35,7 +37,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cctype>
 #include <mutex>
 #include <sstream>
 #include <vector>
@@ -52,6 +53,8 @@ bool run_stockpile_locked(Fn&& fn) {
     std::lock_guard<std::recursive_mutex> module_lock(g_stockpile_mutex);
     std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
     DFHack::CoreSuspender suspend;
+    if (save_barrier_active())
+        return false;
     return fn();
 }
 
@@ -191,61 +194,6 @@ int16_t clamp_storage_value(int value) {
     return static_cast<int16_t>(std::max(0, std::min(3000, value)));
 }
 
-std::string lowercase_key(std::string key) {
-    for (auto& ch : key)
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    return key;
-}
-
-void set_all_stockpile_groups(df::stockpile_settings& settings, bool on) {
-    auto& f = settings.flags.bits;
-    f.animals = on;
-    f.food = on;
-    f.furniture = on;
-    f.corpses = on;
-    f.refuse = on;
-    f.stone = on;
-    f.ammo = on;
-    f.coins = on;
-    f.bars_blocks = on;
-    f.gems = on;
-    f.finished_goods = on;
-    f.leather = on;
-    f.cloth = on;
-    f.wood = on;
-    f.weapons = on;
-    f.armor = on;
-    f.sheet = on;
-}
-
-bool set_stockpile_group_flag(df::stockpile_settings& settings, const std::string& key, bool on) {
-    auto& f = settings.flags.bits;
-    if (key == "animals") { f.animals = on; return true; }
-    if (key == "food") { f.food = on; return true; }
-    if (key == "furniture") { f.furniture = on; return true; }
-    if (key == "corpses") { f.corpses = on; return true; }
-    if (key == "refuse") { f.refuse = on; return true; }
-    if (key == "stone") { f.stone = on; return true; }
-    if (key == "ammo") { f.ammo = on; return true; }
-    if (key == "coins") { f.coins = on; return true; }
-    if (key == "bars" || key == "bars_blocks" || key == "bars/blocks") {
-        f.bars_blocks = on;
-        return true;
-    }
-    if (key == "gems") { f.gems = on; return true; }
-    if (key == "finished" || key == "finished_goods") {
-        f.finished_goods = on;
-        return true;
-    }
-    if (key == "leather") { f.leather = on; return true; }
-    if (key == "cloth") { f.cloth = on; return true; }
-    if (key == "wood") { f.wood = on; return true; }
-    if (key == "weapons") { f.weapons = on; return true; }
-    if (key == "armor") { f.armor = on; return true; }
-    if (key == "sheet" || key == "sheets") { f.sheet = on; return true; }
-    return false;
-}
-
 } // namespace
 
 std::string stockpile_info_json_on_core_thread(int32_t id) {
@@ -314,7 +262,10 @@ bool rename_stockpile_on_core_thread(int32_t id, const std::string& name) {
 bool remove_stockpile_on_core_thread(int32_t id) {
     return run_stockpile_locked([&]() -> bool {
         auto sp = find_stockpile(id);
-        return sp ? Buildings::deconstruct(sp) : false;
+        if (!sp)
+            return false;
+        purge_ui_caches_for_building(sp);
+        return Buildings::deconstruct(sp);
     });
 }
 
@@ -409,44 +360,6 @@ bool set_stockpile_link_on_core_thread(int32_t id, int32_t target_id, const std:
     });
 }
 
-bool set_stockpile_category_on_core_thread(int32_t id, const std::string& preset,
-                                           const std::string& mode, std::string* err) {
-    return run_stockpile_locked([&]() -> bool {
-        auto sp = find_stockpile(id);
-        if (!sp) {
-            if (err) *err = "not a stockpile";
-            return false;
-        }
-
-        std::string key = lowercase_key(preset.empty() ? std::string("all") : preset);
-        std::string op = lowercase_key(mode.empty() ? std::string("set") : mode);
-        if (op != "set" && op != "enable" && op != "disable")
-            op = "set";
-
-        if (key == "none") {
-            set_all_stockpile_groups(sp->settings, false);
-            return true;
-        }
-        if (key == "all" || key == "everything") {
-            if (op == "disable")
-                set_all_stockpile_groups(sp->settings, false);
-            else
-                set_all_stockpile_groups(sp->settings, true);
-            return true;
-        }
-
-        if (op == "set")
-            set_all_stockpile_groups(sp->settings, false);
-
-        bool on = op != "disable";
-        if (!set_stockpile_group_flag(sp->settings, key, on)) {
-            if (err) *err = "unknown stockpile category: " + preset;
-            return false;
-        }
-        return true;
-    });
-}
-
 bool finish_stockpile_repaint_on_core_thread(int32_t old_id, int32_t new_id,
                                              int32_t& final_id, std::string* err) {
     return run_stockpile_locked([&]() -> bool {
@@ -481,6 +394,7 @@ bool finish_stockpile_repaint_on_core_thread(int32_t old_id, int32_t new_id,
         replace_stockpile_link_refs(old_sp, new_sp);
 
         old_sp->stockpile_number = -1;
+        purge_ui_caches_for_building(old_sp);
         if (!Buildings::deconstruct(old_sp)) {
             if (err) *err = "old stockpile could not be removed";
             return false;

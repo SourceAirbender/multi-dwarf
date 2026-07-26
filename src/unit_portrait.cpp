@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,6 +21,8 @@
 #include "unit_portrait.h"
 
 #include "diagnostics.h"
+#include "render_thread_wait.h"
+#include "save_barrier.h"
 #include "sdl_capture.h"
 #include "modules/DFSDL.h"
 #include "modules/Gui.h"
@@ -796,6 +798,11 @@ bool unit_portrait_on_render_thread(int32_t unit_id,
     auto future = request->done.get_future();
 
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         auto unit = df::unit::find(request->unit_id);
         if (!unit) {
             request->err = "unit not found";
@@ -871,7 +878,13 @@ bool unit_portrait_on_render_thread(int32_t unit_id,
         request->done.set_value(false);
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "unit-portrait render-thread request timed out or was abandoned";
+        diagnostics_log("WARN: unit portrait render-thread request timed out or was abandoned for unit " +
+                        std::to_string(unit_id));
+        return false;
+    }
     if (ok) {
         frame = std::move(request->frame);
         texpos = request->texpos;

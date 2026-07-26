@@ -1,5 +1,5 @@
 // dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -58,8 +58,12 @@
   // server-rendered selection grid (the "aesthetic" path, with the slight drag latency).
   let instantDesignate = false;
   try { instantDesignate = localStorage.getItem("dfplex.instantDesignate") === "1"; } catch (_) {}
-  // Live drag selection rectangle in natural-image-pixel space, or null. Drawn on #zoneOverlay.
+  // Live drag selection rectangle in viewport-tile space, or null. Drawn on #zoneOverlay.
   let dragPreview = null;
+  // Presence follow-camera state (used by the presence block further down): the player we're
+  // following, and the last camera we applied for them so we only POST /camera when it changes.
+  let followTarget = null;
+  let followedCamKey = "";
 
   // --- Predictive camera panning ----------------------------------------------------------
   // The map is server-rendered, so a pan key normally waits a full round-trip before the frame
@@ -76,6 +80,7 @@
   try { unitImagesEnabled = localStorage.getItem("dfplex.unitImages") === "1"; } catch (_) {}
   let predictedCam = null;          // where the camera "should" be from local input {x,y,z}
   let frameCam = null;              // camera the currently shown frame was rendered at {x,y,z}
+  let frameGrid = null;             // renderer origin/zoom for the currently shown frame
   let prevFrameCam = null;
   let panStalled = 0;               // consecutive frames where frameCam didn't change
   let lastPanInputAt = 0;
@@ -108,10 +113,10 @@
     const vp = currentHud && currentHud.viewport;
     const nw = view.naturalWidth, nh = view.naturalHeight;
     if (!vp || !nw || !nh) { clearPanPrediction(); return; }
-    const rect = viewClientRect();
-    const scale = Math.min(rect.width / nw, rect.height / nh);
-    const tileW = (nw * scale) / Math.max(1, Number(vp.w) || 1);
-    const tileH = (nh * scale) / Math.max(1, Number(vp.h) || 1);
+    const grid = captureTileGrid();
+    if (!grid) { clearPanPrediction(); return; }
+    const tileW = (grid.naturalX(1) - grid.naturalX(0)) * grid.rendered.scale;
+    const tileH = (grid.naturalY(1) - grid.naturalY(0)) * grid.rendered.scale;
     let dxT = predictedCam.x - frameCam.x;
     let dyT = predictedCam.y - frameCam.y;
     dxT = Math.max(-PAN_CAP_TILES, Math.min(PAN_CAP_TILES, dxT));
@@ -133,6 +138,14 @@
     const x = Number(parts[0]), y = Number(parts[1]), z = Number(parts[2]);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
     return { x, y, z };
+  }
+  function parseFrameGrid(headerVal) {
+    if (!headerVal) return null;
+    const parts = String(headerVal).split(",").map(Number);
+    if (parts.length < 5 || parts.some(v => !Number.isFinite(v))) return null;
+    const [originX, originY, zoomFactor, w, h] = parts;
+    if (zoomFactor <= 0 || w <= 0 || h <= 0) return null;
+    return { originX, originY, zoomFactor, w: Math.floor(w), h: Math.floor(h) };
   }
   // Reconcile predicted vs the just-arrived frame camera. Adopt truth on a teleport (large jump)
   // or when we're idle and the server has clearly stalled at a different spot (a dropped move);
@@ -164,6 +177,10 @@
   let activeWorkshopTab = "tasks";
   let workshopAddMode = false;
   let workshopOrderAddMode = false;
+  let workshopRenameMode = false;
+  let farmRenameMode = false;
+  let zoneRenameMode = false;
+  let farmSelectedSeason = 0;
   let workshopStatusMsg = "";
   let workshopStatusIsError = false;
   function focusPage() {
@@ -178,6 +195,10 @@
   const zoneSheet = new Image();
   zoneSheet.onload = () => renderZoneOverlay();
   zoneSheet.src = ZONE_SHEET_URL;
+  const cursorSheet = new Image();
+  cursorSheet.onload = () => renderZoneOverlay();
+  cursorSheet.src = "/asset/cursors.png";
+  view.addEventListener("load", () => renderZoneOverlay());
 
   function scheduleFrame(delay = frameIntervalMs) {
     setTimeout(loadFrame, delay);
@@ -190,10 +211,12 @@
       });
       if (!response.ok) throw new Error("frame failed");
       const fc = parseFrameCamera(response.headers.get("X-DFCapture-Camera"));
+      const fg = parseFrameGrid(response.headers.get("X-DFCapture-Grid"));
       const blob = await response.blob();
       const nextUrl = URL.createObjectURL(blob);
       const oldUrl = currentFrameUrl;
       currentFrameUrl = nextUrl;
+      frameGrid = fg;
       view.src = nextUrl;
       if (oldUrl) setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
       if (fc) { frameCam = fc; reconcilePredicted(fc); applyPanPrediction(); }
@@ -208,6 +231,8 @@
   let sending = false;
 
   function queueMove(dx, dy, dz) {
+    followTarget = null;        // any manual pan releases follow-camera
+    if (typeof window.syncMinimapControls === "function") window.syncMinimapControls();
     notePanInput(dx, dy, dz);   // instant predictive shift before the server round-trip
     queued.dx += dx;
     queued.dy += dy;
@@ -303,6 +328,10 @@
       focusPage();
       event.preventDefault();
       event.stopImmediatePropagation();
+      if ((event.ctrlKey || event.metaKey) && window.DFCaptureUIScale) {
+        window.DFCaptureUIScale.adjust(event.deltaY < 0 ? 1 : -1);
+        return;
+      }
       if (event.shiftKey) {
         sendZoom(event.deltaY < 0 ? "in" : "out");
       } else {
@@ -310,6 +339,349 @@
       }
     }, { passive: false, capture: true });
   }
+
+  // --- Presence: named cursors + follow-camera (world-coordinate, drawn on #zoneOverlay) ------
+  // Pure browser-to-browser relay via /presence; touches no DF state. Each client posts its cursor
+  // world-tile + camera; every client polls the others and draws their cursors on this player's own
+  // view using the same transforms the zone overlay uses, interpolated for smoothness.
+  const PRESENCE_POLL_MS = 120;
+  const PRESENCE_POST_MS = 90;
+  const presencePeers = new Map();   // id -> {has,x,y,z,hasCam,cx,cy,cz,name,color,fromX,fromY,fromT}
+  let myTile = null;
+  let lastPresencePostAt = 0;
+  let rosterEl = null;
+  const activePings = new Map();      // ping id -> {x,y,z,name,color,startT}
+  let lastPingId = 0;
+
+  // World tile for an image-pixel point (used to convert a drag anchor into world coords).
+  function worldTileFromImagePx(px) {
+    const cam = currentHud?.camera, vp = currentHud?.viewport;
+    if (!px || !cam || !vp || !px.w || !px.h) return null;
+    const vw = Math.max(1, Number(vp.w) || 1);
+    const vh = Math.max(1, Number(vp.h) || 1);
+    return {
+      x: Number(cam.x) + Math.floor(px.x * vw / px.w),
+      y: Number(cam.y) + Math.floor(px.y * vh / px.h),
+      z: Number(cam.z)
+    };
+  }
+
+  // This player's tool + in-progress designation drag, read from the (shared, global-lexical)
+  // placement.js state. try/catch so a not-yet-loaded var can never break a presence post.
+  function readLocalState() {
+    let tool = "", drag = null;
+    try {
+      tool = (currentTool ? String(currentTool) : "")
+           || (selectedBuild ? "build" : "")
+           || (zonePreset ? "zone" : "")
+           || ((stockPreset || stockRepaintId) ? "stockpile" : "")
+           || (selectedDesignation ? String(selectedDesignation) : "");
+      if (pdown && dragAnchor && tool) {
+        const a = worldTileFromImagePx(dragAnchor);
+        if (a && myTile) drag = { ax: a.x, ay: a.y, bx: myTile.x, by: myTile.y, az: myTile.z };
+      }
+    } catch (_) {}
+    return { tool, drag };
+  }
+
+  function readLocalFocus() {
+    try {
+      if (selectedUnitData) return "a unit";
+      if (activeInfoPanel) return String(activeInfoPanel);
+      if (selection && selection.classList.contains("visible")) return "inspecting";
+    } catch (_) {}
+    return "";
+  }
+
+  function playerColor(id) {
+    let h = 0;
+    const s = String(id);
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return `hsl(${h % 360} 78% 60%)`;
+  }
+  const myColor = playerColor(player);
+
+  function worldTileFromEvent(event) {
+    const cam = currentHud?.camera, vp = currentHud?.viewport;
+    const nw = view.naturalWidth, nh = view.naturalHeight;
+    if (!cam || !vp || !nw || !nh) return null;
+    const px = imagePixelFromEvent(event);
+    if (!px) return null;
+    return worldTileFromImagePx(px);
+  }
+
+  function postPresence(force) {
+    const now = performance.now();
+    if (!force && now - lastPresencePostAt < PRESENCE_POST_MS) return;
+    lastPresencePostAt = now;
+    const cam = currentHud?.camera, vp = currentHud?.viewport;
+    const local = readLocalState();
+    const q = new URLSearchParams();
+    q.set("player", player);
+    q.set("name", window.DFCaptureSession?.displayName() || player);
+    q.set("color", myColor);
+    if (myTile) { q.set("has", "1"); q.set("x", myTile.x); q.set("y", myTile.y); q.set("z", myTile.z); }
+    else q.set("has", "0");
+    if (cam) { q.set("cx", cam.x); q.set("cy", cam.y); q.set("cz", cam.z); }
+    if (vp) { q.set("vw", vp.w); q.set("vh", vp.h); }
+    if (local.tool) q.set("tool", local.tool);
+    const focus = readLocalFocus();
+    if (focus) q.set("focus", focus);
+    if (local.drag) {
+      q.set("hasdrag", "1");
+      q.set("dax", local.drag.ax); q.set("day", local.drag.ay);
+      q.set("dbx", local.drag.bx); q.set("dby", local.drag.by); q.set("daz", local.drag.az);
+    }
+    fetch("/presence?" + q.toString(), { method: "POST", cache: "no-store" }).catch(() => {});
+  }
+
+  function followPeerCamera(peer) {
+    if (!peer || !peer.hasCam) return;
+    const key = `${peer.cx},${peer.cy},${peer.cz}`;
+    if (key === followedCamKey) return;
+    followedCamKey = key;
+    fetch(`/camera?player=${encodeURIComponent(player)}&x=${peer.cx}&y=${peer.cy}&z=${peer.cz}`, { method: "POST", cache: "no-store" })
+      .then(() => { resetPanPrediction(); if (typeof loadHud === "function") loadHud(); if (zoneOverlayEnabled) loadZones(); })
+      .catch(() => {});
+  }
+
+  async function pollPresence() {
+    try {
+      const r = await fetch(`/presence?player=${encodeURIComponent(player)}&t=${Date.now()}`, { cache: "no-store" });
+      if (!r.ok) return;
+      const data = await r.json();
+      const now = performance.now();
+      const seen = new Set();
+      for (const p of (data.peers || [])) {
+        if (!p || p.player === player) continue;
+        seen.add(p.player);
+        const prev = presencePeers.get(p.player);
+        const z = Number(p.z) || 0, x = Number(p.x) || 0, y = Number(p.y) || 0;
+        const peer = {
+          id: p.player, has: !!p.has, x, y, z,
+          hasCam: !!p.hasCam, cx: Number(p.cx) || 0, cy: Number(p.cy) || 0, cz: Number(p.cz) || 0,
+          vw: Number(p.vw) || 0, vh: Number(p.vh) || 0,
+          tool: p.tool || "", focus: p.focus || "",
+          hasDrag: !!p.hasDrag, dax: Number(p.dax) || 0, day: Number(p.day) || 0,
+          dbx: Number(p.dbx) || 0, dby: Number(p.dby) || 0, daz: Number(p.daz) || 0,
+          name: p.name || p.player, color: p.color || playerColor(p.player),
+          fromX: (prev && prev.has && prev.z === z) ? prev.x : x,
+          fromY: (prev && prev.has && prev.z === z) ? prev.y : y,
+          fromT: now
+        };
+        presencePeers.set(p.player, peer);
+        if (followTarget === p.player) followPeerCamera(peer);
+      }
+      for (const k of [...presencePeers.keys()]) if (!seen.has(k)) presencePeers.delete(k);
+      for (const ping of (data.pings || [])) {
+        const id = Number(ping.id) || 0;
+        if (id > lastPingId && !activePings.has(id)) {
+          activePings.set(id, { x: Number(ping.x) || 0, y: Number(ping.y) || 0, z: Number(ping.z) || 0,
+                                name: ping.name || "", color: ping.color || "#ffdf4d", startT: now });
+        }
+        if (id > lastPingId) lastPingId = id;
+      }
+      updateRoster();
+      if (typeof window.syncPresenceElevationMarkers === "function")
+        window.syncPresenceElevationMarkers();
+    } catch (_) {}
+  }
+
+  function roundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawPeerCursor(ctx, x, y, color, name, tool, dz) {
+    ctx.save();
+    ctx.globalAlpha = dz ? 0.45 : 1;      // fade off-elevation "ghost" cursors
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + 13, y + 4.5);
+    ctx.lineTo(x + 5.5, y + 6.5);
+    ctx.lineTo(x + 4.5, y + 14);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = "rgba(0,0,0,0.78)";
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+    const badge = dz ? (dz > 0 ? " ▲" + dz : " ▼" + (-dz)) : "";
+    const label = String(name).slice(0, 18) + (tool ? " · " + tool : "") + badge;
+    ctx.globalAlpha = dz ? 0.75 : 1;
+    ctx.font = "600 12px system-ui, -apple-system, sans-serif";
+    ctx.textBaseline = "middle";
+    const tw = ctx.measureText(label).width;
+    const px = x + 14, py = y + 1;
+    ctx.fillStyle = "rgba(0,0,0,0.62)";
+    roundRectPath(ctx, px, py, tw + 10, 17, 4);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.fillText(label, px + 5, py + 9.5);
+    ctx.restore();
+  }
+
+  // A peer's in-progress designation rectangle, in their color.
+  function drawPeerDrag(ctx, p, cam) {
+    if (!p.hasDrag || Number(p.daz) !== Number(cam.z)) return;
+    const a = screenRectForMapTile({ x: Math.min(p.dax, p.dbx), y: Math.min(p.day, p.dby), z: cam.z });
+    const b = screenRectForMapTile({ x: Math.max(p.dax, p.dbx), y: Math.max(p.day, p.dby), z: cam.z });
+    if (!a || !b) return;
+    const x = a.left, y = a.top, w = (b.left + b.width) - a.left, h = (b.top + b.height) - a.top;
+    if (w <= 0 || h <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = 0.14;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 3]);
+    ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+    ctx.restore();
+  }
+
+  function drawPresence(ctx) {
+    if (presencePeers.size === 0) return;
+    const cam = currentHud?.camera;
+    if (!cam) return;
+    const now = performance.now();
+    for (const p of presencePeers.values()) {
+      drawPeerDrag(ctx, p, cam);           // their live designation rectangle
+      if (!p.has) continue;
+      const onZ = Number(p.z) === Number(cam.z);
+      const a = Math.max(0, Math.min(1, (now - p.fromT) / PRESENCE_POLL_MS));
+      const wx = p.fromX + (p.x - p.fromX) * a;
+      const wy = p.fromY + (p.y - p.fromY) * a;
+      const rect = screenRectForMapTile({ x: wx, y: wy, z: cam.z });  // positioned on our z-plane
+      if (!rect) continue;
+      const dz = Number(p.z) - Number(cam.z);
+      drawPeerCursor(ctx, rect.left, rect.top, p.color, p.name, onZ ? p.tool : "", onZ ? 0 : dz);
+    }
+  }
+
+  // "Look here" pings: expanding rings + name, fading over PING_DURATION_MS.
+  const PING_DURATION_MS = 1400;
+  function drawPings(ctx) {
+    if (activePings.size === 0) return;
+    const cam = currentHud?.camera;
+    if (!cam) { activePings.clear(); return; }
+    const now = performance.now();
+    for (const [id, ping] of activePings) {
+      const t = (now - ping.startT) / PING_DURATION_MS;
+      if (t >= 1) { activePings.delete(id); continue; }
+      if (Number(ping.z) !== Number(cam.z)) continue;
+      const rect = screenRectForMapTile({ x: ping.x, y: ping.y, z: cam.z });
+      if (!rect) continue;
+      const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2, maxR = 42;
+      ctx.save();
+      for (let k = 0; k < 2; k++) {
+        const tt = t - k * 0.22;
+        if (tt <= 0 || tt >= 1) continue;
+        ctx.globalAlpha = (1 - tt) * 0.85;
+        ctx.strokeStyle = ping.color;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 6 + tt * maxR, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = Math.max(0, 1 - t);
+      ctx.fillStyle = ping.color;
+      ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill();
+      if (ping.name) {
+        ctx.font = "600 12px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        const w = ctx.measureText(ping.name).width + 8;
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        roundRectPath(ctx, cx - w / 2, cy - maxR - 2, w, 16, 4); ctx.fill();
+        ctx.fillStyle = ping.color;
+        ctx.fillText(ping.name, cx, cy - maxR + 8);
+        ctx.textAlign = "left";
+      }
+      ctx.restore();
+    }
+  }
+
+  function ensureRoster() {
+    if (rosterEl) return rosterEl;
+    rosterEl = document.createElement("div");
+    rosterEl.id = "presenceRoster";
+    rosterEl.style.cssText = "position:fixed;top:6px;left:50%;transform:translateX(-50%);z-index:60;display:none;gap:6px;pointer-events:auto;";
+    document.body.appendChild(rosterEl);
+    return rosterEl;
+  }
+
+  function updateRoster() {
+    const el = ensureRoster();
+    el.innerHTML = "";
+    for (const [id, p] of presencePeers) {
+      const on = followTarget === id;
+      const focusTxt = p.focus ? "  ·  " + p.focus : "";
+      const chip = document.createElement("button");
+      chip.textContent = (on ? "◉ " : "") + String(p.name).slice(0, 18) + focusTxt;
+      chip.title = (p.focus ? p.name + " — " + p.focus + ". " : "") +
+                   (on ? "Following — click to stop" : "Click to follow " + p.name);
+      chip.style.cssText = "pointer-events:auto;border:1px solid rgba(0,0,0,.5);border-radius:12px;padding:2px 10px;cursor:pointer;color:#111;font:600 12px system-ui,sans-serif;background:" + p.color + ";opacity:" + (on ? "1" : ".85") + ";";
+      chip.onclick = () => {
+        followTarget = (followTarget === id) ? null : id;
+        followedCamKey = "";
+        updateRoster();
+        if (typeof window.syncMinimapControls === "function") window.syncMinimapControls();
+      };
+      el.appendChild(chip);
+    }
+    el.style.display = presencePeers.size ? "flex" : "none";
+  }
+
+  function presenceTick() {
+    if (presencePeers.size > 0 || activePings.size > 0) renderZoneOverlay();
+    requestAnimationFrame(presenceTick);
+  }
+
+  if (!window.__dfcapturePresenceStarted) {
+    window.__dfcapturePresenceStarted = true;
+    window.dfPresencePeers = () => [...presencePeers.values()];   // for the minimap viewport boxes
+    view.addEventListener("pointermove", event => { myTile = worldTileFromEvent(event); postPresence(); });
+    view.addEventListener("pointerleave", () => { myTile = null; postPresence(true); });
+    // Alt+click on the map fires a "look here" ping (intercepted before it becomes a designation).
+    view.addEventListener("pointerdown", event => {
+      if (event.button === 0 && window.DFCaptureChat?.isPicking?.()) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const t = worldTileFromEvent(event) || myTile;
+        if (t) window.DFCaptureChat.consumeMapPick(t);
+        return;
+      }
+      if (!event.altKey || event.button !== 0) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const t = worldTileFromEvent(event) || myTile;
+      if (!t) return;
+      if (window.DFCaptureChat?.sendLocation) {
+        window.DFCaptureChat.sendLocation(t);
+        return;
+      }
+      const q = new URLSearchParams({ player, name: player, color: myColor, x: t.x, y: t.y, z: t.z });
+      fetch("/ping?" + q.toString(), { method: "POST", cache: "no-store" }).catch(() => {});
+    }, { capture: true });
+    setInterval(pollPresence, PRESENCE_POLL_MS);
+    setInterval(() => postPresence(true), 1500);
+    requestAnimationFrame(presenceTick);
+  }
+
+  window.dfcFollowState = () => ({ following: followTarget });
+  window.dfcStopFollowing = () => {
+    followTarget = null;
+    followedCamKey = "";
+    updateRoster();
+    if (typeof window.syncMinimapControls === "function") window.syncMinimapControls();
+  };
 
   function startDfcapture() {
     if (window.__dfcaptureStarted) return;
@@ -326,16 +698,7 @@
   }
 
   function imagePixelFromEvent(event) {
-    const nw = view.naturalWidth;
-    const nh = view.naturalHeight;
-    if (!nw || !nh) return null;
-    const rendered = renderedImageRect();
-    if (!rendered) return null;
-    const { left, top, scale } = rendered;
-    const x = (event.clientX - left) / scale;
-    const y = (event.clientY - top) / scale;
-    if (x < 0 || y < 0 || x >= nw || y >= nh) return null;
-    return { x: Math.floor(x), y: Math.floor(y), w: nw, h: nh };
+    return tileAddressFromClient(event.clientX, event.clientY, false);
   }
 
   function renderedImageRect() {
@@ -343,7 +706,10 @@
     const nh = view.naturalHeight;
     if (!nw || !nh) return null;
     const rect = viewClientRect();
-    const scale = Math.min(rect.width / nw, rect.height / nh);
+    // #view uses object-fit: cover. Use the same scale and centered crop here so hover, clicks,
+    // designations, zones, presence cursors, pings, and predictive pan all address the exact
+    // natural-image pixel shown under the pointer.
+    const scale = Math.max(rect.width / nw, rect.height / nh);
     const width = nw * scale;
     const height = nh * scale;
     return {
@@ -355,6 +721,56 @@
     };
   }
 
+  // DF's renderer does not start the map at image pixel (0,0). renderer_2d places tile boundary
+  // n at origin + floor(viewport_zoom_factor * 32 * n / 128). The frame endpoint records those
+  // exact values while the per-player zoom guard is active, so every browser overlay and input
+  // addresses the same pixels that DF rendered.
+  function captureTileGrid() {
+    const nw = view.naturalWidth;
+    const nh = view.naturalHeight;
+    const rendered = renderedImageRect();
+    const fg = frameGrid;
+    if (!nw || !nh || !fg || !rendered) return null;
+    const w = Math.max(1, Number(fg.w) || 1);
+    const h = Math.max(1, Number(fg.h) || 1);
+    const stepNumerator = Math.max(1, Number(fg.zoomFactor) || 1) * 32;
+    const originX = Number(fg.originX) || 0;
+    const originY = Number(fg.originY) || 0;
+    return {
+      nw, nh, w, h, rendered,
+      naturalX: tile => originX +
+        Math.floor(stepNumerator * Math.max(0, Math.min(w, tile)) / 128),
+      naturalY: tile => originY +
+        Math.floor(stepNumerator * Math.max(0, Math.min(h, tile)) / 128)
+    };
+  }
+
+  function tileAtNaturalPixel(pixel, count, boundary) {
+    if (pixel < boundary(0) || pixel >= boundary(count)) return -1;
+    let lo = 0, hi = count;
+    while (lo + 1 < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (pixel < boundary(mid)) hi = mid;
+      else lo = mid;
+    }
+    return lo;
+  }
+
+  function tileAddressFromClient(clientX, clientY, clamp) {
+    const grid = captureTileGrid();
+    if (!grid) return null;
+    let nx = (clientX - grid.rendered.left) / grid.rendered.scale;
+    let ny = (clientY - grid.rendered.top) / grid.rendered.scale;
+    if (clamp) {
+      nx = Math.max(grid.naturalX(0), Math.min(grid.naturalX(grid.w) - 1, nx));
+      ny = Math.max(grid.naturalY(0), Math.min(grid.naturalY(grid.h) - 1, ny));
+    }
+    const tx = tileAtNaturalPixel(nx, grid.w, grid.naturalX);
+    const ty = tileAtNaturalPixel(ny, grid.h, grid.naturalY);
+    if (tx < 0 || ty < 0) return null;
+    return { x: tx, y: ty, w: grid.w, h: grid.h };
+  }
+
   function screenRectForMapTile(pos) {
     if (!pos || !currentHud?.camera || !currentHud?.viewport) return null;
     if (Number(pos.z) !== Number(currentHud.camera.z)) return null;
@@ -362,13 +778,15 @@
     const tx = Number(pos.x) - Number(currentHud.camera.x);
     const ty = Number(pos.y) - Number(currentHud.camera.y);
     if (tx < 0 || ty < 0 || tx >= vp.w || ty >= vp.h) return null;
-    const rendered = renderedImageRect();
-    if (!rendered) return null;
+    const grid = captureTileGrid();
+    if (!grid) return null;
+    const x0 = grid.naturalX(tx), x1 = grid.naturalX(tx + 1);
+    const y0 = grid.naturalY(ty), y1 = grid.naturalY(ty + 1);
     return {
-      left: rendered.left + (tx / vp.w) * rendered.width,
-      top: rendered.top + (ty / vp.h) * rendered.height,
-      width: Math.max(8, rendered.width / vp.w),
-      height: Math.max(8, rendered.height / vp.h)
+      left: grid.rendered.left + x0 * grid.rendered.scale,
+      top: grid.rendered.top + y0 * grid.rendered.scale,
+      width: Math.max(1, (x1 - x0) * grid.rendered.scale),
+      height: Math.max(1, (y1 - y0) * grid.rendered.scale)
     };
   }
 
@@ -414,39 +832,37 @@
   // the server will designate on release.
   function drawDragPreview(ctx) {
     if (!dragPreview) return;
-    const nw = view.naturalWidth, nh = view.naturalHeight;
-    if (!nw || !nh) return;
-    const rendered = renderedImageRect();
-    if (!rendered) return;
-    const vp = currentHud?.viewport;
-    const vpW = Math.max(1, Number(vp?.w) || nw);
-    const vpH = Math.max(1, Number(vp?.h) || nh);
-    const tpx = nw / vpW, tpy = nh / vpH;        // tile size in natural-image pixels
+    const grid = captureTileGrid();
+    if (!grid) return;
     const { ax, ay, bx, by } = dragPreview;
-    // snap to whole tiles, inclusive of the tile under each endpoint
-    const x0 = Math.floor(Math.min(ax, bx) / tpx) * tpx;
-    const x1 = (Math.floor(Math.max(ax, bx) / tpx) + 1) * tpx;
-    const y0 = Math.floor(Math.min(ay, by) / tpy) * tpy;
-    const y1 = (Math.floor(Math.max(ay, by) / tpy) + 1) * tpy;
-    const sx = rendered.left + x0 * rendered.scale;
-    const sy = rendered.top + y0 * rendered.scale;
-    const sw = (x1 - x0) * rendered.scale;
-    const sh = (y1 - y0) * rendered.scale;
+    const tx0 = Math.max(0, Math.min(grid.w - 1, Math.min(ax, bx)));
+    const tx1 = Math.max(1, Math.min(grid.w, Math.max(ax, bx) + 1));
+    const ty0 = Math.max(0, Math.min(grid.h - 1, Math.min(ay, by)));
+    const ty1 = Math.max(1, Math.min(grid.h, Math.max(ay, by) + 1));
+    const x0 = grid.naturalX(tx0), x1 = grid.naturalX(tx1);
+    const y0 = grid.naturalY(ty0), y1 = grid.naturalY(ty1);
+    const sx = grid.rendered.left + x0 * grid.rendered.scale;
+    const sy = grid.rendered.top + y0 * grid.rendered.scale;
+    const sw = (x1 - x0) * grid.rendered.scale;
+    const sh = (y1 - y0) * grid.rendered.scale;
     if (sw <= 0 || sh <= 0) return;
     ctx.save();
     ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = "rgba(255, 196, 64, 0.16)";
     ctx.fillRect(sx, sy, sw, sh);
     // faint per-tile separators so the selection reads as DF tiles
-    const stepX = tpx * rendered.scale, stepY = tpy * rendered.scale;
-    if (stepX > 3 && stepY > 3) {
+    const minStepX = (grid.naturalX(1) - grid.naturalX(0)) * grid.rendered.scale;
+    const minStepY = (grid.naturalY(1) - grid.naturalY(0)) * grid.rendered.scale;
+    if (minStepX > 3 && minStepY > 3) {
       ctx.strokeStyle = "rgba(255, 210, 90, 0.22)";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      for (let gx = sx + stepX; gx < sx + sw - 0.5; gx += stepX) {
+      for (let tx = tx0 + 1; tx < tx1; ++tx) {
+        const gx = grid.rendered.left + grid.naturalX(tx) * grid.rendered.scale;
         const px = Math.round(gx) + 0.5; ctx.moveTo(px, sy); ctx.lineTo(px, sy + sh);
       }
-      for (let gy = sy + stepY; gy < sy + sh - 0.5; gy += stepY) {
+      for (let ty = ty0 + 1; ty < ty1; ++ty) {
+        const gy = grid.rendered.top + grid.naturalY(ty) * grid.rendered.scale;
         const py = Math.round(gy) + 0.5; ctx.moveTo(sx, py); ctx.lineTo(sx + sw, py);
       }
       ctx.stroke();
@@ -468,10 +884,36 @@
     ctx.restore();
   }
 
+  function drawNativePlacementGrid(ctx) {
+    let active = false;
+    try { active = placementActive(); } catch (_) {}
+    if (!active || !cursorSheet.complete) return;
+    const grid = captureTileGrid();
+    if (!grid) return;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    for (let tx = 0; tx < grid.w; ++tx) {
+      const nx0 = grid.naturalX(tx), nx1 = grid.naturalX(tx + 1);
+      const sx = grid.rendered.left + nx0 * grid.rendered.scale;
+      const sw = (nx1 - nx0) * grid.rendered.scale;
+      for (let ty = 0; ty < grid.h; ++ty) {
+        const ny0 = grid.naturalY(ty), ny1 = grid.naturalY(ty + 1);
+        const sy = grid.rendered.top + ny0 * grid.rendered.scale;
+        const sh = (ny1 - ny0) * grid.rendered.scale;
+        // CURSORS:0:22 is VIEWPORT_GRID, DF's native transparent gold grid cell.
+        ctx.drawImage(cursorSheet, 0, 22 * 32, 32, 32, sx, sy, sw, sh);
+      }
+    }
+    ctx.restore();
+  }
+
   function renderZoneOverlay() {
     const ctx = resizeZoneOverlay();
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    drawNativePlacementGrid(ctx);
     drawDragPreview(ctx);   // instant-mode selection (no-op when not dragging in instant mode)
+    drawPresence(ctx);      // other players' cursors + their live designation rectangles
+    drawPings(ctx);         // transient "look here" pings
     const cam = zoneSnapshotCamera || currentHud?.camera;
     const vp = zoneSnapshotViewport || currentHud?.viewport;
     if (!zoneOverlayEnabled || !cam || !vp || !zoneSheet.complete)
@@ -564,18 +1006,7 @@
   // Like imagePixelFromEvent but clamps to the image edges, so a drag that ends
   // slightly off-frame still produces a valid corner for rectangle designation.
   function imagePixelClamped(clientX, clientY) {
-    const nw = view.naturalWidth;
-    const nh = view.naturalHeight;
-    if (!nw || !nh) return null;
-    const rect = viewClientRect();
-    const scale = Math.min(rect.width / nw, rect.height / nh);
-    const left = rect.left + (rect.width - nw * scale) / 2;
-    const top = rect.top + (rect.height - nh * scale) / 2;
-    let x = (clientX - left) / scale;
-    let y = (clientY - top) / scale;
-    x = Math.max(0, Math.min(nw - 1, x));
-    y = Math.max(0, Math.min(nh - 1, y));
-    return { x: Math.floor(x), y: Math.floor(y), w: nw, h: nh };
+    return tileAddressFromClient(clientX, clientY, true);
   }
 
   function selectionBuildingId(data) {
@@ -617,14 +1048,30 @@
       return;
     }
     const lines = Array.isArray(data.lines) ? data.lines : [];
+    const tile = data.tile || {};
     selection.className = "";
     selection.innerHTML = `
       <div class="kind">${escapeHtml(data.kind || "tile")}</div>
       <h1>${escapeHtml(data.title || "Selection")}</h1>
-      <div class="line">Tile: ${data.tile.x}, ${data.tile.y}, ${data.tile.z}</div>
+      <div class="line">Tile: ${tile.x}, ${tile.y}, ${tile.z}</div>
       ${lines.map(line => `<div class="line">${escapeHtml(line)}</div>`).join("")}
+      <div class="tile-detail-actions">
+        <button type="button" data-tile-occupants>View everything on this tile</button>
+        <button type="button" data-tile-engraving>Engraving details</button>
+      </div>
     `;
     selection.classList.add("visible");
+    selection.querySelector("[data-tile-occupants]")?.addEventListener("click", event => {
+      event.preventDefault();
+      if (typeof window.showTileOccupants === "function")
+        window.showTileOccupants(tile).catch(() => {});
+    });
+    const engravingButton = selection.querySelector("[data-tile-engraving]");
+    engravingButton?.addEventListener("click", event => {
+      event.preventDefault();
+      if (typeof window.showEngraving === "function")
+        window.showEngraving(tile).catch(() => { engravingButton.disabled = true; });
+    });
   }
 
   function closeSelection() {

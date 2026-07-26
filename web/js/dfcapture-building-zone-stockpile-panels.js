@@ -1,5 +1,5 @@
 // dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -18,6 +18,291 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 
+  async function buildingPanelPost(path, params) {
+    const query = new URLSearchParams();
+    Object.entries(params || {}).forEach(([key, value]) => query.set(key, String(value)));
+    query.set("t", Date.now());
+    const response = await fetch(`${path}?${query}`, { method: "POST", cache: "no-store" });
+    const text = await response.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (_) {}
+    if (!response.ok || data.ok === false)
+      throw new Error(data.error || text.trim() || "request failed");
+    return data;
+  }
+
+  async function fetchFarmPlotInfo(id) {
+    try {
+      const response = await fetch(`/farm-plot?id=${id}&t=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) return null;
+      const data = await response.json();
+      return data && data.isFarmPlot ? data : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function renderFarmPlotPanel(info, farm) {
+    const seasons = Array.isArray(farm.seasons) ? farm.seasons : [];
+    farmSelectedSeason = Math.max(0, Math.min(3, Number(farmSelectedSeason) || 0));
+    const active = seasons.find(season => Number(season.season) === farmSelectedSeason) ||
+      seasons[0] || { season: 0, name: "Spring", plantId: -1, crops: [] };
+    const crops = Array.isArray(active.crops) ? active.crops : [];
+    const cropRows = [
+      { id: -1, name: "Leave fallow", seedCount: null },
+      ...crops
+    ].map(crop => {
+      const selected = Number(crop.id) === Number(active.plantId);
+      const stock = crop.seedCount == null ? "" :
+        `<span class="farm-crop-stock${Number(crop.seedCount) ? "" : " empty"}">${Number(crop.seedCount) || 0} seed${Number(crop.seedCount) === 1 ? "" : "s"}</span>`;
+      return `<button class="farm-crop-row${selected ? " active" : ""}" data-farm-crop="${Number(crop.id)}">
+        <span>${escapeHtml(crop.name || "Crop")}</span>${stock}
+      </button>`;
+    }).join("");
+    const renameHeader = farmRenameMode
+      ? `<div class="farm-rename-row">
+          <input class="farm-rename-input" maxlength="128" value="${escapeHtml(info.name || "")}">
+          <button class="bld-btn" data-farm-rename-save>Save</button>
+          <button class="bld-btn" data-farm-rename-cancel>Cancel</button>
+        </div>`
+      : `<div class="bld-name">${escapeHtml(info.name || "Farm Plot")}</div>
+         <button class="workshop-icon-btn" data-farm-rename title="Rename farm plot">Rename</button>`;
+    selection.className = "visible building-panel farm-panel";
+    selection.innerHTML = `
+      <div class="bld-head">${renameHeader}<button class="bld-x" data-bld-close title="Close">X</button></div>
+      <div class="farm-location">${farm.underground ? "Underground" : "Surface"} farm plot
+        <span>${escapeHtml(farm.biome || "")}</span></div>
+      <div class="farm-season-tabs">${seasons.map(season =>
+        `<button class="farm-season-tab${Number(season.season) === Number(active.season) ? " active" : ""}" data-farm-season="${Number(season.season)}">
+          ${escapeHtml(season.name || "Season")}${Number(season.season) === Number(farm.currentSeason) ? " (now)" : ""}
+        </button>`).join("")}</div>
+      <div class="farm-section-title">${escapeHtml(active.name || "Season")} crop</div>
+      <div class="farm-crop-list">${cropRows}</div>
+      <label class="farm-fertilize-row">
+        <input type="checkbox" data-farm-fertilize${farm.fertilize?.seasonal ? " checked" : ""}>
+        <span>Fertilize every season</span>
+        <small>${Number(farm.fertilize?.current) || 0}/${Number(farm.fertilize?.max) || 0}</small>
+      </label>
+      <button class="bld-btn danger" data-bld-act="cancel">Remove farm plot</button>
+    `;
+    selection.querySelectorAll("[data-farm-season]").forEach(button =>
+      button.addEventListener("click", event => {
+        event.stopPropagation();
+        farmSelectedSeason = Number(button.dataset.farmSeason) || 0;
+        renderFarmPlotPanel(info, farm);
+      }));
+    selection.querySelectorAll("[data-farm-crop]").forEach(button =>
+      button.addEventListener("click", async event => {
+        event.stopPropagation();
+        try {
+          await buildingPanelPost("/farm-plot-action", {
+            id: info.id, season: active.season, plant: button.dataset.farmCrop
+          });
+          const refreshed = await fetchFarmPlotInfo(info.id);
+          if (refreshed) renderFarmPlotPanel(info, refreshed);
+        } catch (error) {
+          console.warn("farm crop update failed", error);
+        }
+        focusPage();
+      }));
+    selection.querySelector("[data-farm-fertilize]")?.addEventListener("change", async event => {
+      event.stopPropagation();
+      try {
+        await buildingPanelPost("/farm-plot-fertilize-action", {
+          id: info.id, seasonal: event.currentTarget.checked ? 1 : 0
+        });
+        const refreshed = await fetchFarmPlotInfo(info.id);
+        if (refreshed) renderFarmPlotPanel(info, refreshed);
+      } catch (error) {
+        console.warn("farm fertilizer update failed", error);
+      }
+      focusPage();
+    });
+    selection.querySelector("[data-farm-rename]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      farmRenameMode = true;
+      renderFarmPlotPanel(info, farm);
+      selection.querySelector(".farm-rename-input")?.focus();
+    });
+    selection.querySelector("[data-farm-rename-cancel]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      farmRenameMode = false;
+      renderFarmPlotPanel(info, farm);
+    });
+    const saveFarmName = async () => {
+      const name = selection.querySelector(".farm-rename-input")?.value.trim() || "";
+      try {
+        await buildingPanelPost("/farm-plot-rename", { id: info.id, name });
+        info.name = name || "Farm Plot";
+        farmRenameMode = false;
+        renderFarmPlotPanel(info, farm);
+      } catch (error) {
+        console.warn("farm rename failed", error);
+      }
+      focusPage();
+    };
+    selection.querySelector("[data-farm-rename-save]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      saveFarmName();
+    });
+    selection.querySelector(".farm-rename-input")?.addEventListener("keydown", event => {
+      if (event.key === "Enter") { event.preventDefault(); saveFarmName(); }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        farmRenameMode = false;
+        renderFarmPlotPanel(info, farm);
+      }
+    });
+    selection.querySelector("[data-bld-act]")?.addEventListener("click", async event => {
+      event.stopPropagation();
+      try {
+        await fetch(`/building-action?id=${info.id}&action=cancel`, {
+          method: "POST", cache: "no-store"
+        });
+      } catch (_) {}
+      closeSelection();
+      focusPage();
+    });
+    selection.querySelector("[data-bld-close]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      closeSelection();
+      focusPage();
+    });
+  }
+
+  async function fetchOptionalBuildingJson(path, id) {
+    try {
+      const response = await fetch(`${path}?id=${id}&t=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function wireSpecialBuildingClose() {
+    selection.querySelector("[data-bld-close]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      closeSelection();
+      focusPage();
+    });
+  }
+
+  async function openBuildingCagePanel(info) {
+    const cage = await fetchOptionalBuildingJson("/building-cage", info.id);
+    if (!cage || cage.ok === false) return false;
+    const rows = Array.isArray(cage.units) ? cage.units : [];
+    selection.className = "visible building-panel building-control-panel";
+    selection.innerHTML = `
+      <div class="bld-head"><div class="bld-name">${escapeHtml(cage.name || info.name || "Cage")}</div>
+        <button class="bld-x" data-bld-close title="Close">X</button></div>
+      <div class="bld-note">Assign creatures, pets, or captured vermin to this cage.</div>
+      <div class="building-control-list">${rows.length ? rows.map(row => `
+        <div class="building-control-row${row.assigned ? " active" : ""}">
+          <div><strong>${escapeHtml(row.name || `Unit ${row.id}`)}</strong>
+            <small>${escapeHtml(row.race || row.kind || "")}${row.assignedElsewhere ? " - assigned elsewhere" : ""}</small>
+            ${(Array.isArray(row.flags) ? row.flags : []).map(flag => `<span>${escapeHtml(flag)}</span>`).join("")}
+          </div>
+          <button class="bld-btn" data-cage-target="${Number(row.id)}" data-cage-kind="${escapeHtml(row.kind || "unit")}" data-cage-action="${row.assigned ? "release" : "assign"}">
+            ${row.assigned ? "Release" : "Assign"}
+          </button>
+        </div>`).join("") : `<div class="bld-note">No assignable occupants were found.</div>`}</div>`;
+    selection.querySelectorAll("[data-cage-target]").forEach(button =>
+      button.addEventListener("click", async event => {
+        event.stopPropagation();
+        try {
+          await buildingPanelPost("/building-cage-action", {
+            id: info.id,
+            target: button.dataset.cageTarget,
+            kind: button.dataset.cageKind,
+            action: button.dataset.cageAction
+          });
+          await openBuildingCagePanel(info);
+        } catch (error) {
+          console.warn("cage assignment failed", error);
+        }
+        focusPage();
+      }));
+    wireSpecialBuildingClose();
+    return true;
+  }
+
+  function renderCoffinPanel(info, coffin) {
+    const hasTomb = Number(coffin.tombId) >= 0;
+    const owner = coffin.owner || {};
+    const tomb = coffin.tomb || {};
+    selection.className = "visible building-panel building-control-panel";
+    selection.innerHTML = `
+      <div class="bld-head"><div class="bld-name">${escapeHtml(coffin.name || info.name || "Coffin")}</div>
+        <button class="bld-x" data-bld-close title="Close">X</button></div>
+      <div class="bld-status">${hasTomb ? `Linked tomb: ${escapeHtml(coffin.tombName || `Zone ${coffin.tombId}`)}` : "No tomb zone is linked."}</div>
+      <div class="bld-note">Owner: ${Number(owner.id) >= 0 ? escapeHtml(owner.name || `Unit ${owner.id}`) : "Any eligible citizen"}</div>
+      ${hasTomb ? "" : `<button class="bld-btn" data-coffin-action="ensure-tomb">Create and link tomb zone</button>`}
+      <button class="bld-btn" data-coffin-action="any-citizen">Use for any citizen</button>
+      <label class="building-control-toggle"><input type="checkbox" data-coffin-toggle="citizens"${tomb.citizens ? " checked" : ""}> Permit citizens</label>
+      <label class="building-control-toggle"><input type="checkbox" data-coffin-toggle="pets"${tomb.pets ? " checked" : ""}> Permit pets</label>`;
+    selection.querySelectorAll("[data-coffin-action]").forEach(button =>
+      button.addEventListener("click", async event => {
+        event.stopPropagation();
+        try {
+          await buildingPanelPost("/burial-coffin-action", {
+            id: info.id, action: button.dataset.coffinAction
+          });
+          const updated = await fetchOptionalBuildingJson("/burial-coffin", info.id);
+          if (updated?.ok) renderCoffinPanel(info, updated);
+        } catch (error) {
+          console.warn("coffin action failed", error);
+        }
+        focusPage();
+      }));
+    selection.querySelectorAll("[data-coffin-toggle]").forEach(input =>
+      input.addEventListener("change", async event => {
+        event.stopPropagation();
+        const key = input.dataset.coffinToggle;
+        try {
+          await buildingPanelPost("/burial-coffin-action", {
+            id: info.id, action: `${key}-${input.checked ? "on" : "off"}`
+          });
+          const updated = await fetchOptionalBuildingJson("/burial-coffin", info.id);
+          if (updated?.ok) renderCoffinPanel(info, updated);
+        } catch (error) {
+          console.warn("coffin permission update failed", error);
+        }
+        focusPage();
+      }));
+    wireSpecialBuildingClose();
+  }
+
+  function renderLeverLinkPanel(info, lever) {
+    const targets = Array.isArray(lever.targets) ? lever.targets : [];
+    selection.className = "visible building-panel building-control-panel";
+    selection.innerHTML = `
+      <div class="bld-head"><div class="bld-name">${escapeHtml(lever.name || info.name || "Lever")}</div>
+        <button class="bld-x" data-bld-close title="Close">X</button></div>
+      <div class="bld-status">${Number(lever.mechanismCount) || 0} available mechanism(s)</div>
+      ${lever.needsMechanisms ? `<div class="bld-note warning">Two available mechanisms are required to link a target.</div>` : ""}
+      <div class="building-control-list">${targets.length ? targets.map(target => `
+        <div class="building-control-row">
+          <div><strong>${escapeHtml(target.name || target.type || `Building ${target.id}`)}</strong>
+            <small>${escapeHtml(target.type || "")} at ${Number(target.x)}, ${Number(target.y)}, ${Number(target.z)}</small></div>
+          <button class="bld-btn" data-lever-target="${Number(target.id)}"${lever.needsMechanisms ? " disabled" : ""}>Link</button>
+        </div>`).join("") : `<div class="bld-note">No linkable targets were found.</div>`}</div>`;
+    selection.querySelectorAll("[data-lever-target]").forEach(button =>
+      button.addEventListener("click", async event => {
+        event.stopPropagation();
+        try {
+          await buildingPanelPost("/lever-link", {
+            id: info.id, target: button.dataset.leverTarget
+          });
+          await openBuildingPanel(info.id);
+        } catch (error) {
+          console.warn("lever link failed", error);
+        }
+        focusPage();
+      }));
+    wireSpecialBuildingClose();
+  }
+
   async function openBuildingPanel(id) {
     let info = null;
     try {
@@ -25,6 +310,29 @@
       if (r.ok) info = await r.json();
     } catch (_) {}
     if (!info || info.error || info.id < 0) { closeSelection(); return; }
+    if (info.isFarmPlot && info.built) {
+      const farm = await fetchFarmPlotInfo(info.id);
+      if (farm) {
+        renderFarmPlotPanel(info, farm);
+        return;
+      }
+    }
+    if (info.isCage && info.built && await openBuildingCagePanel(info))
+      return;
+    if (info.built) {
+      const [coffin, lever] = await Promise.all([
+        fetchOptionalBuildingJson("/burial-coffin", info.id),
+        fetchOptionalBuildingJson("/lever-link", info.id)
+      ]);
+      if (coffin?.ok && coffin.isCoffin) {
+        renderCoffinPanel(info, coffin);
+        return;
+      }
+      if (lever?.ok && lever.isLever) {
+        renderLeverLinkPanel(info, lever);
+        return;
+      }
+    }
     const underConstruction = !info.built;
     const statusLine = info.built ? "Constructed."
       : (info.suspended ? "Construction suspended." : "Waiting for constructionÃ¢â‚¬Â¦");
@@ -165,6 +473,39 @@
     const workersBody = (() => {
       const profile = info.profile || {};
       const unrestricted = Number(profile.permittedCount || 0) === 0;
+      const skillNames = ["Dabbling", "Novice", "Adequate", "Competent", "Skilled",
+        "Proficient", "Talented", "Adept", "Expert", "Professional", "Accomplished",
+        "Great", "Master", "High Master", "Grand Master", "Legendary", "Legendary+1",
+        "Legendary+2", "Legendary+3", "Legendary+4", "Legendary+5"];
+      const skillOptions = (current, includeUnlimited) => {
+        const value = Number(current);
+        let html = skillNames.map((name, level) =>
+          `<option value="${level}"${level === value ? " selected" : ""}>${escapeHtml(name)}</option>`).join("");
+        if (includeUnlimited)
+          html += `<option value="3000"${value >= 3000 ? " selected" : ""}>No maximum</option>`;
+        return html;
+      };
+      const blocked = new Set((Array.isArray(profile.blockedLabors) ?
+        profile.blockedLabors : []).map(labor => Number(labor.id)));
+      const laborRows = (Array.isArray(profile.allLabors) ? profile.allLabors : [])
+        .map(labor => `<label class="workshop-labor-toggle">
+          <input type="checkbox" data-ws-labor="${Number(labor.id)}"${blocked.has(Number(labor.id)) ? " checked" : ""}>
+          <span>${escapeHtml(String(labor.name || "").replaceAll("_", " "))}</span>
+        </label>`).join("");
+      const profileControls = `
+        <div class="workshop-section-title">Workshop profile</div>
+        <div class="workshop-profile-grid">
+          <label>Minimum skill<select class="wo-select" data-ws-min-level>${skillOptions(profile.minLevel, false)}</select></label>
+          <label>Maximum skill<select class="wo-select" data-ws-max-level>${skillOptions(profile.maxLevel, true)}</select></label>
+          <label>General orders<select class="wo-select" data-ws-max-orders>
+            ${Array.from({ length: 11 }, (_, value) => `<option value="${value}"${value === Number(profile.maxGeneralOrders) ? " selected" : ""}>${value}</option>`).join("")}
+          </select></label>
+          <label class="workshop-profile-check"><input type="checkbox" data-ws-ban-orders${profile.generalOrdersBanned ? " checked" : ""}> Ban general work orders</label>
+        </div>
+        <details class="workshop-blocked-labors">
+          <summary>Blocked labors (${blocked.size})</summary>
+          <div class="workshop-labor-grid">${laborRows || `<div class="workshop-note">No labor list available.</div>`}</div>
+        </details>`;
       const rows = workers.length ? workers.map(u => `
         <div class="workshop-worker-row">
           <div>
@@ -173,7 +514,8 @@
           </div>
           <button class="workshop-icon-btn${u.assigned ? " active" : ""}" data-ws-worker="${Number(u.id)}" data-ws-assign="${u.assigned ? "0" : "1"}">${u.assigned ? "On" : "Add"}</button>
         </div>`).join("") : `<div class="workshop-note">No citizens available.</div>`;
-      return `<div class="workshop-note">${unrestricted ? "This workshop is free for anybody to use." : `${Number(profile.permittedCount) || 0} worker(s) assigned to this workshop.`}</div>
+      return `${profileControls}
+        <div class="workshop-note">${unrestricted ? "This workshop is free for anybody to use." : `${Number(profile.permittedCount) || 0} worker(s) assigned to this workshop.`}</div>
         ${unrestricted ? "" : `<button class="bld-btn" data-ws-workers-clear>Let anybody use this workshop</button>`}
         <div class="workshop-list compact">${rows}</div>`;
     })();
@@ -222,9 +564,17 @@
     }).join("") : `<div class="workshop-note">No visible contents.</div>`;
 
     selection.className = "visible building-panel workshop-panel";
+    const titleMarkup = workshopRenameMode
+      ? `<div class="ws-rename-row">
+          <input class="ws-rename-input" maxlength="128" value="${escapeHtml(info.name || "")}">
+          <button class="workshop-icon-btn" data-ws-rename-save>Save</button>
+          <button class="workshop-icon-btn" data-ws-rename-cancel>Cancel</button>
+        </div>`
+      : `<div class="bld-name workshop-title"><span class="workshop-ico"${wsStyle ? ` style="${wsStyle}"` : ""}></span><span>${escapeHtml(info.name || "Workshop")}</span></div>
+         <button class="workshop-icon-btn" data-ws-rename title="Rename workshop">Rename</button>`;
     selection.innerHTML = `
       <div class="bld-head">
-        <div class="bld-name workshop-title"><span class="workshop-ico"${wsStyle ? ` style="${wsStyle}"` : ""}></span><span>${escapeHtml(info.name || "Workshop")}</span></div>
+        ${titleMarkup}
         <button class="bld-x" data-bld-close title="Close">X</button>
       </div>
       <div class="workshop-tabs">${tabs.map(([key, label]) =>
@@ -310,6 +660,72 @@
       }
       await openWorkshopPanel(info.id, "workers");
       focusPage();
+    });
+    const postProfile = async (field, value, message) => {
+      try {
+        await workshopPost("/workshop-profile", { id: info.id, field, value });
+        workshopStatusMsg = message;
+        workshopStatusIsError = false;
+      } catch (error) {
+        workshopStatusMsg = error.message || "Could not update workshop profile.";
+        workshopStatusIsError = true;
+      }
+      await openWorkshopPanel(info.id, "workers");
+      focusPage();
+    };
+    selection.querySelector("[data-ws-min-level]")?.addEventListener("change", event =>
+      postProfile("minLevel", Number(event.currentTarget.value), "Minimum skill updated."));
+    selection.querySelector("[data-ws-max-level]")?.addEventListener("change", event =>
+      postProfile("maxLevel", Number(event.currentTarget.value), "Maximum skill updated."));
+    selection.querySelector("[data-ws-max-orders]")?.addEventListener("change", event =>
+      postProfile("maxGeneralOrders", Number(event.currentTarget.value), "Order limit updated."));
+    selection.querySelector("[data-ws-ban-orders]")?.addEventListener("change", event =>
+      postProfile("banGeneralOrders", event.currentTarget.checked ? 1 : 0,
+        "General-order policy updated."));
+    selection.querySelectorAll("[data-ws-labor]").forEach(control =>
+      control.addEventListener("change", event => postProfile(
+        event.currentTarget.checked ? "blockLabor" : "unblockLabor",
+        Number(event.currentTarget.dataset.wsLabor), "Blocked labors updated.")));
+    selection.querySelector("[data-ws-rename]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      workshopRenameMode = true;
+      renderWorkshopPanel(info);
+      selection.querySelector(".ws-rename-input")?.focus();
+    });
+    selection.querySelector("[data-ws-rename-cancel]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      workshopRenameMode = false;
+      renderWorkshopPanel(info);
+      focusPage();
+    });
+    const saveWorkshopName = async () => {
+      const name = selection.querySelector(".ws-rename-input")?.value.trim() || "";
+      try {
+        await workshopPost("/workshop-rename", { id: info.id, name });
+        workshopRenameMode = false;
+        workshopStatusMsg = name ? "Workshop renamed." : "Name cleared.";
+        workshopStatusIsError = false;
+      } catch (error) {
+        workshopStatusMsg = error.message || "Could not rename workshop.";
+        workshopStatusIsError = true;
+      }
+      await openWorkshopPanel(info.id, activeWorkshopTab);
+      focusPage();
+    };
+    selection.querySelector("[data-ws-rename-save]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      saveWorkshopName();
+    });
+    selection.querySelector(".ws-rename-input")?.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        saveWorkshopName();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        workshopRenameMode = false;
+        renderWorkshopPanel(info);
+        focusPage();
+      }
     });
     selection.querySelector("[data-ws-toggle-order]")?.addEventListener("click", event => {
       event.preventDefault(); event.stopPropagation();
@@ -431,10 +847,21 @@
           <button class="zone-tgl${dir === "south" ? " zone-on" : ""}" data-zone-act="archery-south">South</button>
         </div>`);
     }
-    const specials = specialParts.join("");
+    if (info.canSquads) {
+      specialParts.push(`<div class="zone-section-label">Squads</div>
+        <button class="bld-btn" data-zone-squads>${Number(info.assignedSquads) || 0} squad assignment(s)</button>`);
+    }
+    const zoneHeader = zoneRenameMode
+      ? `<div class="zone-rename-row">
+          <input class="zone-rename-input" maxlength="128" value="${escapeHtml(info.name || "")}">
+          <button class="zone-mini-btn" data-zone-rename-save>Save</button>
+          <button class="zone-mini-btn" data-zone-rename-cancel>Cancel</button>
+        </div>`
+      : `<div class="bld-name">${escapeHtml(info.name || typeLabel)}</div>
+         <button class="zone-mini-btn" data-zone-rename title="Rename zone">Rename</button>`;
     selection.className = "visible building-panel zone-panel";
     selection.innerHTML = `
-      <div class="bld-head"><div class="bld-name">${escapeHtml(info.name || typeLabel)}</div>
+      <div class="bld-head">${zoneHeader}
         <button class="bld-x" data-bld-close title="Close">&#10005;</button></div>
       <div class="bld-status">${escapeHtml(typeLabel)}${info.assignedUnits ? ` &middot; ${info.assignedUnits} assigned` : ""}</div>
       <div class="zone-section-label">Status</div>
@@ -442,7 +869,12 @@
         <button class="zone-tgl${info.active ? " zone-on" : ""}" data-zone-act="enable" title="Zone active">&#9654; Active</button>
         <button class="zone-tgl${info.active ? "" : " zone-on"}" data-zone-act="disable" title="Zone suspended">&#10074;&#10074; Suspended</button>
       </div>
-      ${specials}
+      ${specialParts.join("")}
+      <div class="zone-section-label">Repaint footprint</div>
+      <div class="zone-btn-row">
+        <button class="zone-tgl" data-zone-repaint="add">Add tiles</button>
+        <button class="zone-tgl" data-zone-repaint="erase">Erase tiles</button>
+      </div>
       <button class="bld-btn danger" data-zone-act="remove">Remove zone</button>
     `;
     selection.querySelectorAll("[data-zone-act]").forEach(btn => btn.addEventListener("click", async event => {
@@ -462,8 +894,105 @@
     selection.querySelector("[data-zone-locations]")?.addEventListener("click", event => {
       event.stopPropagation(); openZoneLocationsPanel(info.id); focusPage();
     });
+    selection.querySelector("[data-zone-squads]")?.addEventListener("click", event => {
+      event.stopPropagation(); openZoneSquadsPanel(info.id); focusPage();
+    });
+    selection.querySelectorAll("[data-zone-repaint]").forEach(button => {
+      button.addEventListener("click", event => {
+        event.stopPropagation();
+        const mode = button.dataset.zoneRepaint === "erase" ? "erase" : "add";
+        closeSelection();
+        setZoneRepaint(info.id, mode);
+        focusPage();
+      });
+    });
+    selection.querySelector("[data-zone-rename]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      zoneRenameMode = true;
+      openZonePanel(info.id);
+    });
+    selection.querySelector("[data-zone-rename-cancel]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      zoneRenameMode = false;
+      openZonePanel(info.id);
+    });
+    const saveZoneName = async () => {
+      const name = selection.querySelector(".zone-rename-input")?.value.trim() || "";
+      try {
+        await buildingPanelPost("/zone-rename", { id: info.id, name });
+        zoneRenameMode = false;
+      } catch (_) {}
+      openZonePanel(info.id);
+    };
+    selection.querySelector("[data-zone-rename-save]")?.addEventListener("click", event => {
+      event.stopPropagation();
+      saveZoneName();
+    });
+    selection.querySelector(".zone-rename-input")?.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        saveZoneName();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        zoneRenameMode = false;
+        openZonePanel(info.id);
+      }
+    });
     selection.querySelector("[data-bld-close]").addEventListener("click", event => {
       event.stopPropagation(); closeSelection(); focusPage();
+    });
+  }
+
+  async function openZoneSquadsPanel(id) {
+    let data = null;
+    try {
+      const response = await fetch(`/zone-squads?id=${id}&t=${Date.now()}`, { cache: "no-store" });
+      if (response.ok) data = await response.json();
+    } catch (_) {}
+    if (!data || Number(data.id) < 0) {
+      openZonePanel(id);
+      return;
+    }
+    const squads = Array.isArray(data.squads) ? data.squads : [];
+    const modeButton = (squad, mode, field, label) =>
+      `<button class="zone-squad-mode${squad[field] ? " active" : ""}"
+        data-zone-squad="${Number(squad.id)}" data-zone-squad-mode="${mode}"
+        data-zone-squad-enabled="${squad[field] ? "0" : "1"}">${label}</button>`;
+    selection.className = "visible building-panel zone-panel zone-wide";
+    selection.innerHTML = `
+      <div class="bld-head"><div class="bld-name">${escapeHtml(data.name || "Zone")} squads</div>
+        <button class="bld-x" data-bld-close title="Close">X</button></div>
+      <button class="bld-btn" data-zone-back>Back to zone</button>
+      <div class="zone-squad-list">
+        ${squads.length ? squads.map(squad => `<div class="zone-squad-row${squad.assigned ? " assigned" : ""}">
+          <strong>${escapeHtml(squad.name || `Squad ${squad.id}`)}</strong>
+          <div class="zone-squad-modes">
+            ${modeButton(squad, "sleep", "sleep", "Sleep")}
+            ${modeButton(squad, "train", "train", "Train")}
+            ${modeButton(squad, "individual-equipment", "individualEquipment", "Individual equip")}
+            ${modeButton(squad, "squad-equipment", "squadEquipment", "Squad equip")}
+          </div>
+        </div>`).join("") : `<div class="zone-note">No fortress squads.</div>`}
+      </div>`;
+    selection.querySelector("[data-zone-back]")?.addEventListener("click", () => openZonePanel(data.id));
+    selection.querySelector("[data-bld-close]")?.addEventListener("click", () => {
+      closeSelection();
+      focusPage();
+    });
+    selection.querySelectorAll("[data-zone-squad-mode]").forEach(button => {
+      button.addEventListener("click", async event => {
+        event.stopPropagation();
+        button.disabled = true;
+        try {
+          await buildingPanelPost("/zone-squad-action", {
+            id: data.id,
+            squad: button.dataset.zoneSquad,
+            mode: button.dataset.zoneSquadMode,
+            enabled: button.dataset.zoneSquadEnabled
+          });
+        } catch (_) {}
+        openZoneSquadsPanel(data.id);
+      });
     });
   }
 

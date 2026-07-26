@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -24,6 +24,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace dfcapture {
 
@@ -52,6 +53,23 @@ bool stockpile_toggle_item_via_lua(int32_t id, const std::string& cat,
 bool stockpile_toggle_all_via_lua(int32_t id, const std::string& cat,
                                   const std::string& group, bool on,
                                   std::string* err = nullptr);
+bool stockpile_set_preset_via_lua(int32_t id, const std::string& preset,
+                                  const std::string& mode, std::string* err = nullptr);
+
+std::string hauling_stop_snapshot_via_lua(int32_t route_id, int32_t stop_id,
+                                          std::string* err = nullptr);
+std::string hauling_stop_items_via_lua(int32_t route_id, int32_t stop_id, const std::string& cat,
+                                       const std::string& group, std::string* err = nullptr);
+bool hauling_stop_toggle_item_via_lua(int32_t route_id, int32_t stop_id, const std::string& cat,
+                                      const std::string& group, int idx, bool on,
+                                      std::string* err = nullptr);
+bool hauling_stop_toggle_all_via_lua(int32_t route_id, int32_t stop_id, const std::string& cat,
+                                     const std::string& group, bool on, std::string* err = nullptr);
+bool hauling_stop_set_preset_via_lua(int32_t route_id, int32_t stop_id,
+                                     const std::string& preset, const std::string& mode,
+                                     std::string* err = nullptr);
+bool repair_stockpile_settings_via_lua(int& out_holders, int& out_categories,
+                                       std::string* err = nullptr);
 
 std::string workshop_info_json_via_lua(int32_t id, std::string* err = nullptr);
 bool workshop_add_job_via_lua(int32_t id, const std::string& task, std::string* err = nullptr);
@@ -60,18 +78,30 @@ bool workshop_job_action_via_lua(int32_t id, int32_t job_id, const std::string& 
 bool workshop_worker_action_via_lua(int32_t id, int32_t unit_id, bool assign,
                                     std::string* err = nullptr);
 bool workshop_workers_clear_via_lua(int32_t id, std::string* err = nullptr);
+bool workshop_profile_set_via_lua(int32_t id, const std::string& field, int32_t value,
+                                  std::string* err = nullptr);
 
 std::string zone_locations_json_via_lua(int32_t zone_id, std::string* err = nullptr);
 bool zone_location_action_via_lua(int32_t zone_id, const std::string& action,
                                   const std::string& kind, int32_t location_id,
                                   std::string* err = nullptr);
+std::string location_detail_json_via_lua(int32_t location_id, std::string* err = nullptr);
+bool location_action_via_lua(int32_t location_id, const std::string& action,
+                             const std::string& kind, int32_t unit_id,
+                             std::string* err = nullptr);
+std::string burial_coffin_info_json_via_lua(int32_t id, std::string* err = nullptr);
+bool burial_coffin_action_via_lua(int32_t id, const std::string& action,
+                                  std::string* err = nullptr);
+bool queue_memorial_slab_via_lua(int32_t unit_id, std::string* message = nullptr,
+                                 std::string* err = nullptr);
 
 std::string order_json_via_lua(const char* function_name, std::string* err = nullptr);
 std::string order_json_via_lua_str(const char* function_name, const std::string& arg,
                                    std::string* err = nullptr);
 bool create_order_via_lua(const std::string& key, int32_t amount, const std::string& frequency,
                           int32_t workshop_id, std::string* msg = nullptr,
-                          std::string* err = nullptr);
+                          std::string* err = nullptr,
+                          std::vector<int32_t>* created_ids = nullptr);
 bool import_order_preset_via_lua(const std::string& name, std::string* msg = nullptr,
                                  std::string* err = nullptr);
 bool cancel_order_via_lua(int32_t id, std::string* err = nullptr);
@@ -80,6 +110,10 @@ bool adjust_order_via_lua(int32_t id, int32_t amount, const std::string& frequen
 bool add_item_condition_via_lua(int32_t id, const std::string& compare, int32_t value,
                                 const std::string& item, const std::string& material,
                                 const std::string& adjective, std::string* err = nullptr);
+bool edit_item_condition_via_lua(int32_t id, int32_t index,
+                                 const std::string& compare, int32_t value,
+                                 const std::string& item, const std::string& material,
+                                 const std::string& adjective, std::string* err = nullptr);
 bool add_order_condition_via_lua(int32_t id, int32_t other_id, const std::string& type,
                                  std::string* err = nullptr);
 bool remove_condition_via_lua(int32_t id, const std::string& kind, int32_t index,
@@ -89,5 +123,14 @@ bool set_order_max_workshops_via_lua(int32_t id, int32_t max_workshops,
 bool set_order_workshop_via_lua(int32_t id, int32_t workshop_id,
                                 std::string* err = nullptr);
 bool reorder_order_via_lua(int32_t id, int32_t direction, std::string* err = nullptr);
+bool mission_rescue_stuck_via_lua(int& out_rescued, std::string& out_text,
+                                   std::string* err = nullptr);
+
+// Browser DFHack command console. The catalog is helpdb's command list (static per session);
+// run executes ONE blocklist-cleared command via dfhack.run_command_silent (the deny table in
+// console_policy.h is re-checked here as a backstop -- see console_routes.cpp for the model).
+std::string console_catalog_json_via_lua(std::string* err = nullptr);
+bool console_run_via_lua(const std::string& command, int& out_status, std::string& out_text,
+                         std::string* err = nullptr);
 
 } // namespace dfcapture

@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -22,7 +22,9 @@
 
 #include "Core.h"
 #include "LuaTools.h"
+#include "console_policy.h"
 #include "diagnostics.h"
+#include "save_barrier.h"
 #include "sdl_capture.h"
 
 #include <algorithm>
@@ -46,6 +48,11 @@ bool run_lua_locked(Fn&& fn) {
     std::lock_guard<std::recursive_mutex> module_lock(g_lua_bridge_mutex);
     std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
     DFHack::CoreSuspender suspend;
+    // A request can pass HTTP immediately before DF raises the save callback, then wait here for
+    // the core. Re-check after suspension so no Lua operation enters DF's object graph during
+    // save cleanup, world teardown, or plugin shutdown.
+    if (save_barrier_active())
+        return false;
     return fn();
 }
 
@@ -341,6 +348,117 @@ bool stockpile_toggle_all_via_lua(int32_t id, const std::string& cat,
     return result_ok;
 }
 
+bool stockpile_set_preset_via_lua(int32_t id, const std::string& preset,
+                                  const std::string& mode, std::string* err) {
+    bool result_ok = false;
+    std::string result_err;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("stockpile_set_preset", std::make_tuple(id, preset, mode), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_err = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_err.empty() ? "preset update failed" : result_err;
+    return result_ok;
+}
+
+// ---- Hauling-stop desired-item filter: the stockpile item machinery pointed at a route stop.
+// route_id + stop_id replace the single stockpile id; the Lua halves resolve the stop's settings.
+
+std::string hauling_stop_snapshot_via_lua(int32_t route_id, int32_t stop_id, std::string* err) {
+    std::string json;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("hauling_stop_snapshot", std::make_tuple(route_id, stop_id), 1,
+            [&](lua_State* L) { if (lua_isstring(L, -1)) json = lua_tostring(L, -1); }, err);
+    });
+    return ok ? json : "";
+}
+
+std::string hauling_stop_items_via_lua(int32_t route_id, int32_t stop_id, const std::string& cat,
+                                       const std::string& group, std::string* err) {
+    std::string json;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("hauling_stop_item_list",
+            std::make_tuple(route_id, stop_id, cat, group), 1,
+            [&](lua_State* L) { if (lua_isstring(L, -1)) json = lua_tostring(L, -1); }, err);
+    });
+    return ok ? json : "";
+}
+
+bool hauling_stop_toggle_item_via_lua(int32_t route_id, int32_t stop_id, const std::string& cat,
+                                      const std::string& group, int idx, bool on,
+                                      std::string* err) {
+    bool result_ok = false;
+    std::string result_err;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("hauling_stop_toggle_item",
+            std::make_tuple(route_id, stop_id, cat, group, idx, on), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1)) result_err = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_err.empty() ? "toggle failed" : result_err;
+    return result_ok;
+}
+
+bool hauling_stop_toggle_all_via_lua(int32_t route_id, int32_t stop_id, const std::string& cat,
+                                     const std::string& group, bool on, std::string* err) {
+    bool result_ok = false;
+    std::string result_err;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("hauling_stop_toggle_all",
+            std::make_tuple(route_id, stop_id, cat, group, on), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1)) result_err = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_err.empty() ? "toggle-all failed" : result_err;
+    return result_ok;
+}
+
+bool hauling_stop_set_preset_via_lua(int32_t route_id, int32_t stop_id,
+                                     const std::string& preset, const std::string& mode,
+                                     std::string* err) {
+    bool result_ok = false;
+    std::string result_err;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("hauling_stop_set_preset",
+            std::make_tuple(route_id, stop_id, preset, mode), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1)) result_err = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_err.empty() ? "preset failed" : result_err;
+    return result_ok;
+}
+
+bool repair_stockpile_settings_via_lua(int& out_holders, int& out_categories, std::string* err) {
+    return run_lua_locked([&]() -> bool {
+        return call_lua("repair_incomplete_stockpile_settings", std::make_tuple(), 2,
+            [&](lua_State* L) {
+                out_holders = static_cast<int>(lua_tointeger(L, -2));
+                out_categories = static_cast<int>(lua_tointeger(L, -1));
+            }, err);
+    });
+}
+
 std::string workshop_info_json_via_lua(int32_t id, std::string* err) {
     return json_returning_lua_int("workshop_info", id, err);
 }
@@ -405,6 +523,25 @@ bool workshop_workers_clear_via_lua(int32_t id, std::string* err) {
     return result_ok;
 }
 
+bool workshop_profile_set_via_lua(int32_t id, const std::string& field, int32_t value,
+                                  std::string* err) {
+    bool result_ok = false;
+    std::string result_err;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("workshop_profile_set", std::make_tuple(id, field, value), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_err = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_err.empty() ? "profile set failed" : result_err;
+    return result_ok;
+}
+
 std::string zone_locations_json_via_lua(int32_t zone_id, std::string* err) {
     return json_returning_lua_int("zone_locations_json", zone_id, err);
 }
@@ -427,6 +564,58 @@ bool zone_location_action_via_lua(int32_t zone_id, const std::string& action,
         return false;
     if (!result_ok && err)
         *err = result_err.empty() ? "zone location action failed" : result_err;
+    return result_ok;
+}
+
+std::string location_detail_json_via_lua(int32_t location_id, std::string* err) {
+    return json_returning_lua_int("location_detail_json", location_id, err);
+}
+
+bool location_action_via_lua(int32_t location_id, const std::string& action,
+                             const std::string& kind, int32_t unit_id, std::string* err) {
+    bool result_ok = false;
+    std::string result_err;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("location_action",
+            std::make_tuple(location_id, action, kind, unit_id), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_err = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_err.empty() ? "location action failed" : result_err;
+    return result_ok;
+}
+
+std::string burial_coffin_info_json_via_lua(int32_t id, std::string* err) {
+    return json_returning_lua_int("burial_coffin_info", id, err);
+}
+
+bool burial_coffin_action_via_lua(int32_t id, const std::string& action, std::string* err) {
+    return bool_error_lua_int_string("burial_coffin_action", id, action, err);
+}
+
+bool queue_memorial_slab_via_lua(int32_t unit_id, std::string* message, std::string* err) {
+    bool result_ok = false;
+    std::string result_message;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("queue_memorial_slab", std::make_tuple(unit_id), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_message = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (message)
+        *message = result_message;
+    if (!result_ok && err)
+        *err = result_message.empty() ? "memorial slab action failed" : result_message;
     return result_ok;
 }
 
@@ -458,15 +647,26 @@ std::string order_json_via_lua_str(const char* function_name, const std::string&
 
 bool create_order_via_lua(const std::string& key, int32_t amount,
                           const std::string& frequency, int32_t workshop_id,
-                          std::string* msg, std::string* err) {
+                          std::string* msg, std::string* err,
+                          std::vector<int32_t>* created_ids) {
     bool result_ok = false;
     std::string result_msg;
+    std::vector<int32_t> result_ids;
     bool ok = run_lua_locked([&]() -> bool {
-        return call_lua("create_order", std::make_tuple(key, amount, frequency, workshop_id), 2,
+        return call_lua("create_order", std::make_tuple(key, amount, frequency, workshop_id), 3,
             [&](lua_State* L) {
-                result_ok = lua_toboolean(L, -2) != 0;
-                if (lua_isstring(L, -1))
-                    result_msg = lua_tostring(L, -1);
+                result_ok = lua_toboolean(L, -3) != 0;
+                if (lua_isstring(L, -2))
+                    result_msg = lua_tostring(L, -2);
+                if (lua_istable(L, -1)) {
+                    size_t count = lua_rawlen(L, -1);
+                    for (size_t i = 1; i <= count; ++i) {
+                        lua_rawgeti(L, -1, static_cast<lua_Integer>(i));
+                        if (lua_isinteger(L, -1))
+                            result_ids.push_back(static_cast<int32_t>(lua_tointeger(L, -1)));
+                        lua_pop(L, 1);
+                    }
+                }
             }, err);
     });
     if (!ok)
@@ -476,6 +676,7 @@ bool create_order_via_lua(const std::string& key, int32_t amount,
         return false;
     }
     if (msg) *msg = result_msg;
+    if (created_ids) *created_ids = std::move(result_ids);
     return true;
 }
 
@@ -556,6 +757,28 @@ bool add_item_condition_via_lua(int32_t id, const std::string& compare, int32_t 
         return false;
     if (!result_ok && err)
         *err = result_msg.empty() ? "add condition failed" : result_msg;
+    return result_ok;
+}
+
+bool edit_item_condition_via_lua(int32_t id, int32_t index,
+                                 const std::string& compare, int32_t value,
+                                 const std::string& item, const std::string& material,
+                                 const std::string& adjective, std::string* err) {
+    bool result_ok = false;
+    std::string result_msg;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("edit_item_condition",
+            std::make_tuple(id, index, compare, value, item, material, adjective), 2,
+            [&](lua_State* L) {
+                result_ok = lua_toboolean(L, -2) != 0;
+                if (lua_isstring(L, -1))
+                    result_msg = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (!result_ok && err)
+        *err = result_msg.empty() ? "edit condition failed" : result_msg;
     return result_ok;
 }
 
@@ -650,6 +873,72 @@ bool reorder_order_via_lua(int32_t id, int32_t direction, std::string* err) {
     if (!result_ok && err)
         *err = result_msg.empty() ? "reorder failed" : result_msg;
     return result_ok;
+}
+
+bool mission_rescue_stuck_via_lua(int& out_rescued, std::string& out_text,
+                                  std::string* err) {
+    int rescued = 0;
+    std::string text;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("missions_rescue_stuck", std::make_tuple(), 2,
+            [&](lua_State* L) {
+                if (lua_isnumber(L, -2))
+                    rescued = static_cast<int>(lua_tointeger(L, -2));
+                if (lua_isstring(L, -1))
+                    text = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    if (rescued < 0) {
+        if (err) *err = text.empty() ? "stuck-squad rescue refused" : text;
+        return false;
+    }
+    out_rescued = rescued;
+    out_text = text;
+    diagnostics_log("missions: fix/stuck-squad rescued=" + std::to_string(rescued));
+    return true;
+}
+
+// ---- Browser DFHack command console -----------------------------------------------------------
+
+std::string console_catalog_json_via_lua(std::string* err) {
+    return json_returning_lua("console_catalog", err);
+}
+
+bool console_run_via_lua(const std::string& command, int& out_status, std::string& out_text,
+                         std::string* err) {
+    // *** THE GATE, RE-APPLIED AT THE BRIDGE. *** console_routes.cpp already refused a blocked
+    // command with a 403 before we got here; this second call to the SAME table
+    // (console::command_denied -- there is only one) makes it structurally impossible for any
+    // future C++ caller of this bridge to reach dfhack.run_command_silent without the gate. It
+    // takes no host/loopback parameter, so the host is bound by it exactly as a friend is.
+    console::Denial gate = console::command_denied(command);
+    if (gate.denied) {
+        if (err) *err = gate.reason;
+        diagnostics_log("console: DENIED (bridge backstop) '" + command + "': " + gate.reason);
+        return false;
+    }
+
+    diagnostics_log("console: run '" + command + "'");
+    int status = -1;
+    std::string text;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("console_run", std::make_tuple(command), 2,
+            [&](lua_State* L) {
+                if (lua_isnumber(L, -2))
+                    status = static_cast<int>(lua_tointeger(L, -2));
+                if (lua_isstring(L, -1))
+                    text = lua_tostring(L, -1);
+            }, err);
+    });
+    if (!ok)
+        return false;
+    out_status = status;
+    out_text = text;
+    diagnostics_log("console: done '" + command + "' status=" + std::to_string(status) +
+                    " bytes=" + std::to_string(text.size()));
+    return true;
 }
 
 } // namespace dfcapture

@@ -1,5 +1,5 @@
 // dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -233,6 +233,14 @@
     const skillLines = unitOverviewLines(unit, "overviewSkillLines");
     const needLines = unitOverviewLines(unit, "overviewNeedLines");
     const memoryLines = unitOverviewLines(unit, "overviewMemoryLines", unit.thoughtLines || []);
+    const cycleIds = Array.isArray(data.unitCycle)
+      ? data.unitCycle.map(Number).filter(Number.isFinite)
+      : [];
+    const cycleIndex = cycleIds.indexOf(Number(unit.id));
+    const cycleButtons = cycleIds.length > 1 ? `
+      <button class="unit-icon-button" data-unit-cycle="-1" title="Previous unit on this tile">&lt;</button>
+      <span class="unit-cycle-count">${cycleIndex >= 0 ? cycleIndex + 1 : 1}/${cycleIds.length}</span>
+      <button class="unit-icon-button" data-unit-cycle="1" title="Next unit on this tile">&gt;</button>` : "";
     const overviewGrid = `
       <div class="unit-grid">
         <div class="unit-cell">
@@ -268,15 +276,23 @@
           ${unitPortraitMarkup(unit)}
           <div>
             <div class="unit-name-line">${escapeHtml(unit.name || data.title || "Unit")}</div>
+            ${unit.nickname ? `<div class="unit-nickname-line">"${escapeHtml(unit.nickname)}"</div>` : ""}
             <div class="unit-meta-line">${escapeHtml(unit.profession || "")}${unit.race ? `, ${escapeHtml(unit.race)}` : ""}</div>
             <div class="unit-job-line">${escapeHtml(unit.currentJob || "")}</div>
             ${flagHtml}
           </div>
           <div class="unit-header-actions">
+            ${cycleButtons}
+            <button class="unit-icon-button" data-unit-edit-nickname title="Set nickname">N</button>
             <button class="unit-icon-button" data-unit-follow title="Move camera to this unit">&#127909;</button>
             <button class="unit-icon-button" data-unit-generate-portrait title="Generate portrait">&#128444;</button>
           </div>
         </div>
+        <form class="unit-nickname-editor" data-unit-nickname-editor hidden>
+          <input type="text" maxlength="64" value="${escapeHtml(unit.nickname || "")}" data-unit-nickname-input aria-label="Unit nickname">
+          <button type="submit">Save</button>
+          <button type="button" data-unit-nickname-cancel>Cancel</button>
+        </form>
         <div class="unit-tabs">
           ${tabRow.map(tabButton).join("")}
         </div>
@@ -307,6 +323,25 @@
         focusPage();
       });
     });
+    selection.querySelectorAll("[data-unit-cycle]").forEach(button => {
+      button.addEventListener("click", async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (cycleIds.length < 2) return;
+        const direction = Number(button.dataset.unitCycle) || 1;
+        const at = cycleIndex >= 0 ? cycleIndex : 0;
+        const nextId = cycleIds[(at + direction + cycleIds.length) % cycleIds.length];
+        try {
+          const response = await fetch(`/unit?player=${encodeURIComponent(player)}&id=${nextId}&t=${Date.now()}`,
+            { cache: "no-store" });
+          if (!response.ok) return;
+          const next = await response.json();
+          next.unitCycle = cycleIds;
+          next.tile = data.tile;
+          showUnitSheet(next);
+        } catch (_) {}
+      });
+    });
     const follow = selection.querySelector("[data-unit-follow]");
     if (follow) {
       follow.addEventListener("click", async event => {
@@ -330,6 +365,41 @@
         event.preventDefault();
         event.stopPropagation();
         generateUnitPortrait(unit, portraitButton);
+      });
+    }
+    const nicknameButton = selection.querySelector("[data-unit-edit-nickname]");
+    const nicknameEditor = selection.querySelector("[data-unit-nickname-editor]");
+    const nicknameInput = selection.querySelector("[data-unit-nickname-input]");
+    if (nicknameButton && nicknameEditor && nicknameInput) {
+      nicknameButton.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        nicknameEditor.hidden = false;
+        nicknameInput.focus();
+        nicknameInput.select();
+      });
+      const cancelNickname = selection.querySelector("[data-unit-nickname-cancel]");
+      if (cancelNickname) cancelNickname.addEventListener("click", event => {
+        event.preventDefault();
+        nicknameEditor.hidden = true;
+        focusPage();
+      });
+      nicknameEditor.addEventListener("submit", async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const nickname = nicknameInput.value.trim();
+        const params = new URLSearchParams({ id: String(unit.id), nickname });
+        const response = await fetch(`/unit-nickname?${params}`, {
+          method: "POST", cache: "no-store"
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          console.warn("unit nickname failed", result?.error || response.statusText);
+          nicknameInput.focus();
+          return;
+        }
+        unit.nickname = nickname;
+        renderUnitSheet();
       });
     }
     const close = selection.querySelector("[data-unit-close]");
@@ -495,6 +565,8 @@
     hudEls.dateSeason.textContent = hud.date?.season || "Early Spring";
     hudEls.dateYear.textContent = hud.date?.year ?? 0;
     hudEls.elevation.textContent = `Elevation ${hud.elevation ?? 0}`;
+    if (typeof syncMinimapZ === "function") syncMinimapZ();
+    if (typeof window.dfcSyncClientChrome === "function") window.dfcSyncClientChrome(hud);
     const moonIcon = Math.max(0, Math.min(9, Number(hud.date?.moonIcon ?? 0)));
     hudEls.moon.style.backgroundPosition = `-${moonIcon * 32}px 0`;
     renderMinimap(hud);
@@ -544,6 +616,20 @@
     ctx.strokeRect(bx + 0.5, by + 0.5, bw, bh);
     ctx.strokeStyle = "#ffdf4d";
     ctx.strokeRect(bx + 1.5, by + 1.5, bw - 2, bh - 2);
+    // Peer viewport boxes: where every OTHER player is looking, on the whole-map minimap.
+    try {
+      const peers = (typeof window.dfPresencePeers === "function") ? window.dfPresencePeers() : [];
+      for (const p of peers) {
+        if (!p.hasCam || !p.vw || !p.vh) continue;
+        const pbx = (p.cx / Math.max(1, map.w)) * dispW;
+        const pby = (p.cy / Math.max(1, map.h)) * dispH;
+        const pbw = Math.max(3, (p.vw / Math.max(1, map.w)) * dispW);
+        const pbh = Math.max(3, (p.vh / Math.max(1, map.h)) * dispH);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = p.color || "#ffffff";
+        ctx.strokeRect(pbx + 0.5, pby + 0.5, pbw, pbh);
+      }
+    } catch (_) {}
   }
 
   const ALERT_NAMES = [

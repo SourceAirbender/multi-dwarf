@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -34,7 +34,8 @@ bool clamp_camera(Camera& camera, std::string* err = nullptr);
 bool effective_capture_viewport_dims(const Camera& camera, int& width_tiles,
                                      int& height_tiles, std::string* err = nullptr);
 bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::string* err = nullptr);
-bool capture_camera_jpeg(const Camera& camera, std::vector<uint8_t>& jpeg, std::string* err = nullptr);
+bool capture_camera_jpeg(const Camera& camera, std::vector<uint8_t>& jpeg,
+                         CaptureGeometry* geometry = nullptr, std::string* err = nullptr);
 std::recursive_mutex& capture_state_mutex();
 
 } // namespace dfcapture

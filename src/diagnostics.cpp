@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,6 +21,8 @@
 #include "diagnostics.h"
 
 #include "json_util.h"
+#include "render_thread_wait.h"
+#include "save_barrier.h"
 #include "sdl_capture.h"
 #include "modules/DFSDL.h"
 #include "modules/Gui.h"
@@ -372,10 +374,19 @@ bool host_state_on_render_thread(HostState& state, std::string* err) {
     auto request = std::make_shared<HostStateRequest>();
     auto future = request->done.get_future();
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         request->done.set_value(read_host_state(request->state, &request->err));
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "host-state render-thread request timed out or was abandoned";
+        return false;
+    }
     state = request->state;
     if (!ok && err)
         *err = request->err;
@@ -406,10 +417,19 @@ bool viewport_probe_on_render_thread(ViewportProbe& probe, std::string* err) {
     auto request = std::make_shared<ViewportProbeRequest>();
     auto future = request->done.get_future();
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         request->done.set_value(read_viewport_probe(request->probe, &request->err));
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "viewport-probe render-thread request timed out or was abandoned";
+        return false;
+    }
     probe = request->probe;
     if (!ok && err)
         *err = request->err;
@@ -449,10 +469,19 @@ bool grid_probe_on_render_thread(std::string& json, std::string* err) {
     auto request = std::make_shared<JsonProbeRequest>();
     auto future = request->done.get_future();
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         request->done.set_value(build_grid_probe_json(request->json, &request->err));
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "grid-probe render-thread request timed out or was abandoned";
+        return false;
+    }
     json = request->json;
     diagnostics_log("GRID-PROBE " + json);
     if (!ok && err)
@@ -465,10 +494,19 @@ bool build_probe_on_render_thread(std::string& json, std::string* err) {
     auto request = std::make_shared<JsonProbeRequest>();
     auto future = request->done.get_future();
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         request->done.set_value(build_build_probe_json(request->json, &request->err));
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "build-probe render-thread request timed out or was abandoned";
+        return false;
+    }
     json = request->json;
     diagnostics_log("BUILD-PROBE " + json);
     if (!ok && err)

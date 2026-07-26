@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,23 +21,30 @@
 #include "placement.h"
 
 #include "diagnostics.h"
+#include "render_thread_wait.h"
+#include "save_barrier.h"
 #include "sdl_capture.h"
 
 #include "Core.h"
 #include "TileTypes.h"
 #include "modules/Designations.h"
 #include "modules/DFSDL.h"
+#include "modules/Items.h"
 #include "modules/Job.h"
 #include "modules/MapCache.h"
+#include "modules/Maps.h"
 
 #include "df/global_objects.h"
+#include "df/item.h"
 #include "df/job.h"
 #include "df/job_list_link.h"
 #include "df/job_type.h"
+#include "df/map_block.h"
 #include "df/plant.h"
 #include "df/plant_tree_info.h"
 #include "df/tile_designation.h"
 #include "df/tile_dig_designation.h"
+#include "df/tile_traffic.h"
 #include "df/tile_occupancy.h"
 #include "df/tiletype.h"
 #include "df/tiletype_material.h"
@@ -67,6 +74,8 @@ enum class DesignationKind {
     Chop,
     Gather,
     Clear,
+    Traffic,
+    ItemFlag,
 };
 
 std::recursive_mutex g_designation_mutex;
@@ -159,6 +168,16 @@ bool kind_from_tool(const std::string& tool, DesignationKind& kind,
     }
     if (tool == "clear" || tool == "erase" || tool == "remove" || tool == "none" || tool == "off") {
         kind = DesignationKind::Clear;
+        return true;
+    }
+    if (tool.rfind("traffic", 0) == 0) {
+        kind = DesignationKind::Traffic;
+        return true;
+    }
+    if (tool == "claim" || tool == "forbid" || tool == "dump" ||
+            tool == "undump" || tool == "melt" || tool == "unmelt" ||
+            tool == "hide" || tool == "unhide") {
+        kind = DesignationKind::ItemFlag;
         return true;
     }
     if (dig_from_tool(tool, dig)) {
@@ -275,6 +294,8 @@ struct RenderDesignationRequest {
     DesignationResult result;
     std::string err;
     std::promise<bool> done;
+    int view_w = 0;
+    int view_h = 0;
     // World-tile box of the selection, recorded by apply_designation so the post-render
     // eraser job-cancel pass can run under CoreSuspender. box_x2 < box_x1 means "not set".
     int box_x1 = 0, box_y1 = 0, box_x2 = -1, box_y2 = -1, box_z = 0;
@@ -352,6 +373,13 @@ bool apply_tile_designations(RenderDesignationRequest& req, MapExtras::MapCache&
                     changed = true;
                 }
                 touch_occ = true;
+            } else if (req.kind == DesignationKind::Traffic) {
+                // Traffic is a pure tile-designation edit -- no job, no priority, no occupancy.
+                auto want = static_cast<df::tile_traffic>(clamp_int(req.request.traffic_level, 0, 3));
+                if (des.bits.traffic != want) {
+                    des.bits.traffic = want;
+                    changed = true;
+                }
             }
 
             if (touch_occ) {
@@ -428,20 +456,83 @@ bool apply_plant_designations(RenderDesignationRequest& req, MapExtras::MapCache
     return changed_count > 0;
 }
 
+bool apply_item_flag_designations(RenderDesignationRequest& req, int wx1, int wy1,
+                                  int wx2, int wy2, int wz) {
+    const std::string& tool = req.request.tool;
+    int changed_count = 0;
+    constexpr size_t item_scan_cap = 1024;
+
+    for (int by = wy1 >> 4; by <= wy2 >> 4; ++by) {
+        for (int bx = wx1 >> 4; bx <= wx2 >> 4; ++bx) {
+            df::map_block* block = DFHack::Maps::getTileBlock(bx * 16, by * 16, wz);
+            if (!block)
+                continue;
+            const size_t count = std::min(block->items.size(), item_scan_cap);
+            for (size_t index = 0; index < count; ++index) {
+                df::item* item = df::item::find(block->items[index]);
+                if (!item || item->pos.z != wz ||
+                        item->pos.x < wx1 || item->pos.x > wx2 ||
+                        item->pos.y < wy1 || item->pos.y > wy2)
+                    continue;
+
+                bool changed = false;
+                if (tool == "claim") {
+                    if (item->flags.bits.forbid) {
+                        item->flags.bits.forbid = false;
+                        changed = true;
+                    }
+                } else if (tool == "forbid") {
+                    if (!item->flags.bits.forbid) {
+                        item->flags.bits.forbid = true;
+                        changed = true;
+                    }
+                } else if (tool == "dump") {
+                    if (!item->flags.bits.dump) {
+                        item->flags.bits.dump = true;
+                        changed = true;
+                    }
+                } else if (tool == "undump") {
+                    if (item->flags.bits.dump) {
+                        item->flags.bits.dump = false;
+                        changed = true;
+                    }
+                } else if (tool == "melt") {
+                    changed = DFHack::Items::markForMelting(item);
+                } else if (tool == "unmelt") {
+                    changed = DFHack::Items::cancelMelting(item);
+                } else if (tool == "hide") {
+                    if (!item->flags.bits.hidden) {
+                        item->flags.bits.hidden = true;
+                        changed = true;
+                    }
+                } else if (tool == "unhide") {
+                    if (item->flags.bits.hidden) {
+                        item->flags.bits.hidden = false;
+                        changed = true;
+                    }
+                }
+                if (changed)
+                    ++changed_count;
+            }
+        }
+    }
+
+    req.result.count += changed_count;
+    return changed_count > 0;
+}
+
 bool apply_designation(RenderDesignationRequest& req) {
-    int view_w = 0;
-    int view_h = 0;
-    if (!effective_capture_viewport_dims(req.camera, view_w, view_h, &req.err) ||
+    if (req.view_w <= 0 || req.view_h <= 0 ||
             req.request.frame_w <= 0 || req.request.frame_h <= 0) {
         if (req.err.empty())
             req.err = "viewport/frame unavailable";
         return false;
     }
 
-    int tx1 = pixel_to_tile(std::min(req.request.px, req.request.px2), view_w, req.request.frame_w);
-    int ty1 = pixel_to_tile(std::min(req.request.py, req.request.py2), view_h, req.request.frame_h);
-    int tx2 = pixel_to_tile(std::max(req.request.px, req.request.px2), view_w, req.request.frame_w);
-    int ty2 = pixel_to_tile(std::max(req.request.py, req.request.py2), view_h, req.request.frame_h);
+    int tx1 = pixel_to_tile(std::min(req.request.px, req.request.px2), req.view_w, req.request.frame_w);
+    int ty1 = pixel_to_tile(std::min(req.request.py, req.request.py2), req.view_h, req.request.frame_h);
+    int tx2 = pixel_to_tile(std::max(req.request.px, req.request.px2), req.view_w, req.request.frame_w);
+    int ty2 = pixel_to_tile(std::max(req.request.py, req.request.py2), req.view_h, req.request.frame_h);
 
     int wx1 = req.camera.x + tx1;
     int wy1 = req.camera.y + ty1;
@@ -458,13 +549,17 @@ bool apply_designation(RenderDesignationRequest& req) {
     MapExtras::MapCache map;
     bool changed = false;
 
-    if (req.kind != DesignationKind::Chop && req.kind != DesignationKind::Gather)
+    if (req.kind != DesignationKind::Chop && req.kind != DesignationKind::Gather &&
+            req.kind != DesignationKind::ItemFlag)
         changed = apply_tile_designations(req, map, tx1, ty1, tx2, ty2, wz) || changed;
 
     if (req.kind == DesignationKind::Chop ||
             req.kind == DesignationKind::Gather ||
             req.kind == DesignationKind::Clear)
         changed = apply_plant_designations(req, map, wx1, wy1, wx2, wy2, wz) || changed;
+
+    if (req.kind == DesignationKind::ItemFlag)
+        changed = apply_item_flag_designations(req, wx1, wy1, wx2, wy2, wz) || changed;
 
     if (changed) {
         map.WriteAll();
@@ -475,7 +570,7 @@ bool apply_designation(RenderDesignationRequest& req) {
     std::ostringstream diag;
     diag << "designation had no effect: tool=" << req.request.tool
          << " box=" << wx1 << "," << wy1 << ".." << wx2 << "," << wy2
-         << "," << wz << " viewport=" << view_w << "x" << view_h
+         << "," << wz << " viewport=" << req.view_w << "x" << req.view_h
          << " frame=" << req.request.frame_w << "x" << req.request.frame_h;
     diagnostics_log(diag.str());
     return false;
@@ -501,11 +596,37 @@ bool designate_on_render_thread(const Camera& camera, const DesignationRequest& 
     req->result.tool = request.tool;
     auto future = req->done.get_future();
 
+    // Renderer-owned viewport state is queried on the render thread first. Never hold the core
+    // suspension while waiting for this hop: the renderer can need the core to finish its frame.
     DFHack::runOnRenderThread([req]() {
-        req->done.set_value(apply_designation(*req));
+        req->done.set_value(effective_capture_viewport_dims(
+            req->camera, req->view_w, req->view_h, &req->err));
     });
 
-    bool ok = future.get();
+    bool viewport_ok = false;
+    if (!render_future_get(future, viewport_ok)) {
+        req->err = "designation viewport probe timed out or was abandoned";
+        diagnostics_log("WARN: " + req->err);
+        if (err) *err = req->err;
+        return false;
+    }
+    if (!viewport_ok) {
+        if (err) *err = req->err;
+        return false;
+    }
+
+    // All map, plant, item, and designation access happens while DF's core is parked, keeping
+    // block and item vectors stable.
+    bool ok = false;
+    {
+        std::lock_guard<std::recursive_mutex> cap_lock(capture_state_mutex());
+        DFHack::CoreSuspender suspend;
+        if (save_barrier_active()) {
+            if (err) *err = "Dwarf Fortress is saving or unloading";
+            return false;
+        }
+        ok = apply_designation(*req);
+    }
 
     // Eraser: cancel the dig/chop/gather JOBS in the box -- off the render thread, under
     // CoreSuspender (main parked) so unlinking from the job list can't race DF's job manager
@@ -518,6 +639,10 @@ bool designate_on_render_thread(const Camera& camera, const DesignationRequest& 
         {
             std::lock_guard<std::recursive_mutex> cap_lock(capture_state_mutex());
             DFHack::CoreSuspender suspend;
+            if (save_barrier_active()) {
+                if (err) *err = "Dwarf Fortress is saving or unloading";
+                return false;
+            }
             auto world = df::global::world;
             if (world) {
                 std::vector<df::job*> to_cancel;

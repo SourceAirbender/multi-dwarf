@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+namespace df { struct item; }
+
 namespace dfcapture {
 
 struct InspectResult {
@@ -45,6 +47,7 @@ struct InspectResult {
     std::vector<std::string> lines;
     int32_t building_id = -1;
     int32_t item_id = -1;
+    std::vector<int32_t> unit_cycle_ids;
     UnitSheet unit;
 };
 
@@ -81,6 +84,11 @@ struct StockItemActionResult {
 };
 
 bool action_on_core_thread(const std::string& action, std::string* err = nullptr);
+bool save_world_on_core_thread(std::string* err = nullptr);
+
+// Item description with the PLANT_GROWTH growth-name refinement (else Items::getDescription).
+// Caller must already hold the core suspend lock (call from inside run_suspended/CoreSuspender).
+std::string item_display_name(::df::item* item, int type = 0, bool decorate = false);
 
 bool stock_item_action_on_core_thread(int32_t item_id,
                                       const std::string& action,
@@ -105,5 +113,12 @@ bool hover_on_core_thread(const Camera& camera,
 std::string inspect_json(const std::string& player, const InspectResult& result);
 std::string hover_json(const std::string& player, const HoverResult& result);
 std::string stock_item_action_json(int32_t item_id, const StockItemActionResult& result);
+std::string tile_occupants_json_on_core_thread(const Camera& camera, int px, int py,
+                                                int frame_w, int frame_h,
+                                                std::string* err = nullptr);
+std::string tile_occupants_at_json_on_core_thread(int x, int y, int z,
+                                                   std::string* err = nullptr);
+std::string engraving_info_json_on_core_thread(int x, int y, int z,
+                                                std::string* err = nullptr);
 
 } // namespace dfcapture

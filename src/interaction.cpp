@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -23,6 +23,7 @@
 #include "Core.h"
 #include "TileTypes.h"
 #include "json_util.h"
+#include "save_barrier.h"
 #include "sdl_capture.h"
 
 #include "modules/Buildings.h"
@@ -31,16 +32,24 @@
 #include "modules/Maps.h"
 #include "modules/Materials.h"
 #include "modules/Units.h"
+#include "modules/Translation.h"
 #include "modules/World.h"
 
 #include "df/building.h"
 #include "df/building_civzonest.h"
 #include "df/building_type.h"
 #include "df/global_objects.h"
+#include "df/engraving.h"
 #include "df/graphic.h"
 #include "df/graphic_viewportst.h"
 #include "df/item.h"
 #include "df/item_actual.h"
+#include "df/item_plant_growthst.h"
+#include "df/historical_figure.h"
+#include "df/plant_growth.h"
+#include "df/plant_raw.h"
+#include "df/plotinfost.h"
+#include "df/save_substage.h"
 #include "df/map_block.h"
 #include "df/tiletype.h"
 #include "df/unit.h"
@@ -63,6 +72,8 @@ bool run_suspended(Fn&& fn) {
     std::lock_guard<std::recursive_mutex> interaction_lock(g_interaction_mutex);
     std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
     DFHack::CoreSuspender suspend;
+    if (save_barrier_active())
+        return false;
     return fn();
 }
 
@@ -217,29 +228,38 @@ df::item* find_ground_item_at_tile(const df::coord& pos) {
     return best;
 }
 
-df::unit* find_unit_near_tile(const df::coord& pos) {
+std::vector<df::unit*> find_units_near_tile(const df::coord& pos) {
     auto world = df::global::world;
     if (!world)
-        return nullptr;
+        return {};
 
-    df::unit* best = nullptr;
-    int best_score = 9999;
+    std::vector<df::unit*> exact;
+    std::vector<std::pair<int, df::unit*>> fallback;
     for (auto unit : world->units.active) {
-        if (!unit || unit->pos.z != pos.z || Units::isDead(unit))
+        if (!unit || unit->pos.z != pos.z ||
+                (Units::isDead(unit) && !Units::isGhost(unit)))
             continue;
         int dx = std::abs(unit->pos.x - pos.x);
         int dy = std::abs(unit->pos.y - pos.y);
         if (dx > 1 || dy > 1)
             continue;
-        int score = dx + dy;
-        if (score < best_score) {
-            best = unit;
-            best_score = score;
-            if (score == 0)
-                break;
-        }
+        if (dx == 0 && dy == 0)
+            exact.push_back(unit);
+        else
+            fallback.emplace_back(dx + dy, unit);
     }
-    return best;
+    auto by_id = [](df::unit* a, df::unit* b) { return a->id < b->id; };
+    if (!exact.empty()) {
+        std::sort(exact.begin(), exact.end(), by_id);
+        return exact;
+    }
+    std::sort(fallback.begin(), fallback.end(), [](const auto& a, const auto& b) {
+        return a.first != b.first ? a.first < b.first : a.second->id < b.second->id;
+    });
+    std::vector<df::unit*> result;
+    for (const auto& candidate : fallback)
+        result.push_back(candidate.second);
+    return result;
 }
 
 int pixel_to_tile_coord(int p, int frame, int dim) {
@@ -310,7 +330,11 @@ bool inspect_at_pixel(const Camera& camera,
         }
     }
 
-    if (auto unit = find_unit_near_tile(pos)) {
+    auto units = find_units_near_tile(pos);
+    if (!units.empty()) {
+        auto unit = units.front();
+        for (auto candidate : units)
+            result.unit_cycle_ids.push_back(candidate->id);
         result.kind = "unit";
         result.title = readable_unit_name(unit);
         result.unit = build_unit_sheet(unit);
@@ -456,6 +480,40 @@ bool action_on_core_thread(const std::string& action, std::string* err) {
     });
 }
 
+bool save_world_on_core_thread(std::string* err) {
+    return run_suspended([&]() {
+        if (!Maps::IsValid()) {
+            if (err) *err = "world and map are not loaded";
+            return false;
+        }
+        if (!World::isFortressMode()) {
+            if (err) *err = "only fortress mode can be saved this way";
+            return false;
+        }
+        auto plotinfo = df::global::plotinfo;
+        if (!plotinfo) {
+            if (err) *err = "world not loaded";
+            return false;
+        }
+        auto& main = plotinfo->main;
+        if (main.autosave_request) {
+            if (err) *err = "save already in progress";
+            return false;
+        }
+        main.autosave_request = true;
+        main.autosave_timer = 5;
+        main.save_progress.substage = df::save_substage::Initializing;
+        main.save_progress.stage = 0;
+        main.save_progress.info.nemesis_save_file_id.clear();
+        main.save_progress.info.nemesis_member_idx.clear();
+        main.save_progress.info.units.clear();
+        main.save_progress.info.cur_unit_chunk = nullptr;
+        main.save_progress.info.cur_unit_chunk_num = -1;
+        main.save_progress.info.units_offloaded = -1;
+        return true;
+    });
+}
+
 bool stock_item_action_on_core_thread(int32_t item_id,
                                       const std::string& action,
                                       StockItemActionResult& result) {
@@ -574,6 +632,38 @@ bool hover_on_core_thread(const Camera& camera,
     });
 }
 
+// Item display name with the PLANT_GROWTH refinement: growth items (plump helmet spawn, quarry
+// bush leaves, ...) report their real growth name instead of getDescription's generic material
+// phrasing. Everything else passes straight through to Items::getDescription. Shared by the
+// kitchen and trade panels.
+std::string item_display_name(df::item* item, int type, bool decorate) {
+    if (!item || item->getType() != df::item_type::PLANT_GROWTH)
+        return item ? Items::getDescription(item, type, decorate) : "";
+    auto growth_item = virtual_cast<df::item_plant_growthst>(item);
+    MaterialInfo mi;
+    if (!growth_item || !mi.decode(growth_item->mat_type, growth_item->mat_index) || !mi.plant ||
+        growth_item->subtype < 0 || (size_t)growth_item->subtype >= mi.plant->growths.size() ||
+        !mi.plant->growths[growth_item->subtype])
+        return Items::getDescription(item, type, decorate);
+
+    auto growth = mi.plant->growths[growth_item->subtype];
+    const bool plural = item->getStackSize() > 1;
+    const std::string& growth_name = plural && !growth->name_plural.empty()
+        ? growth->name_plural : growth->name;
+    if (growth_name.empty())
+        return Items::getDescription(item, type, decorate);
+    if (!decorate)
+        return growth_name;
+
+    std::string base = Items::getDescription(item, type, false);
+    std::string decorated = Items::getDescription(item, type, true);
+    size_t at = base.empty() ? std::string::npos : decorated.find(base);
+    if (at == std::string::npos)
+        return growth_name;
+    decorated.replace(at, base.size(), growth_name);
+    return decorated;
+}
+
 std::string inspect_json(const std::string& player, const InspectResult& result) {
     std::ostringstream body;
     body << "{"
@@ -596,8 +686,153 @@ std::string inspect_json(const std::string& player, const InspectResult& result)
         body << ",\"unit\":";
         append_unit_sheet_json(body, result.unit);
     }
+    body << ",\"unitCycle\":[";
+    for (size_t i = 0; i < result.unit_cycle_ids.size(); ++i) {
+        if (i) body << ",";
+        body << result.unit_cycle_ids[i];
+    }
+    body << "]";
     body << "}\n";
     return body.str();
+}
+
+static std::string tile_occupants_at(const df::coord& pos, std::string* err) {
+    std::string json;
+    bool ok = run_suspended([&]() {
+        auto world = df::global::world;
+        if (!world) {
+            if (err) *err = "world unavailable";
+            return false;
+        }
+        std::ostringstream out;
+        out << "{\"tile\":{\"x\":" << pos.x << ",\"y\":" << pos.y
+            << ",\"z\":" << pos.z << "},\"occupants\":[";
+        bool first = true;
+        auto append = [&](const char* kind, int32_t id, const std::string& name) {
+            if (!first) out << ",";
+            first = false;
+            out << "{\"kind\":" << json_string(kind) << ",\"id\":" << id
+                << ",\"name\":" << json_string(name) << "}";
+        };
+        for (auto unit : world->units.active) {
+            if (!unit || unit->pos.x != pos.x || unit->pos.y != pos.y ||
+                    unit->pos.z != pos.z || Units::isHidden(unit) ||
+                    (Units::isDead(unit) && !Units::isGhost(unit)))
+                continue;
+            std::string name = readable_unit_name(unit);
+            if (name.empty()) name = "Unit " + std::to_string(unit->id);
+            append("unit", unit->id, name);
+        }
+        std::vector<int32_t> building_ids;
+        auto append_building = [&](df::building* building) {
+            if (!building ||
+                    std::find(building_ids.begin(), building_ids.end(), building->id) !=
+                        building_ids.end())
+                return;
+            building_ids.push_back(building->id);
+            const char* kind = "building";
+            if (building->getType() == df::building_type::Workshop ||
+                    building->getType() == df::building_type::Furnace)
+                kind = "workshop";
+            else if (building->getType() == df::building_type::Stockpile)
+                kind = "stockpile";
+            else if (building->getType() == df::building_type::Civzone)
+                kind = "zone";
+            std::string name = Buildings::getName(building);
+            if (name.empty()) name = std::string(kind) + " " + std::to_string(building->id);
+            append(kind, building->id, name);
+        };
+        append_building(Buildings::findAtTile(pos));
+        std::vector<df::building_civzonest*> zones;
+        if (Buildings::findCivzonesAt(&zones, pos))
+            for (auto zone : zones) append_building(zone);
+        if (auto block = Maps::getTileBlock(pos)) {
+            for (int32_t item_id : block->items) {
+                auto item = df::item::find(item_id);
+                if (!item || item->pos.x != pos.x || item->pos.y != pos.y ||
+                        item->pos.z != pos.z || !item->flags.bits.on_ground ||
+                        item->flags.bits.hidden || item->flags.bits.garbage_collect)
+                    continue;
+                std::string name = item_display_name(item, 0, true);
+                if (name.empty()) name = "Item " + std::to_string(item->id);
+                append("item", item->id, name);
+            }
+        }
+        for (auto engraving : world->event.engravings) {
+            if (engraving && engraving->pos == pos) {
+                append("engraving", -1, "Engraving");
+                break;
+            }
+        }
+        out << "]}\n";
+        json = out.str();
+        return true;
+    });
+    return ok ? json : std::string();
+}
+
+std::string tile_occupants_json_on_core_thread(const Camera& camera, int px, int py,
+                                                int frame_w, int frame_h,
+                                                std::string* err) {
+    df::coord pos;
+    int tile_px = 0;
+    int tile_py = 0;
+    if (!pixel_to_map_pos(camera, px, py, frame_w, frame_h,
+                          pos, tile_px, tile_py, err))
+        return {};
+    return tile_occupants_at(pos, err);
+}
+
+std::string tile_occupants_at_json_on_core_thread(int x, int y, int z,
+                                                   std::string* err) {
+    return tile_occupants_at(df::coord(x, y, z), err);
+}
+
+std::string engraving_info_json_on_core_thread(int x, int y, int z, std::string* err) {
+    std::string json;
+    bool ok = run_suspended([&]() {
+        auto world = df::global::world;
+        if (!world) {
+            if (err) *err = "world unavailable";
+            return false;
+        }
+        df::coord pos(x, y, z);
+        df::engraving* found = nullptr;
+        for (auto engraving : world->event.engravings) {
+            if (engraving && engraving->pos == pos) {
+                found = engraving;
+                break;
+            }
+        }
+        if (!found) {
+            if (err) *err = "engraving not found";
+            return false;
+        }
+        std::string artist;
+        if (auto hf = df::historical_figure::find(found->artist))
+            artist = Translation::translateName(&hf->name, true);
+        static const char* qualities[] = {
+            "Ordinary", "Well-crafted", "Finely-crafted", "Superior",
+            "Exceptional", "Masterful", "Artifact"
+        };
+        int quality = static_cast<int>(found->quality);
+        std::string quality_name =
+            quality >= 0 && quality < static_cast<int>(sizeof(qualities) / sizeof(qualities[0]))
+                ? qualities[quality] : "Unknown";
+        std::ostringstream out;
+        out << "{\"ok\":true,\"title\":\"Engraving\",\"position\":{\"x\":" << x
+            << ",\"y\":" << y << ",\"z\":" << z << "},\"artistId\":" << found->artist
+            << ",\"artist\":" << json_string(artist)
+            << ",\"quality\":" << quality
+            << ",\"qualityName\":" << json_string(quality_name)
+            << ",\"surface\":" << json_string(found->flags.bits.floor ? "floor" : "wall")
+            << ",\"hidden\":" << (found->flags.bits.hidden ? "true" : "false")
+            << ",\"artId\":" << found->art_id
+            << ",\"artSubId\":" << found->art_subid << "}\n";
+        json = out.str();
+        return true;
+    });
+    return ok ? json : std::string();
 }
 
 std::string hover_json(const std::string& player, const HoverResult& h) {

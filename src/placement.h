@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -38,6 +38,7 @@ struct DesignationRequest {
     bool marker = false;
     bool warm_damp = false;
     int mine_mode = 0;
+    int traffic_level = 0;   // for the "traffic" tool: 0 Normal, 1 Low, 2 High, 3 Restricted
 };
 
 struct DesignationResult {

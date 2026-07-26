@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -22,6 +22,7 @@
 
 #include "Core.h"
 #include "json_util.h"
+#include "save_barrier.h"
 #include "sdl_capture.h"
 
 #include "modules/Units.h"
@@ -55,6 +56,8 @@ bool run_labor_locked(Fn&& fn) {
     std::lock_guard<std::recursive_mutex> labor_lock(g_labor_mutex);
     std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
     DFHack::CoreSuspender suspend;
+    if (save_barrier_active())
+        return false;
     return fn();
 }
 

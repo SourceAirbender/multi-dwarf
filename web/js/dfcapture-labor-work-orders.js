@@ -1,5 +1,5 @@
 // dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -212,9 +212,12 @@
         openLaborPanel();
         return;
       }
+      clientPanel.querySelectorAll("[data-labor-section]").forEach(x => x.classList.toggle("active", x === b));
+      if (section === "Standing orders") { openStandingOrdersEmbedded(); return; }
+      if (section === "Kitchen") { openKitchenEmbedded(); return; }
+      if (section === "Stone use") { openStoneUseEmbedded(); return; }
       const main = clientPanel.querySelector(".info-main");
       if (main) main.innerHTML = `<div class="info-message">Ask host to set these up</div>`;
-      clientPanel.querySelectorAll("[data-labor-section]").forEach(x => x.classList.toggle("active", x === b));
     }));
     clientPanel.querySelector("[data-labor-add]")?.addEventListener("click", async e => {
       e.preventDefault(); e.stopPropagation();
@@ -321,6 +324,286 @@
     }));
   }
 
+  // ---- Standing orders and children's chores ----
+  let standingOrdersData = null;
+  let standingOrdersGroup = "workshops";
+  let standingOrdersLoadToken = 0;
+  let choresData = null;
+
+  const SO_GROUPS = [
+    ["workshops", "Workshops"], ["hauling", "Hauling"], ["refuse", "Refuse"],
+    ["forbidding", "Forbidding"], ["petitions", "Petitions"],
+    ["chores", "Chores"], ["other", "Other"]
+  ];
+  const SO_GROUP_OVERRIDE = {
+    gather_bodies: "hauling",
+    gather_refuse: "refuse",
+    gather_refuse_outside: "refuse",
+    gather_vermin_remains: "refuse",
+    zoneonly_drink: "other",
+    zoneonly_fish: "other",
+    farmer_harvest: "other",
+    ignore_damp_stone: "other",
+    ignore_warm_stone: "other",
+    job_cancel_announce: "other",
+    mix_food: "other"
+  };
+  const SO_ORDER = {
+    workshops: ["auto_loom", "use_dyed_cloth", "auto_collect_webs", "auto_slaughter",
+      "auto_butcher", "auto_fishery", "auto_kitchen", "auto_tan", "auto_smelter",
+      "auto_kiln", "auto_other"],
+    hauling: ["gather_animals", "gather_food", "gather_furniture", "gather_bodies",
+      "gather_minerals", "gather_wood"],
+    refuse: ["gather_refuse", "gather_refuse_outside", "gather_vermin_remains",
+      "dump_corpses", "dump_skulls", "dump_bones", "dump_shells", "dump_skins",
+      "dump_hair", "dump_other"],
+    forbidding: ["forbid_used_ammo", "forbid_own_dead", "forbid_own_dead_items",
+      "forbid_other_nohunt", "forbid_other_dead_items", "forbid_floor_and_wall_cleaning",
+      "forbid_trap_cleaning", "forbid_rearming_traps",
+      "forbid_cages_from_sprung_traps", "forbid_toppled_building_items"],
+    other: ["job_cancel_announce", "ignore_damp_stone", "ignore_warm_stone",
+      "farmer_harvest", "mix_food", "zoneonly_drink", "zoneonly_fish"]
+  };
+  const SO_STATE_LABELS = {
+    gather_animals: ["Workers ignore animals", "Workers gather animals"],
+    gather_food: ["Workers ignore food", "Workers gather food"],
+    gather_furniture: ["Workers ignore furniture", "Workers gather furniture"],
+    gather_bodies: ["Workers ignore bodies", "Workers gather bodies"],
+    gather_minerals: ["Workers ignore minerals", "Workers gather minerals"],
+    gather_wood: ["Workers ignore wood", "Workers gather wood"],
+    gather_refuse: ["Workers ignore refuse", "Workers gather refuse"],
+    gather_refuse_outside: ["Workers ignore outdoor refuse", "Workers gather outdoor refuse"],
+    gather_vermin_remains: ["Workers ignore outdoor vermin remains", "Workers gather outdoor vermin remains"],
+    dump_corpses: ["Workers save corpses", "Workers dump corpses"],
+    dump_skulls: ["Workers save skulls", "Workers dump skulls"],
+    dump_bones: ["Workers save bones", "Workers dump bones"],
+    dump_shells: ["Workers save shells", "Workers dump shells"],
+    dump_skins: ["Workers save skins", "Workers dump skins"],
+    dump_hair: ["Workers save hair and wool", "Workers dump hair and wool"],
+    dump_other: ["Workers save other objects", "Workers dump other objects"],
+    forbid_used_ammo: ["Collect used ammunition", "Forbid used ammunition"],
+    forbid_own_dead: ["Claim your dead", "Forbid your dead"],
+    forbid_own_dead_items: ["Claim your death items", "Forbid your death items"],
+    forbid_other_nohunt: ["Claim other dead", "Forbid other dead"],
+    forbid_other_dead_items: ["Claim other death items", "Forbid other death items"],
+    forbid_floor_and_wall_cleaning: ["Allow floor/wall cleaning during sieges", "Forbid floor/wall cleaning during sieges"],
+    forbid_trap_cleaning: ["Allow trap cleaning during sieges", "Forbid trap cleaning during sieges"],
+    forbid_rearming_traps: ["Allow trap rearming during sieges", "Forbid trap rearming during sieges"],
+    forbid_cages_from_sprung_traps: ["Allow cages from sprung traps during sieges", "Forbid cages from sprung traps during sieges"],
+    forbid_toppled_building_items: ["Allow toppled building items during sieges", "Forbid toppled building items during sieges"],
+    job_cancel_announce: ["Do not announce job cancellations", "Announce some job cancellations"],
+    ignore_damp_stone: ["Mining cancelled near new damp stone", "Mining continues near new damp stone"],
+    ignore_warm_stone: ["Mining cancelled near new warm stone", "Mining continues near new warm stone"],
+    farmer_harvest: ["Only farmers harvest", "Everybody harvests"],
+    mix_food: ["Do not mix similar foods in barrels", "Mix similar foods in barrels"],
+    zoneonly_drink: ["Use any water source for drinking", "Prefer zones for water drinking"],
+    zoneonly_fish: ["Fish anywhere", "Prefer zones for fishing"]
+  };
+  const CHORE_ORDER = [
+    "feed_patients_prisoners", "milking", "stone_hauling", "wood_hauling",
+    "item_hauling", "burial", "food_hauling", "refuse_hauling",
+    "furniture_hauling", "animal_hauling", "trade_good_hauling",
+    "water_hauling", "cleaning", "lever_operation"
+  ];
+
+  function prepareLaborEmbeddedSection(section) {
+    clientPanel.querySelectorAll("[data-labor-section]").forEach(b =>
+      b.classList.toggle("active", b.dataset.laborSection === section));
+    const body = clientPanel.querySelector(".info-body");
+    body?.classList.remove("with-side");
+    const side = clientPanel.querySelector(".info-side-list");
+    if (side) side.style.display = "none";
+    return clientPanel.querySelector(".info-main");
+  }
+
+  function standingOrdersGroups() {
+    const flat = [];
+    for (const group of (Array.isArray(standingOrdersData?.groups) ? standingOrdersData.groups : [])) {
+      for (const item of (Array.isArray(group.items) ? group.items : []))
+        flat.push({ ...item, serverGroup: group.id });
+    }
+    return SO_GROUPS.map(([id, label]) => {
+      const members = flat.filter(item => (SO_GROUP_OVERRIDE[item.key] || item.serverGroup) === id);
+      const rank = new Map((SO_ORDER[id] || []).map((key, i) => [key, i]));
+      members.sort((a, b) => (rank.get(a.key) ?? 1000) - (rank.get(b.key) ?? 1000));
+      return { id, label, items: members };
+    });
+  }
+
+  function standingOrderLabel(item) {
+    if (item.tristate) {
+      const states = ["prompt", "accept", "reject"];
+      return `${item.label}: ${states[((Number(item.raw) || 0) % 3 + 3) % 3]}`;
+    }
+    const labels = SO_STATE_LABELS[item.key];
+    return labels ? labels[item.value ? 1 : 0] : item.label;
+  }
+
+  function standingOrderButton(item) {
+    const next = item.tristate ? ((Number(item.raw) || 0) + 1) % 3 : (item.value ? 0 : 1);
+    return `<button class="so-order-row${item.value ? " on" : ""}${item.tristate ? " petition" : ""}"
+      data-so-key="${escapeHtml(item.key)}" data-so-value="${next}">
+      <span class="so-order-check">${item.value ? "&#10003;" : ""}</span>
+      <span>${escapeHtml(standingOrderLabel(item))}</span>
+    </button>`;
+  }
+
+  function choresModel() {
+    const data = choresData || {};
+    const rawTypes = Array.isArray(data.choreTypes) ? data.choreTypes : [];
+    const byKey = new Map(rawTypes.map(type => [String(type.key), type]));
+    const types = CHORE_ORDER.map(key => byKey.get(key)).filter(Boolean);
+    rawTypes.forEach(type => {
+      if (!CHORE_ORDER.includes(String(type.key))) types.push(type);
+    });
+    return {
+      childrenDoChores: !!data.childrenDoChores,
+      children: Array.isArray(data.children) ? data.children : [],
+      types
+    };
+  }
+
+  function choresMarkup() {
+    if (!choresData) return `<div class="info-message">Loading children's chores...</div>`;
+    const model = choresModel();
+    const children = model.children.length ? model.children.map(child => `
+      <div class="so-chore-row">
+        ${unitPortraitMarkup({
+          id: Number(child.unitId), name: child.name,
+          portraitTexpos: Number(child.portraitTexpos ?? -1)
+        }, "info-portrait-small")}
+        <span class="so-child-name">${escapeHtml(child.name)}, Dwarven Child</span>
+        <button class="so-check-button${child.enabled ? " on" : ""}"
+          data-chore-child="${Number(child.unitId)}" data-chore-value="${child.enabled ? 0 : 1}"
+          title="Child does chores">${child.enabled ? "&#10003;" : ""}</button>
+      </div>`).join("") : `<div class="info-message">There are no children in the fortress.</div>`;
+    const types = model.types.map(type => `
+      <div class="so-chore-row type">
+        <span>${escapeHtml(type.label)}</span>
+        <button class="so-check-button${type.enabled ? " on" : ""}"
+          data-chore-type="${escapeHtml(type.key)}" data-chore-value="${type.enabled ? 0 : 1}"
+          title="Chore enabled">${type.enabled ? "&#10003;" : ""}</button>
+      </div>`).join("");
+    return `
+      <div class="so-global-row" role="group" aria-label="Children's chores">
+        <button data-chore-global="1"${model.childrenDoChores ? " class=\"active\"" : ""}>Children do chores</button>
+        <button data-chore-global="0"${model.childrenDoChores ? "" : " class=\"active\""}>Children don't do chores</button>
+      </div>
+      <div class="so-chores-grid">
+        <div class="so-chores-pane"><div class="so-pane-title">Children</div>${children}</div>
+        <div class="so-chores-pane"><div class="so-pane-title">Chores</div>${types}</div>
+      </div>`;
+  }
+
+  function wireChores() {
+    const post = async params => {
+      try {
+        await laborPost(`/chores?${new URLSearchParams(params).toString()}`);
+        const r = await fetch(`/chores?t=${Date.now()}`, { cache: "no-store" });
+        const data = await r.json();
+        if (!r.ok || data.ok === false) throw new Error(data.error || "Chores unavailable");
+        choresData = data;
+        renderStandingOrdersEmbedded();
+      } catch (err) {
+        window.alert(err.message || "Could not update chores");
+      }
+    };
+    clientPanel.querySelectorAll("[data-chore-global]").forEach(button =>
+      button.addEventListener("click", e => {
+        e.preventDefault(); e.stopPropagation();
+        post({ global: Number(button.dataset.choreGlobal) });
+      }));
+    clientPanel.querySelectorAll("[data-chore-type]").forEach(button =>
+      button.addEventListener("click", e => {
+        e.preventDefault(); e.stopPropagation();
+        post({ chore: button.dataset.choreType, value: Number(button.dataset.choreValue) });
+      }));
+    clientPanel.querySelectorAll("[data-chore-child]").forEach(button =>
+      button.addEventListener("click", e => {
+        e.preventDefault(); e.stopPropagation();
+        post({ child: Number(button.dataset.choreChild), value: Number(button.dataset.choreValue) });
+      }));
+  }
+
+  async function loadChores() {
+    try {
+      const r = await fetch(`/chores?t=${Date.now()}`, { cache: "no-store" });
+      const data = await r.json();
+      if (!r.ok || data.ok === false) throw new Error(data.error || "Chores unavailable");
+      choresData = data;
+    } catch (_) {
+      choresData = { childrenDoChores: false, children: [], choreTypes: [] };
+    }
+    renderStandingOrdersEmbedded();
+  }
+
+  function renderStandingOrdersEmbedded() {
+    const main = prepareLaborEmbeddedSection("Standing orders");
+    if (!main) return;
+    const groups = standingOrdersGroups();
+    if (!standingOrdersData || standingOrdersData.ok === false) {
+      main.innerHTML = `<div class="info-message">Standing orders unavailable while the world is loading or saving.</div>`;
+      return;
+    }
+    if (!groups.some(group => group.id === standingOrdersGroup))
+      standingOrdersGroup = groups[0]?.id || "workshops";
+    const active = groups.find(group => group.id === standingOrdersGroup) || groups[0];
+    const tabs = groups.map(group =>
+      `<button class="info-tab${group.id === active.id ? " active" : ""}" data-so-group="${group.id}">${escapeHtml(group.label)}</button>`
+    ).join("");
+    const content = active.id === "chores" ? choresMarkup() :
+      `<div class="so-order-list">${active.items.length
+        ? active.items.map(standingOrderButton).join("")
+        : `<div class="info-message">No standing orders are available in this category.</div>`}</div>
+       ${active.id === "forbidding"
+         ? `<div class="so-footnote">Forbidding of death objects occurs at time of death.</div>` : ""}`;
+    main.innerHTML = `<div class="standing-orders-screen">
+      <div class="info-detail-tabs so-category-tabs">${tabs}</div>
+      ${content}
+    </div>`;
+
+    main.querySelectorAll("[data-so-group]").forEach(button =>
+      button.addEventListener("click", e => {
+        e.preventDefault(); e.stopPropagation();
+        standingOrdersGroup = button.dataset.soGroup;
+        renderStandingOrdersEmbedded();
+        if (standingOrdersGroup === "chores" && !choresData) loadChores();
+      }));
+    main.querySelectorAll("[data-so-key]").forEach(button =>
+      button.addEventListener("click", async e => {
+        e.preventDefault(); e.stopPropagation();
+        try {
+          await laborPost(`/standing-orders?key=${encodeURIComponent(button.dataset.soKey)}&value=${Number(button.dataset.soValue)}`);
+          const r = await fetch(`/standing-orders?t=${Date.now()}`, { cache: "no-store" });
+          const data = await r.json();
+          if (!r.ok || data.ok === false) throw new Error(data.error || "Standing orders unavailable");
+          standingOrdersData = data;
+          renderStandingOrdersEmbedded();
+        } catch (err) {
+          window.alert(err.message || "Could not update standing order");
+        }
+      }));
+    if (active.id === "chores") wireChores();
+  }
+
+  async function openStandingOrdersEmbedded() {
+    const main = prepareLaborEmbeddedSection("Standing orders");
+    if (main) main.innerHTML = `<div class="info-message">Loading standing orders...</div>`;
+    const token = ++standingOrdersLoadToken;
+    try {
+      const r = await fetch(`/standing-orders?t=${Date.now()}`, { cache: "no-store" });
+      const data = await r.json();
+      if (!r.ok || data.ok === false) throw new Error(data.error || "Standing orders unavailable");
+      if (token !== standingOrdersLoadToken) return;
+      standingOrdersData = data;
+      renderStandingOrdersEmbedded();
+      if (standingOrdersGroup === "chores" && !choresData) loadChores();
+    } catch (err) {
+      if (token !== standingOrdersLoadToken) return;
+      if (main) main.innerHTML = `<div class="info-message">${escapeHtml(err.message || "Standing orders unavailable.")}</div>`;
+    }
+  }
+
   // ---- Work orders (Manager), backed by /orders + /order-* endpoints ----
   let woCatalog = null;    // [{cat, items:[{key,label}]}] -- cached
   let woShopCatalog = null;// [{shop, icon, items:[{key,label}]}] -- DF-style by-workshop picker
@@ -361,6 +644,7 @@
   let woCondMatItem = "";     // item type woCondMaterials was loaded for
   let woCondSuggestions = []; // suggested conditions for the selected order
   let woCondSuggestFor = null;
+  let woEditingCond = null;    // full serialized item condition being edited in place
 
   function woFreqLabel(f) { return f === "OneTime" ? "One time" : (f || "One time"); }
 
@@ -447,17 +731,17 @@
   }
 
   // ---- Condition "Mat" picker + DF-style suggested conditions ----
-  function woCondMaterialOpts() {
-    const opts = [`<option value="">any material</option>`];
+  function woCondMaterialOpts(selected = "") {
+    const opts = [`<option value=""${selected ? "" : " selected"}>any material</option>`];
     for (const m of woCondMaterials) {
       const val = `${Number(m.matType)}:${Number(m.matIndex)}`;
-      opts.push(`<option value="${val}">${escapeHtml(m.name || val)} (${Number(m.count) || 0})</option>`);
+      opts.push(`<option value="${val}"${val === selected ? " selected" : ""}>${escapeHtml(m.name || val)} (${Number(m.count) || 0})</option>`);
     }
     return opts.join("");
   }
   function renderWoCondMaterialSelect() {
     const sel = document.getElementById("woCondMaterial");
-    if (sel) sel.innerHTML = woCondMaterialOpts();
+    if (sel) sel.innerHTML = woCondMaterialOpts(woEditingCond?.material || "");
   }
   async function loadWoCondMaterials(item) {
     woCondMatItem = item;
@@ -656,12 +940,17 @@
   // ---- "conditions" screen: order settings + the conditions editor for one order ----
   function woRenderConditionsScreen(selected, orders) {
     const editFreqOpts = WO_FREQS.map(f => `<option value="${f}"${f === selected.frequency ? " selected" : ""}>${escapeHtml(woFreqLabel(f))}</option>`).join("");
-    const compareOpts = WO_COMPARE.map(([value, label]) => `<option value="${value}">${escapeHtml(label)}</option>`).join("");
-    const targetOpts = (woTargets || []).map(t => `<option value="${escapeHtml(t.item)}">${escapeHtml(t.label)}</option>`).join("");
+    const editCond = woEditingCond;
+    const adjectiveOptions = [...WO_ADJECTIVES];
+    if (editCond?.adjective && !adjectiveOptions.some(([value]) => value === editCond.adjective))
+      adjectiveOptions.unshift([editCond.adjective, editCond.adjective.replaceAll(",", ", ")]);
+    const compareOpts = WO_COMPARE.map(([value, label]) => `<option value="${value}"${value === editCond?.compare ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
+    const targetOpts = (woTargets || []).map(t => `<option value="${escapeHtml(t.item)}"${t.item === editCond?.item ? " selected" : ""}>${escapeHtml(t.label)}</option>`).join("");
     const otherOpts = orders.filter(o => Number(o.id) !== Number(selected.id)).map(o => `<option value="${o.id}">${escapeHtml(woOrderTitle(o))}</option>`).join("");
     const condRows = (rows, kind) => rows && rows.length ? rows.map(c => `
       <div class="wo-cond">
         <span>${escapeHtml(c.label || "")}</span>
+        ${kind === "item" ? `<button class="wo-icon" data-wo-edit-cond="${selected.id}" data-idx="${c.idx}" title="Edit condition">Edit</button>` : ""}
         <button class="wo-icon danger" data-wo-remove-cond="${selected.id}" data-kind="${kind}" data-idx="${c.idx}" title="Remove condition">&times;</button>
       </div>`).join("") : `<div class="wo-empty">None</div>`;
     return `
@@ -694,13 +983,14 @@
           <div class="wo-suggested" id="woSuggestedConds"></div>
           <div class="wo-cond-builder">
             <span class="wo-cond-word">Amount of</span>
-            <select class="wo-select" id="woCondAdjective">${WO_ADJECTIVES.map(([v, l]) => `<option value="${v}">${escapeHtml(l)}</option>`).join("")}</select>
-            <select class="wo-select" id="woCondMaterial">${woCondMaterialOpts()}</select>
-            <select class="wo-select" id="woCondItem"><option value="">any item</option>${targetOpts}</select>
+            <select class="wo-select" id="woCondAdjective">${adjectiveOptions.map(([v, l]) => `<option value="${v}"${v === (editCond?.adjective || "") ? " selected" : ""}>${escapeHtml(l)}</option>`).join("")}</select>
+            <select class="wo-select" id="woCondMaterial">${woCondMaterialOpts(editCond?.material || "")}</select>
+            <select class="wo-select" id="woCondItem"><option value=""${editCond?.item ? "" : " selected"}>any item</option>${targetOpts}</select>
             <span class="wo-cond-word">is</span>
             <select class="wo-select" id="woCondCompare">${compareOpts}</select>
-            <input class="wo-input narrow" id="woCondValue" type="number" min="0" max="999999" value="10">
-            <button class="wo-btn" id="woAddItemCond">Add</button>
+            <input class="wo-input narrow" id="woCondValue" type="number" min="0" max="999999" value="${Number(editCond?.value ?? 10)}">
+            <button class="wo-btn" id="woAddItemCond">${editCond ? "Save" : "Add"}</button>
+            ${editCond ? `<button class="wo-btn secondary" id="woCancelItemCondEdit">Cancel edit</button>` : ""}
           </div>
         </div>
         <div class="wo-field">
@@ -752,10 +1042,17 @@
     }));
     const newBtn = clientPanel.querySelector("[data-wo-newscreen]");
     if (newBtn) newBtn.addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); woMode = "new"; woSelKey = null; renderWorkOrders(); });
-    clientPanel.querySelectorAll("[data-wo-backlist]").forEach(b => b.addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); woMode = "list"; renderWorkOrders(); }));
+    clientPanel.querySelectorAll("[data-wo-backlist]").forEach(b => b.addEventListener("click", e => {
+      e.preventDefault(); e.stopPropagation();
+      woMode = "list";
+      woEditingCond = null;
+      renderWorkOrders();
+    }));
     clientPanel.querySelectorAll("[data-wo-conditions]").forEach(b => b.addEventListener("click", e => {
       e.preventDefault(); e.stopPropagation();
-      woSelOrderId = Number(b.dataset.woConditions); woMode = "conditions"; renderWorkOrders();
+      woSelOrderId = Number(b.dataset.woConditions); woMode = "conditions";
+      woEditingCond = null;
+      renderWorkOrders();
     }));
     clientPanel.querySelectorAll("[data-wo-move]").forEach(b => b.addEventListener("click", async e => {
       e.preventDefault(); e.stopPropagation();
@@ -826,21 +1123,48 @@
       catch (err) { woSetStatus(err.message || "Could not update workshop.", true); }
     });
     const condItemSel = document.getElementById("woCondItem");
-    if (condItemSel && selected) condItemSel.addEventListener("change", () => { loadWoCondMaterials(condItemSel.value || ""); });
+    if (condItemSel && selected) condItemSel.addEventListener("change", () => {
+      if (woEditingCond) {
+        woEditingCond.item = condItemSel.value || "";
+        woEditingCond.material = "";
+      }
+      loadWoCondMaterials(condItemSel.value || "");
+    });
+    clientPanel.querySelectorAll("[data-wo-edit-cond]").forEach(button =>
+      button.addEventListener("click", async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const condition = (selected?.itemConditions || [])
+          .find(row => Number(row.idx) === Number(button.dataset.idx));
+        if (!condition) return;
+        woEditingCond = { ...condition };
+        await loadWoCondMaterials(condition.item || "");
+        renderWorkOrders();
+      }));
+    document.getElementById("woCancelItemCondEdit")?.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      woEditingCond = null;
+      renderWorkOrders();
+    });
     const addItemCond = document.getElementById("woAddItemCond");
     if (addItemCond && selected) addItemCond.addEventListener("click", async e => {
       e.preventDefault(); e.stopPropagation();
       try {
-        await woApi("/order-condition-item-add", {
+        const editing = woEditingCond;
+        await woApi(editing ? "/order-condition-item-edit" : "/order-condition-item-add", {
           id: selected.id,
+          idx: editing?.idx,
           item: document.getElementById("woCondItem")?.value || "",
           material: document.getElementById("woCondMaterial")?.value || "",
           adjective: document.getElementById("woCondAdjective")?.value || "",
           compare: document.getElementById("woCondCompare")?.value || "AtMost",
           value: Math.max(0, Math.min(999999, Number(document.getElementById("woCondValue")?.value) || 0))
         });
-        await refreshWorkOrders(); woSetStatus("Item condition added.", false);
-      } catch (err) { woSetStatus(err.message || "Could not add condition.", true); }
+        woEditingCond = null;
+        await refreshWorkOrders();
+        woSetStatus(editing ? "Condition updated." : "Item condition added.", false);
+      } catch (err) { woSetStatus(err.message || "Could not save condition.", true); }
     });
     if (woMode === "conditions" && selected) {
       loadWoSuggestions(selected.id);

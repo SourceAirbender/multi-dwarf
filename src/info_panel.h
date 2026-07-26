@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -31,8 +31,26 @@ struct InfoTab {
     std::string label;
 };
 
+struct LivestockState {
+    bool ok = false;
+    bool slaughter = false;
+    bool war = false;
+    bool hunt = false;
+    bool trainable_war = false;
+    bool trainable_hunt = false;
+    bool pet = false;
+    bool adoption = false;
+    bool tamable = false;
+    bool training = false;
+    bool taming = false;
+    int32_t trainer_id = -1;
+    bool geld = false;
+    bool geldable = false;
+};
+
 struct InfoRow {
     int32_t unit_id = -1;
+    int32_t job_id = -1;
     int32_t item_id = -1;
     int32_t portrait_texpos = -1;
     int32_t building_id = -1;
@@ -55,6 +73,8 @@ struct InfoRow {
     int32_t icon_row = -1;
     std::vector<std::string> badges;
     bool muted = false;
+    bool has_livestock = false;
+    LivestockState livestock;
 };
 
 struct StockItemRow {
@@ -92,5 +112,11 @@ bool info_panel_on_render_thread(const std::string& panel_name,
                                  const std::string& detail,
                                  InfoPanel& panel,
                                  std::string* err = nullptr);
+
+bool livestock_action_on_core_thread(int32_t unit_id, const std::string& action,
+                                     LivestockState& out, std::string* err = nullptr,
+                                     int32_t trainer_id = -1);
+bool cancel_job_on_core_thread(int32_t job_id, std::string* err = nullptr);
+std::string livestock_state_json(int32_t unit_id, const LivestockState& state);
 
 } // namespace dfcapture

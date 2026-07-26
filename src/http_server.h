@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2025 - 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -35,5 +35,9 @@ void stop_server();
 bool server_running();
 std::string server_url();
 std::string server_url(const std::string& bind_address, int port);
+
+// Action notification hook. Timed frame capture requires no explicit wakeup, so this implementation
+// is intentionally a no-op.
+void notify_player_input();
 
 } // namespace dfcapture

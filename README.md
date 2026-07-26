@@ -65,7 +65,7 @@ If you prefer the command line, after the fortress is loaded, you can use `captu
 `capture-stream-stop` ends it. To put the window on a hotkey, add to
 `<Dwarf Fortress>/hack/dfhack.init`:
 
-For me it's: `& 'C:\Games\Steam\steamapps\common\Dwarf Fortress\hack\dfhack-run.exe' capture-stream-start 8765 0.0.0.0`
+For example: `& '<Dwarf Fortress>\hack\dfhack-run.exe' capture-stream-start 8765 0.0.0.0`
 
 
 

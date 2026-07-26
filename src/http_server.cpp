@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2025 - 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -21,6 +21,8 @@
 #include "http_server.h"
 
 #include "building_zone.h"
+#include "attribution.h"
+#include "chat.h"
 #include "client_state.h"
 #include "diagnostics.h"
 #include "hud.h"
@@ -32,14 +34,37 @@
 #include "json_util.h"
 #include "labor.h"
 #include "lua_bridge.h"
+#include "missions.h"
 #include "notifications.h"
+#include "native_popup.h"
 #include "placement.h"
+#include "save_barrier.h"
+#include "session_policy.h"
 #include "unit_sheet.h"
 #include "unit_portrait.h"
+#include "squads.h"
+#include "standing_orders.h"
 #include "stockpile_panel.h"
+#include "stone_use.h"
 #include "web_assets.h"
 #include "work_orders.h"
+#include "announcements.h"
+#include "audio_stream.h"
+#include "burrows_panel.h"
+#include "console_routes.h"
+#include "diplo.h"
+#include "fort_admin.h"
+#include "fortress_utilities.h"
+#include "hauling.h"
+#include "hospital.h"
+#include "kitchen_panel.h"
+#include "lever_link.h"
+#include "trade_depot.h"
+#include "vote.h"
+#include "worldmap_panel.h"
+#include "write_guards.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -48,6 +73,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace dfcapture {
@@ -59,6 +85,93 @@ std::thread g_server_thread;
 std::atomic<bool> g_running(false);
 int g_port = DEFAULT_STREAM_PORT;
 std::string g_bind_address = DEFAULT_BIND_ADDRESS;
+
+// --- Player presence (cursors + camera) -----------------------------------------------------
+// A pure browser-to-browser relay: each client POSTs its cursor world-tile + camera, and every
+// client GETs everyone else's. This touches NO DF state -- no CoreSuspender, no df:: access --
+// so it adds zero sim interaction and zero crash surface. Stale entries are pruned on read.
+struct PresenceEntry {
+    bool has = false;            // is the cursor currently over the map?
+    int x = 0, y = 0, z = 0;     // world tile under the cursor
+    bool has_cam = false;
+    int cx = 0, cy = 0, cz = 0;  // this player's camera origin
+    int vw = 0, vh = 0;          // this player's viewport size in tiles (for minimap boxes)
+    std::string tool;            // the tool/mode this player is holding, or ""
+    std::string focus;           // what panel/entity this player has open, or ""
+    bool has_drag = false;       // is this player mid-designation-drag?
+    int dax = 0, day = 0, dbx = 0, dby = 0, daz = 0;  // drag rectangle (world tiles) + its z
+    std::string name;
+    std::string color;
+    long long ts = 0;            // last update, steady-clock ms
+};
+std::mutex g_presence_mutex;     // guards both g_presence and g_pings below
+std::unordered_map<std::string, PresenceEntry> g_presence;
+constexpr long long PRESENCE_STALE_MS = 5000;
+
+// Transient "look here" pings: a bounded recent-events buffer, folded into the /presence read.
+struct PingEntry {
+    long long id = 0;
+    int x = 0, y = 0, z = 0;
+    std::string name;
+    std::string color;
+    long long ts = 0;
+};
+std::vector<PingEntry> g_pings;
+long long g_ping_next_id = 1;
+constexpr long long PING_STALE_MS = 6000;
+
+long long presence_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string presence_json(const std::string& exclude) {
+    const long long now = presence_now_ms();
+    std::lock_guard<std::mutex> lock(g_presence_mutex);
+    for (auto it = g_presence.begin(); it != g_presence.end();) {
+        if (now - it->second.ts > PRESENCE_STALE_MS) it = g_presence.erase(it);
+        else ++it;
+    }
+    for (auto it = g_pings.begin(); it != g_pings.end();) {
+        if (now - it->ts > PING_STALE_MS) it = g_pings.erase(it);
+        else ++it;
+    }
+    std::ostringstream body;
+    body << "{\"peers\":[";
+    bool first = true;
+    for (const auto& kv : g_presence) {
+        if (kv.first == exclude) continue;
+        const PresenceEntry& e = kv.second;
+        if (!first) body << ",";
+        first = false;
+        body << "{\"player\":" << json_string(kv.first)
+             << ",\"name\":" << json_string(e.name)
+             << ",\"color\":" << json_string(e.color)
+             << ",\"has\":" << (e.has ? "true" : "false")
+             << ",\"x\":" << e.x << ",\"y\":" << e.y << ",\"z\":" << e.z
+             << ",\"hasCam\":" << (e.has_cam ? "true" : "false")
+             << ",\"cx\":" << e.cx << ",\"cy\":" << e.cy << ",\"cz\":" << e.cz
+             << ",\"vw\":" << e.vw << ",\"vh\":" << e.vh
+             << ",\"tool\":" << json_string(e.tool)
+             << ",\"focus\":" << json_string(e.focus)
+             << ",\"hasDrag\":" << (e.has_drag ? "true" : "false")
+             << ",\"dax\":" << e.dax << ",\"day\":" << e.day
+             << ",\"dbx\":" << e.dbx << ",\"dby\":" << e.dby << ",\"daz\":" << e.daz << "}";
+    }
+    body << "],\"pings\":[";
+    first = true;
+    for (const auto& p : g_pings) {
+        if (!first) body << ",";
+        first = false;
+        body << "{\"id\":" << p.id
+             << ",\"name\":" << json_string(p.name)
+             << ",\"color\":" << json_string(p.color)
+             << ",\"x\":" << p.x << ",\"y\":" << p.y << ",\"z\":" << p.z << "}";
+    }
+    body << "]}\n";
+    return body.str();
+}
 
 std::string camera_json(const std::string& player, const Camera& camera) {
     return "{\"player\":" + json_string(player) +
@@ -123,7 +236,48 @@ std::string build_options_from_request(const httplib::Request& req) {
     return out.str();
 }
 
+constexpr int kMaxClientFrameDimension = 16384;
+
+bool validate_frame_rect(int px, int py, int px2, int py2, int frame_w, int frame_h,
+                         std::string& err) {
+    if (frame_w <= 0 || frame_h <= 0 ||
+        frame_w > kMaxClientFrameDimension || frame_h > kMaxClientFrameDimension) {
+        err = "invalid frame dimensions";
+        return false;
+    }
+    if (px < 0 || py < 0 || px2 < 0 || py2 < 0 ||
+        px >= frame_w || px2 >= frame_w || py >= frame_h || py2 >= frame_h) {
+        err = "selection lies outside the captured frame";
+        return false;
+    }
+    return true;
+}
+
 void register_routes(httplib::Server& server) {
+    // Saving, world teardown, and plugin shutdown invalidate broad portions of DF's object graph.
+    // Stop every newly routed browser operation before static dispatch or a route can queue work
+    // against those structures. Existing clients treat the temporary 503 like any missed poll.
+    server.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+        if (save_barrier_active()) {
+            res.status = 503;
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Retry-After", "1");
+            res.set_content(
+                "{\"ok\":false,\"busy\":true,\"error\":\"Dwarf Fortress is saving, loading, or "
+                "shutting down; retry shortly\"}\n",
+                "application/json; charset=utf-8");
+            return true;
+        }
+        if (!session_request_is_public(req) && !session_request_authorized(req)) {
+            res.status = 401;
+            res.set_header("Cache-Control", "no-store");
+            res.set_content("{\"ok\":false,\"authRequired\":true,\"error\":\"join required\"}\n",
+                            "application/json; charset=utf-8");
+            return true;
+        }
+        return false;
+    });
+
     server.set_mount_point("/asset", "data/vanilla/vanilla_interface/graphics/images");
     server.set_mount_point("/", web_root());
 
@@ -132,10 +286,7 @@ void register_routes(httplib::Server& server) {
     });
 
     server.Get("/view", [](const httplib::Request&, httplib::Response& res) {
-        // Never let the browser cache the page itself. Otherwise a stale index.html keeps
-        // loading old (cached) JS even after an update -- which is how an already-removed
-        // feature can appear to "persist" across reloads and even across browsers. The
-        // versioned <script>/<link> URLs in index.html handle freshness of the assets.
+        // Never cache the page shell. Versioned <script>/<link> URLs handle asset freshness.
         res.set_header("Cache-Control", "no-store, must-revalidate");
         res.set_content(index_html(), "text/html; charset=utf-8");
     });
@@ -143,6 +294,15 @@ void register_routes(httplib::Server& server) {
     server.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content("{\"ok\":true,\"service\":\"dfcapture\"}\n",
                         "application/json; charset=utf-8");
+    });
+
+    register_session_policy_routes(server);
+    register_audio_stream_routes(server);
+    register_native_popup_routes(server);
+
+    server.Get("/attrib", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(attrib_json(), "application/json; charset=utf-8");
     });
 
     server.Get("/state", [](const httplib::Request& req, httplib::Response& res) {
@@ -248,6 +408,75 @@ void register_routes(httplib::Server& server) {
         set_player_camera(player, camera);
         res.set_header("Cache-Control", "no-store");
         res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
+    });
+
+    // Presence relay (see PresenceEntry above). No DF access; safe to serve at high frequency.
+    server.Post("/presence", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        if (player.empty()) {
+            res.status = 400;
+            res.set_content("{\"ok\":false}\n", "application/json; charset=utf-8");
+            return;
+        }
+        PresenceEntry e;
+        e.ts = presence_now_ms();
+        int has = 0;
+        query_int(req, "has", has);
+        e.has = (has != 0);
+        query_int(req, "x", e.x);
+        query_int(req, "y", e.y);
+        query_int(req, "z", e.z);
+        e.has_cam = req.has_param("cx") || req.has_param("cy") || req.has_param("cz");
+        query_int(req, "cx", e.cx);
+        query_int(req, "cy", e.cy);
+        query_int(req, "cz", e.cz);
+        query_int(req, "vw", e.vw);
+        query_int(req, "vh", e.vh);
+        e.tool = req.has_param("tool") ? req.get_param_value("tool").substr(0, 24) : std::string();
+        e.focus = req.has_param("focus") ? req.get_param_value("focus").substr(0, 48) : std::string();
+        int hasdrag = 0;
+        query_int(req, "hasdrag", hasdrag);
+        e.has_drag = (hasdrag != 0);
+        query_int(req, "dax", e.dax);
+        query_int(req, "day", e.day);
+        query_int(req, "dbx", e.dbx);
+        query_int(req, "dby", e.dby);
+        query_int(req, "daz", e.daz);
+        e.name = req.has_param("name") ? req.get_param_value("name").substr(0, 32) : player;
+        e.color = req.has_param("color") ? req.get_param_value("color").substr(0, 32) : std::string();
+        session_presence_heartbeat(player, e.name.empty() ? player : e.name);
+        {
+            std::lock_guard<std::mutex> lock(g_presence_mutex);
+            g_presence[player] = std::move(e);
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    });
+
+    server.Get("/presence", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(presence_json(player), "application/json; charset=utf-8");
+    });
+
+    server.Post("/ping", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        PingEntry p;
+        p.ts = presence_now_ms();
+        query_int(req, "x", p.x);
+        query_int(req, "y", p.y);
+        query_int(req, "z", p.z);
+        p.name = req.has_param("name") ? req.get_param_value("name").substr(0, 32) : player;
+        p.color = req.has_param("color") ? req.get_param_value("color").substr(0, 32) : std::string();
+        {
+            std::lock_guard<std::mutex> lock(g_presence_mutex);
+            p.id = g_ping_next_id++;
+            g_pings.push_back(std::move(p));
+            if (g_pings.size() > 64)
+                g_pings.erase(g_pings.begin(), g_pings.begin() + (g_pings.size() - 64));
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
     });
 
     auto zoom_handler = [](const httplib::Request& req, httplib::Response& res) {
@@ -371,6 +600,14 @@ void register_routes(httplib::Server& server) {
         desig.py2 = desig.py;
         query_int(req, "px2", desig.px2);
         query_int(req, "py2", desig.py2);
+        std::string err;
+        if (!validate_frame_rect(desig.px, desig.py, desig.px2, desig.py2,
+                                 desig.frame_w, desig.frame_h, err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
         desig.tool = req.has_param("tool") ? req.get_param_value("tool") : "dig";
         int marker = 0;
         int warm_damp = 0;
@@ -380,9 +617,14 @@ void register_routes(httplib::Server& server) {
         query_int(req, "minemode", desig.mine_mode);
         desig.marker = marker != 0;
         desig.warm_damp = warm_damp != 0;
+        // "traffic", "traffic-low|normal|high|restricted" -> level 0..3 for the traffic tool.
+        if (desig.tool.rfind("traffic", 0) == 0) {
+            desig.traffic_level = desig.tool.find("restricted") != std::string::npos ? 3
+                : desig.tool.find("high") != std::string::npos ? 2
+                : desig.tool.find("low") != std::string::npos ? 1 : 0;
+        }
 
         Camera camera;
-        std::string err;
         if (!camera_for_player(player, camera, &err)) {
             res.status = 503;
             res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
@@ -467,6 +709,11 @@ void register_routes(httplib::Server& server) {
 
         Camera camera;
         std::string err;
+        if (!validate_frame_rect(px, py, px2, py2, frame_w, frame_h, err)) {
+            res.status = 400;
+            res.set_content("invalid placement: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
         if (!camera_for_player(player, camera, &err)) {
             res.status = 503;
             res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
@@ -483,6 +730,7 @@ void register_routes(httplib::Server& server) {
             res.set_content("building failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
+        attrib_stamp(AttribKind::Building, id, player);
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true,\"count\":" + std::to_string(count) +
                         ",\"id\":" + std::to_string(id) + "}\n",
@@ -507,6 +755,11 @@ void register_routes(httplib::Server& server) {
 
         Camera camera;
         std::string err;
+        if (!validate_frame_rect(px, py, px2, py2, frame_w, frame_h, err)) {
+            res.status = 400;
+            res.set_content("invalid stockpile: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
         if (!camera_for_player(player, camera, &err)) {
             res.status = 503;
             res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
@@ -519,6 +772,7 @@ void register_routes(httplib::Server& server) {
             res.set_content("stockpile failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
+        attrib_stamp(AttribKind::Stockpile, id, player);
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true,\"id\":" + std::to_string(id) + "}\n",
                         "application/json; charset=utf-8");
@@ -545,6 +799,11 @@ void register_routes(httplib::Server& server) {
 
         Camera camera;
         std::string err;
+        if (!validate_frame_rect(px, py, px2, py2, frame_w, frame_h, err)) {
+            res.status = 400;
+            res.set_content("invalid zone: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
         if (!camera_for_player(player, camera, &err)) {
             res.status = 503;
             res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
@@ -556,6 +815,7 @@ void register_routes(httplib::Server& server) {
             res.set_content("zone failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
+        attrib_stamp(AttribKind::Zone, id, player);
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true,\"id\":" + std::to_string(id) + "}\n",
                         "application/json; charset=utf-8");
@@ -564,6 +824,24 @@ void register_routes(httplib::Server& server) {
     server.Post("/zone", zone_create_handler);
 
     register_work_order_routes(server);
+    register_squad_routes(server);
+    register_worldmap_routes(server);
+    register_mission_routes(server);
+    register_hospital_routes(server);
+    register_kitchen_routes(server);
+    register_lever_link_routes(server);
+    register_trade_depot_routes(server);
+    register_console_routes(server);
+    guards::register_write_guard_routes(server);
+    register_reports_routes(server);
+    register_fort_admin_routes(server);
+    register_fortress_utility_routes(server);
+    register_diplo_routes(server);
+    register_vote_routes(server);
+    register_stone_use_routes(server);
+    register_burrows_routes(server);
+    register_hauling_routes(server);
+    register_standing_orders_routes(server);
 
     server.Get("/frame.jpg", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
@@ -576,13 +854,25 @@ void register_routes(httplib::Server& server) {
         }
 
         std::vector<uint8_t> jpeg;
-        if (!capture_camera_jpeg(camera, jpeg, &err)) {
+        CaptureGeometry geometry;
+        if (!capture_camera_jpeg(camera, jpeg, &geometry, &err)) {
             res.status = 503;
             res.set_content("capture failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
 
         res.set_header("Cache-Control", "no-store");
+        res.set_header("X-DFCapture-Camera",
+                       std::to_string(camera.x) + "," + std::to_string(camera.y) + "," +
+                           std::to_string(camera.z));
+        if (geometry.valid) {
+            res.set_header("X-DFCapture-Grid",
+                           std::to_string(geometry.origin_x) + "," +
+                               std::to_string(geometry.origin_y) + "," +
+                               std::to_string(geometry.zoom_factor) + "," +
+                               std::to_string(geometry.viewport_width) + "," +
+                               std::to_string(geometry.viewport_height));
+        }
         res.set_content(reinterpret_cast<const char*>(jpeg.data()), jpeg.size(), "image/jpeg");
     });
 
@@ -615,7 +905,8 @@ void register_routes(httplib::Server& server) {
                 }
 
                 std::vector<uint8_t> jpeg;
-                if (!capture_camera_jpeg(camera, jpeg, &err)) {
+                CaptureGeometry geometry;
+                if (!capture_camera_jpeg(camera, jpeg, &geometry, &err)) {
                     sink.done();
                     return;
                 }
@@ -625,7 +916,13 @@ void register_routes(httplib::Server& server) {
                        << "Content-Type: image/jpeg\r\n"
                        << "Content-Length: " << jpeg.size() << "\r\n"
                        << "X-DFCapture-Camera: " << camera.x << "," << camera.y << "," << camera.z
-                       << "\r\n\r\n";
+                       << "\r\n";
+                if (geometry.valid) {
+                    header << "X-DFCapture-Grid: " << geometry.origin_x << ","
+                           << geometry.origin_y << "," << geometry.zoom_factor << ","
+                           << geometry.viewport_width << "," << geometry.viewport_height << "\r\n";
+                }
+                header << "\r\n";
                 std::string h = header.str();
                 sink.write(h.data(), h.size());
                 sink.write(reinterpret_cast<const char*>(jpeg.data()), jpeg.size());
@@ -732,6 +1029,32 @@ void register_routes(httplib::Server& server) {
         res.set_content(info_panel_json(panel), "application/json; charset=utf-8");
     });
 
+    auto livestock_action_handler = [](const httplib::Request& req,
+                                        httplib::Response& res) {
+        int unit_id = -1, trainer_id = -1;
+        if (!query_int(req, "unit", unit_id) || !req.has_param("action")) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing unit/action\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        query_int(req, "trainer", trainer_id);
+        LivestockState state;
+        std::string err;
+        if (!livestock_action_on_core_thread(
+                unit_id, req.get_param_value("action"), state, &err, trainer_id)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(livestock_state_json(unit_id, state),
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/livestock-action", livestock_action_handler);
+    server.Post("/livestock-action", livestock_action_handler);
+
     server.Get("/unit", [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
         int unit_id = -1;
@@ -755,6 +1078,47 @@ void register_routes(httplib::Server& server) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(unit_sheet_json(player, unit, tile), "application/json; charset=utf-8");
     });
+
+    auto unit_nickname_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int unit_id = -1;
+        if (!query_int(req, "id", unit_id) || !req.has_param("nickname")) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing id/nickname\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!set_unit_nickname_on_core_thread(
+                unit_id, req.get_param_value("nickname"), &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Post("/unit-nickname", unit_nickname_handler);
+
+    auto task_cancel_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int job_id = -1;
+        if (!query_int(req, "job", job_id)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing job\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!cancel_job_on_core_thread(job_id, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Post("/task-cancel", task_cancel_handler);
 
     server.Get("/unit-portrait", [](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Cache-Control", "no-store");
@@ -801,6 +1165,12 @@ void register_routes(httplib::Server& server) {
         }
 
         std::string err;
+        if (!session_action_allowed(req, req.get_param_value("action"), &err)) {
+            res.status = 403;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
         if (!action_on_core_thread(req.get_param_value("action"), &err)) {
             res.status = 400;
             res.set_content("action failed: " + err + "\n", "text/plain; charset=utf-8");
@@ -874,6 +1244,68 @@ void register_routes(httplib::Server& server) {
 
         res.set_header("Cache-Control", "no-store");
         res.set_content(inspect_json(player, result), "application/json; charset=utf-8");
+    });
+
+    server.Get("/tile-occupants", [](const httplib::Request& req, httplib::Response& res) {
+        std::string player = query_player(req);
+        int x = 0, y = 0, z = 0;
+        std::string err;
+        if (query_int(req, "x", x) && query_int(req, "y", y) && query_int(req, "z", z)) {
+            std::string json = tile_occupants_at_json_on_core_thread(x, y, z, &err);
+            if (json.empty()) {
+                res.status = 503;
+                res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                                "application/json; charset=utf-8");
+                return;
+            }
+            res.set_header("Cache-Control", "no-store");
+            res.set_content(json, "application/json; charset=utf-8");
+            return;
+        }
+        int px = 0, py = 0, frame_w = 0, frame_h = 0;
+        if (!query_int(req, "px", px) || !query_int(req, "py", py) ||
+                !query_int(req, "w", frame_w) || !query_int(req, "h", frame_h)) {
+            res.status = 400;
+            res.set_content("missing x/y/z or px/py/w/h\n", "text/plain; charset=utf-8");
+            return;
+        }
+        Camera camera;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string json = tile_occupants_json_on_core_thread(
+            camera, px, py, frame_w, frame_h, &err);
+        if (json.empty()) {
+            res.status = 503;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
+    server.Get("/engraving-info", [](const httplib::Request& req, httplib::Response& res) {
+        int x = 0, y = 0, z = 0;
+        if (!query_int(req, "x", x) || !query_int(req, "y", y) ||
+                !query_int(req, "z", z)) {
+            res.status = 400;
+            res.set_content("missing x/y/z\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = engraving_info_json_on_core_thread(x, y, z, &err);
+        if (json.empty()) {
+            res.status = 404;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
     });
 
     server.Get("/hover", [](const httplib::Request& req, httplib::Response& res) {
@@ -1103,6 +1535,202 @@ void register_routes(httplib::Server& server) {
     server.Get("/building-action", building_action_handler);
     server.Post("/building-action", building_action_handler);
 
+    server.Get("/building-cage", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = building_cage_json_on_core_thread(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json + "\n", "application/json; charset=utf-8");
+    });
+
+    server.Post("/building-cage-action", [](const httplib::Request& req,
+                                              httplib::Response& res) {
+        int id = -1;
+        int target = -1;
+        if (!query_int(req, "id", id) || !query_int(req, "target", target)) {
+            res.status = 400;
+            res.set_content("missing id/target\n", "text/plain; charset=utf-8");
+            return;
+        }
+        const std::string kind =
+            req.has_param("kind") ? req.get_param_value("kind") : "";
+        const std::string action =
+            req.has_param("action") ? req.get_param_value("action") : "";
+        if (action != "assign" && action != "release") {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"invalid action\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!building_cage_action_on_core_thread(
+                id, target, action == "assign", kind, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    });
+
+    server.Get("/burial-coffin", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = burial_coffin_info_json_via_lua(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
+    server.Post("/burial-coffin-action", [](const httplib::Request& req,
+                                              httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        const std::string action =
+            req.has_param("action") ? req.get_param_value("action") : "";
+        std::string err;
+        if (!burial_coffin_action_via_lua(id, action, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    });
+
+    server.Post("/memorial-slab", [](const httplib::Request& req,
+                                      httplib::Response& res) {
+        int unit_id = -1;
+        if (!query_int(req, "unit", unit_id)) {
+            res.status = 400;
+            res.set_content("missing unit\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string message;
+        std::string err;
+        if (!queue_memorial_slab_via_lua(unit_id, &message, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"message\":" + json_string(message) + "}\n",
+                        "application/json; charset=utf-8");
+    });
+
+    auto building_rename_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        const std::string name = req.has_param("name") ? req.get_param_value("name") : "";
+        std::string err;
+        if (!building_rename_on_core_thread(id, name, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"name\":" + json_string(name.substr(0, 128)) + "}\n",
+                        "application/json; charset=utf-8");
+    };
+    server.Get("/workshop-rename", building_rename_handler);
+    server.Post("/workshop-rename", building_rename_handler);
+    server.Get("/farm-plot-rename", building_rename_handler);
+    server.Post("/farm-plot-rename", building_rename_handler);
+
+    server.Get("/farm-plot", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("missing id\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = farm_plot_json_on_core_thread(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json + "\n", "application/json; charset=utf-8");
+    });
+
+    server.Post("/farm-plot-action", [](const httplib::Request& req,
+                                         httplib::Response& res) {
+        int id = -1, season = -1, plant = -2;
+        if (!query_int(req, "id", id) || !query_int(req, "season", season) ||
+                !query_int(req, "plant", plant)) {
+            res.status = 400;
+            res.set_content("missing id/season/plant\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!farm_plot_set_season_crop_on_core_thread(id, season, plant, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    });
+    register_chat_routes(server);
+
+    server.Post("/farm-plot-fertilize-action", [](const httplib::Request& req,
+                                                   httplib::Response& res) {
+        int id = -1, seasonal = -1;
+        if (!query_int(req, "id", id) || !query_int(req, "seasonal", seasonal) ||
+                (seasonal != 0 && seasonal != 1)) {
+            res.status = 400;
+            res.set_content("missing/invalid id/seasonal\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!farm_plot_set_seasonal_fertilize_on_core_thread(
+                id, seasonal != 0, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    });
+
     server.Get("/workshop-info", [](const httplib::Request& req, httplib::Response& res) {
         int id = -1;
         if (!query_int(req, "id", id)) {
@@ -1206,6 +1834,29 @@ void register_routes(httplib::Server& server) {
     server.Get("/workshop-workers-clear", workshop_workers_clear_handler);
     server.Post("/workshop-workers-clear", workshop_workers_clear_handler);
 
+    auto workshop_profile_handler = [](const httplib::Request& req,
+                                        httplib::Response& res) {
+        int id = -1, value = 0;
+        if (!query_int(req, "id", id) || !req.has_param("field")) {
+            res.status = 400;
+            res.set_content("missing id/field\n", "text/plain; charset=utf-8");
+            return;
+        }
+        query_int(req, "value", value);
+        std::string err;
+        if (!workshop_profile_set_via_lua(
+                id, req.get_param_value("field"), value, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Get("/workshop-profile", workshop_profile_handler);
+    server.Post("/workshop-profile", workshop_profile_handler);
+
     server.Get("/zone-info", [](const httplib::Request& req, httplib::Response& res) {
         int id = -1;
         if (!query_int(req, "id", id)) {
@@ -1244,6 +1895,135 @@ void register_routes(httplib::Server& server) {
     };
     server.Get("/zone-action", zone_action_handler);
     server.Post("/zone-action", zone_action_handler);
+
+    auto zone_rename_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id) || !req.has_param("name")) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing id/name\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!building_rename_on_core_thread(id, req.get_param_value("name"), &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Post("/zone-rename", zone_rename_handler);
+
+    auto zone_repaint_handler = [](const httplib::Request& req, httplib::Response& res) {
+        const std::string player = query_player(req);
+        int id = -1, px = 0, py = 0, px2 = 0, py2 = 0, frame_w = 0, frame_h = 0;
+        if (!query_int(req, "id", id) || !query_int(req, "px", px) ||
+                !query_int(req, "py", py) || !query_int(req, "w", frame_w) ||
+                !query_int(req, "h", frame_h)) {
+            res.status = 400;
+            res.set_content("missing id/px/py/w/h\n", "text/plain; charset=utf-8");
+            return;
+        }
+        px2 = px;
+        py2 = py;
+        query_int(req, "px2", px2);
+        query_int(req, "py2", py2);
+        const std::string mode = req.has_param("mode") ? req.get_param_value("mode") : "add";
+
+        std::string err;
+        if (!validate_frame_rect(px, py, px2, py2, frame_w, frame_h, err)) {
+            res.status = 400;
+            res.set_content("invalid repaint: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        Camera camera;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        int view_w = 0, view_h = 0;
+        if (!effective_capture_viewport_dims(camera, view_w, view_h, &err) ||
+                view_w <= 0 || view_h <= 0) {
+            res.status = 503;
+            res.set_content("viewport failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        const auto pixel_to_tile = [](int pixel, int tiles, int frame) {
+            return std::max(0, std::min(tiles - 1, (pixel * tiles) / frame));
+        };
+        const int x1 = camera.x + pixel_to_tile(std::min(px, px2), view_w, frame_w);
+        const int y1 = camera.y + pixel_to_tile(std::min(py, py2), view_h, frame_h);
+        const int x2 = camera.x + pixel_to_tile(std::max(px, px2), view_w, frame_w);
+        const int y2 = camera.y + pixel_to_tile(std::max(py, py2), view_h, frame_h);
+
+        ZoneRepaintPlan plan;
+        if (!plan_zone_repaint_on_core_thread(id, x1, y1, x2, y2, mode, plan, &err)) {
+            res.status = 400;
+            res.set_content("zone repaint failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        if (plan.removed) {
+            res.status = 409;
+            res.set_content("zone repaint refused: cannot erase an entire zone\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+        if (plan.changed && !apply_zone_repaint_in_place_on_core_thread(id, plan, &err)) {
+            res.status = 400;
+            res.set_content("zone repaint failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"id\":" + std::to_string(id) +
+                            (plan.changed ? "}\n" : ",\"unchanged\":true}\n"),
+                        "application/json; charset=utf-8");
+    };
+    server.Post("/zone-repaint", zone_repaint_handler);
+
+    server.Get("/zone-squads", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing id\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = zone_squads_json_on_core_thread(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json + "\n", "application/json; charset=utf-8");
+    });
+
+    auto zone_squad_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1, squad = -1, enabled = 0;
+        if (!query_int(req, "id", id) || !query_int(req, "squad", squad) ||
+                !query_int(req, "enabled", enabled) || !req.has_param("mode")) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing id/squad/mode/enabled\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string err;
+        if (!zone_squad_action_on_core_thread(
+                id, squad, req.get_param_value("mode"), enabled != 0, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Post("/zone-squad-action", zone_squad_action_handler);
 
     server.Get("/zone-units", [](const httplib::Request& req, httplib::Response& res) {
         int id = -1;
@@ -1369,7 +2149,49 @@ void register_routes(httplib::Server& server) {
     server.Get("/zone-location-action", zone_location_action_handler);
     server.Post("/zone-location-action", zone_location_action_handler);
 
-    register_work_order_routes(server);
+    server.Get("/location-detail", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing id\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = location_detail_json_via_lua(id, &err);
+        if (json.empty()) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json + "\n", "application/json; charset=utf-8");
+    });
+
+    auto location_action_handler = [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        int unit = -1;
+        if (!query_int(req, "id", id) || !req.has_param("action")) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing id/action\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        query_int(req, "unit", unit);
+        const std::string kind = req.has_param("kind") ? req.get_param_value("kind") : "";
+        std::string err;
+        if (!location_action_via_lua(
+                id, req.get_param_value("action"), kind, unit, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
+    };
+    server.Post("/location-action", location_action_handler);
 
     server.Get("/stockpile-info", [](const httplib::Request& req, httplib::Response& res) {
         int id = -1;
@@ -1488,7 +2310,7 @@ void register_routes(httplib::Server& server) {
         }
         std::string mode = req.has_param("mode") ? req.get_param_value("mode") : "set";
         std::string err;
-        if (!set_stockpile_category_on_core_thread(id, req.get_param_value("preset"), mode, &err)) {
+        if (!stockpile_set_preset_via_lua(id, req.get_param_value("preset"), mode, &err)) {
             res.status = 400;
             res.set_content("set failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
@@ -1611,6 +2433,11 @@ void register_routes(httplib::Server& server) {
 
         Camera camera;
         std::string err;
+        if (!validate_frame_rect(px, py, px2, py2, frame_w, frame_h, err)) {
+            res.status = 400;
+            res.set_content("invalid repaint: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
         if (!camera_for_player(player, camera, &err)) {
             res.status = 503;
             res.set_content("camera failed: " + err + "\n", "text/plain; charset=utf-8");
@@ -1619,7 +2446,7 @@ void register_routes(httplib::Server& server) {
 
         int new_id = -1;
         if (!create_stockpile_via_lua(camera, px, py, px2, py2, frame_w, frame_h,
-                                      "all", new_id, &err)) {
+                                      "none", new_id, &err)) {
             res.status = 400;
             res.set_content("repaint failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
@@ -1643,6 +2470,9 @@ void register_routes(httplib::Server& server) {
 
 } // namespace
 
+// Timed frame capture and HTTP panel refreshes require no explicit action wakeup.
+void notify_player_input() {}
+
 std::string server_url(const std::string& bind_address, int port) {
     std::string host = bind_address == "0.0.0.0" ? "127.0.0.1" : bind_address;
     return "http://" + host + ":" + std::to_string(port) + "/view";
@@ -1664,10 +2494,12 @@ bool start_server(int port, const std::string& bind_address, std::string* err) {
         return false;
     }
 
+    session_policy_start();
     auto server = std::make_unique<httplib::Server>();
     register_routes(*server);
 
     if (!server->bind_to_port(bind_address.c_str(), port)) {
+        session_policy_stop();
         if (err) *err = "failed to bind " + bind_address + ":" + std::to_string(port);
         return false;
     }
@@ -1688,8 +2520,10 @@ void stop_server() {
     std::thread thread;
     {
         std::lock_guard<std::mutex> lock(g_server_mutex);
-        if (!g_server)
+        if (!g_server) {
+            session_policy_stop();
             return;
+        }
         g_server->stop();
         server = std::move(g_server);
         thread = std::move(g_server_thread);
@@ -1697,6 +2531,7 @@ void stop_server() {
 
     if (thread.joinable())
         thread.join();
+    session_policy_stop();
     g_running = false;
 }
 

@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -20,7 +20,11 @@
 
 #include "info_panel.h"
 
+#include "Core.h"
 #include "MiscUtils.h"
+#include "render_thread_wait.h"
+#include "save_barrier.h"
+#include "sdl_capture.h"
 #include "modules/Buildings.h"
 #include "modules/DFSDL.h"
 #include "modules/Items.h"
@@ -58,8 +62,10 @@
 #include "df/plotinfost.h"
 #include "df/season.h"
 #include "df/siegeengine_type.h"
+#include "df/training_assignment.h"
 #include "df/unit.h"
 #include "df/unit_labor.h"
+#include "df/unit_relationship_type.h"
 #include "df/workshop_type.h"
 #include "df/world.h"
 #include "df/world_data.h"
@@ -256,6 +262,31 @@ std::string unit_display_name(df::unit* unit) {
     return name.empty() ? ("Unit " + std::to_string(unit->id)) : name;
 }
 
+void read_livestock_state(df::unit* unit, LivestockState& state) {
+    if (!unit)
+        return;
+    state.slaughter = Units::isMarkedForSlaughter(unit);
+    state.war = Units::isMarkedForWarTraining(unit);
+    state.hunt = Units::isMarkedForHuntTraining(unit);
+    state.trainable_war = Units::isTrainableWar(unit);
+    state.trainable_hunt = Units::isTrainableHunting(unit);
+    state.pet = Units::isPet(unit);
+    state.adoption = Units::isAvailableForAdoption(unit);
+    state.tamable = Units::isTamable(unit) && !Units::isDomesticated(unit);
+    state.training = Units::isMarkedForTraining(unit);
+    state.taming = Units::isMarkedForTaming(unit);
+    state.trainer_id = -1;
+    if (state.training && df::global::plotinfo) {
+        auto assignment = binsearch_in_vector(
+            df::global::plotinfo->training.training_assignments,
+            &df::training_assignment::animal_id, unit->id);
+        state.trainer_id = assignment ? assignment->trainer_id : -1;
+    }
+    state.geld = Units::isMarkedForGelding(unit);
+    state.geldable = Units::isGeldable(unit) && !Units::isGelded(unit);
+    state.ok = true;
+}
+
 InfoRow row_for_unit(df::unit* unit) {
     InfoRow row;
     row.unit_id = unit->id;
@@ -264,6 +295,8 @@ InfoRow row_for_unit(df::unit* unit) {
     row.category = Units::getRaceReadableName(unit);
     row.profession = Units::getProfessionName(unit);
     row.job = job_name(unit);
+    if (unit->job.current_job)
+        row.job_id = unit->job.current_job->id;
     row.status = Units::isAlive(unit) ? "" : "Dead";
     if (Units::isTame(unit))
         row.badges.push_back("Domesticated");
@@ -273,6 +306,10 @@ InfoRow row_for_unit(df::unit* unit) {
         row.badges.push_back("Pet");
     if (Units::isMarkedForSlaughter(unit))
         row.badges.push_back("Marked for slaughter");
+    if (Units::isAnimal(unit) && Units::isAlive(unit)) {
+        row.has_livestock = true;
+        read_livestock_state(unit, row.livestock);
+    }
     return row;
 }
 
@@ -424,7 +461,7 @@ std::vector<StockCategory> stock_categories() {
         {VERMIN, "Vermin"},
         {WEAPON, "Weapons"},
         {WEAPONRACK, "Weapon racks"},
-        {WINDOW, "Windows"},
+        {df::item_type::WINDOW, "Windows"},
         {WOOD, "Wood"},
     };
 }
@@ -978,10 +1015,6 @@ void build_places_panel(InfoPanel& panel) {
                     row.building_id = b->id;
                     row.subtitle = map_pos_label(b);
                     set_row_pos(row, b);
-                    if (b->getType() == df::building_type::Civzone)
-                        row.kind = "zone";
-                    else
-                        row.kind = "building";
                 }
                 if (auto contents = location->getContents()) {
                     row.status = std::to_string(contents->building_ids.size()) +
@@ -1518,6 +1551,143 @@ struct RenderThreadPanelRequest {
 
 } // namespace
 
+bool livestock_action_on_core_thread(int32_t unit_id, const std::string& action,
+                                     LivestockState& out, std::string* err,
+                                     int32_t trainer_id) {
+    std::lock_guard<std::recursive_mutex> module_lock(g_info_panel_mutex);
+    std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
+    DFHack::CoreSuspender suspend;
+    if (save_barrier_active()) {
+        if (err) *err = "Dwarf Fortress is saving or unloading";
+        return false;
+    }
+    auto unit = df::unit::find(unit_id);
+    if (!unit || !Units::isAnimal(unit) || !Units::isAlive(unit)) {
+        if (err) *err = "not a live animal";
+        return false;
+    }
+
+    auto toggle_training = [&](bool war) -> bool {
+        auto plotinfo = df::global::plotinfo;
+        if (!plotinfo)
+            return false;
+        auto& assignments = plotinfo->training.training_assignments;
+        auto assignment = binsearch_in_vector(
+            assignments, &df::training_assignment::animal_id, unit->id);
+        const bool active = assignment &&
+            (war ? assignment->flags.bits.train_war : assignment->flags.bits.train_hunt);
+        if (active)
+            return Units::unassignTrainer(unit);
+        if (!assignment) {
+            assignment = new df::training_assignment();
+            assignment->animal_id = unit->id;
+            assignment->trainer_id = -1;
+            assignment->flags.whole = 0;
+            assignment->flags.bits.any_trainer = true;
+            insert_into_vector(assignments, &df::training_assignment::animal_id, assignment);
+        }
+        assignment->flags.bits.train_war = war ? 1 : 0;
+        assignment->flags.bits.train_hunt = war ? 0 : 1;
+        return true;
+    };
+
+    if (action == "slaughter") {
+        unit->flags2.bits.slaughter = unit->flags2.bits.slaughter ? 0 : 1;
+    } else if (action == "war") {
+        if (!Units::isTrainableWar(unit) || !toggle_training(true)) {
+            if (err) *err = "animal is not war-trainable";
+            return false;
+        }
+    } else if (action == "hunt") {
+        if (!Units::isTrainableHunting(unit) || !toggle_training(false)) {
+            if (err) *err = "animal is not hunting-trainable";
+            return false;
+        }
+    } else if (action == "pet") {
+        if (Units::isPet(unit)) {
+            if (err) *err = "owned pets cannot be offered for adoption";
+            return false;
+        }
+        unit->flags3.bits.available_for_adoption =
+            unit->flags3.bits.available_for_adoption ? 0 : 1;
+    } else if (action == "geld") {
+        if (!Units::isGeldable(unit) || Units::isGelded(unit)) {
+            if (err) *err = "animal is not geldable or is already gelded";
+            return false;
+        }
+        unit->flags3.bits.marked_for_gelding =
+            unit->flags3.bits.marked_for_gelding ? 0 : 1;
+    } else if (action == "assign-trainer") {
+        if (trainer_id != -1 && !df::unit::find(trainer_id)) {
+            if (err) *err = "trainer not found";
+            return false;
+        }
+        if (Units::isMarkedForTraining(unit))
+            Units::unassignTrainer(unit);
+        if (!Units::assignTrainer(unit, trainer_id)) {
+            if (err) *err = "animal is not tameable";
+            return false;
+        }
+    } else if (action == "unassign-trainer") {
+        if (!Units::unassignTrainer(unit)) {
+            if (err) *err = "animal has no training assignment";
+            return false;
+        }
+    } else {
+        if (err) *err = "unsupported livestock action";
+        return false;
+    }
+    read_livestock_state(unit, out);
+    return true;
+}
+
+bool cancel_job_on_core_thread(int32_t job_id, std::string* err) {
+    std::lock_guard<std::recursive_mutex> module_lock(g_info_panel_mutex);
+    std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
+    DFHack::CoreSuspender suspend;
+    if (save_barrier_active()) {
+        if (err) *err = "Dwarf Fortress is saving or unloading";
+        return false;
+    }
+    auto world = df::global::world;
+    if (!world) {
+        if (err) *err = "world is not loaded";
+        return false;
+    }
+    df::job* found = nullptr;
+    for (auto job : world->jobs.list) {
+        if (job && job->id == job_id) {
+            found = job;
+            break;
+        }
+    }
+    if (!found) {
+        if (err) *err = "job not found";
+        return false;
+    }
+    Job::removeJob(found);
+    return true;
+}
+
+std::string livestock_state_json(int32_t unit_id, const LivestockState& state) {
+    std::ostringstream body;
+    body << "{\"ok\":true,\"unitId\":" << unit_id
+         << ",\"livestock\":{\"slaughter\":" << (state.slaughter ? "true" : "false")
+         << ",\"war\":" << (state.war ? "true" : "false")
+         << ",\"hunt\":" << (state.hunt ? "true" : "false")
+         << ",\"trainableWar\":" << (state.trainable_war ? "true" : "false")
+         << ",\"trainableHunt\":" << (state.trainable_hunt ? "true" : "false")
+         << ",\"pet\":" << (state.pet ? "true" : "false")
+         << ",\"adoption\":" << (state.adoption ? "true" : "false")
+         << ",\"tamable\":" << (state.tamable ? "true" : "false")
+         << ",\"training\":" << (state.training ? "true" : "false")
+         << ",\"taming\":" << (state.taming ? "true" : "false")
+         << ",\"trainerId\":" << state.trainer_id
+         << ",\"geld\":" << (state.geld ? "true" : "false")
+         << ",\"geldable\":" << (state.geldable ? "true" : "false") << "}}\n";
+    return body.str();
+}
+
 InfoPanel build_info_panel(const std::string& panel_name,
                            const std::string& requested_section,
                            const std::string& requested_detail) {
@@ -1589,6 +1759,7 @@ std::string info_panel_json(const InfoPanel& panel) {
         if (i) body << ",";
         body << "{"
              << "\"unitId\":" << row.unit_id << ","
+             << "\"jobId\":" << row.job_id << ","
              << "\"itemId\":" << row.item_id << ","
              << "\"portraitTexpos\":" << row.portrait_texpos << ","
              << "\"buildingId\":" << row.building_id << ","
@@ -1609,7 +1780,25 @@ std::string info_panel_json(const InfoPanel& panel) {
              << "\"profession\":" << json_string(row.profession) << ","
              << "\"job\":" << json_string(row.job) << ","
              << "\"status\":" << json_string(row.status) << ","
-             << "\"muted\":" << (row.muted ? "true" : "false") << ","
+             << "\"muted\":" << (row.muted ? "true" : "false");
+        if (row.has_livestock) {
+            const auto& state = row.livestock;
+            body << ",\"livestock\":{\"slaughter\":"
+                 << (state.slaughter ? "true" : "false")
+                 << ",\"war\":" << (state.war ? "true" : "false")
+                 << ",\"hunt\":" << (state.hunt ? "true" : "false")
+                 << ",\"trainableWar\":" << (state.trainable_war ? "true" : "false")
+                 << ",\"trainableHunt\":" << (state.trainable_hunt ? "true" : "false")
+                 << ",\"pet\":" << (state.pet ? "true" : "false")
+                 << ",\"adoption\":" << (state.adoption ? "true" : "false")
+                 << ",\"tamable\":" << (state.tamable ? "true" : "false")
+                 << ",\"training\":" << (state.training ? "true" : "false")
+                 << ",\"taming\":" << (state.taming ? "true" : "false")
+                 << ",\"trainerId\":" << state.trainer_id
+                 << ",\"geld\":" << (state.geld ? "true" : "false")
+                 << ",\"geldable\":" << (state.geldable ? "true" : "false") << "}";
+        }
+        body << ","
              << "\"badges\":";
         append_string_array(body, row.badges);
         body << "}";
@@ -1645,6 +1834,11 @@ bool info_panel_on_render_thread(const std::string& panel_name,
     auto future = request->done.get_future();
 
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         try {
             request->panel = build_info_panel(request->panel_name,
                                               request->section,
@@ -1659,7 +1853,11 @@ bool info_panel_on_render_thread(const std::string& panel_name,
         }
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "information-panel render-thread request timed out or was abandoned";
+        return false;
+    }
     if (!ok) {
         if (err) *err = request->err;
         return false;

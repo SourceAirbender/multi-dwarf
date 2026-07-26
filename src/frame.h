@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -25,9 +25,19 @@
 
 namespace dfcapture {
 
+struct CaptureGeometry {
+    int origin_x = 0;
+    int origin_y = 0;
+    int zoom_factor = 0;
+    int viewport_width = 0;
+    int viewport_height = 0;
+    bool valid = false;
+};
+
 struct CapturedFrame {
     int width = 0;
     int height = 0;
+    CaptureGeometry geometry;
     std::vector<uint8_t> bgra;
 };
 

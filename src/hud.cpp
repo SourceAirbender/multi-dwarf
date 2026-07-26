@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -22,6 +22,9 @@
 
 #include "TileTypes.h"
 #include "json_util.h"
+#include "render_thread_wait.h"
+#include "save_barrier.h"
+#include "sdl_capture.h"
 #include "modules/DFSDL.h"
 #include "modules/Maps.h"
 #include "modules/Translation.h"
@@ -98,7 +101,11 @@ const char* rank_name(int rank) {
     return names[rank];
 }
 
-void effective_viewport_dims(int& w, int& h) {
+void effective_viewport_dims(const Camera& camera, int& w, int& h) {
+    std::string err;
+    if (effective_capture_viewport_dims(camera, w, h, &err))
+        return;
+
     auto gps = df::global::gps;
     auto vp = gps ? gps->main_viewport : nullptr;
     if (vp && vp->dim_x > 0 && vp->dim_y > 0) {
@@ -219,7 +226,7 @@ bool build_hud_state(const Camera& camera, HudState& hud, std::string* err) {
     hud.map_w = world->map.x_count;
     hud.map_h = world->map.y_count;
     hud.map_z = world->map.z_count;
-    effective_viewport_dims(hud.viewport_w, hud.viewport_h);
+    effective_viewport_dims(camera, hud.viewport_w, hud.viewport_h);
     hud.paused = df::global::pause_state && *df::global::pause_state;
 
     if (plotinfo->main.fortress_entity) {
@@ -302,10 +309,19 @@ bool hud_on_render_thread(const Camera& camera, HudState& hud, std::string* err)
     auto future = request->done.get_future();
 
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         request->done.set_value(build_hud_state(request->camera, request->hud, &request->err));
     });
 
-    bool ok = future.get();
+    bool ok = false;
+    if (!render_future_get(future, ok)) {
+        if (err) *err = "HUD render-thread request timed out or was abandoned";
+        return false;
+    }
     if (!ok) {
         if (err) *err = request->err;
         return false;

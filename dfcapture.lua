@@ -1,5 +1,5 @@
-﻿-- dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
--- Copyright (C) 2026 Gabriel Rios
+-- dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
+-- Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 --
 -- This program is free software: you can redistribute it and/or modify
 -- it under the terms of the GNU Affero General Public License as published by
@@ -27,7 +27,7 @@
 
 local _ENV = mkmodule('plugins.dfcapture')
 
--- Trivial round-trip used to verify the C++ -> Lua bridge in isolation.
+-- Minimal health check for the C++ -> Lua bridge.
 function ping(n)
     return (n or 0) + 1
 end
@@ -50,6 +50,8 @@ local function get_stockpile(id)
     return nil
 end
 
+local sp_normalize_enabled_categories
+
 -- Change what a stockpile accepts: 'none' clears it; otherwise apply a category preset.
 -- mode can be 'set' (replace), 'enable', or 'disable'. Returns (ok, err).
 function stockpile_set_preset(id, preset, mode)
@@ -69,6 +71,7 @@ function stockpile_set_preset(id, preset, mode)
         require('plugins.stockpiles').import_settings(lib, {id = id, mode = mode})
     end)
     if not ok then return false, tostring(err) end
+    sp_normalize_enabled_categories(b)
     return true, ''
 end
 
@@ -558,6 +561,32 @@ local function sp_group_set(g, b, idx, on)
     vec[idx] = sp_bool(on) and 1 or 0
 end
 
+-- DF's hauling matcher assumes every dynamic vector in an enabled category has its full raw-sized
+-- shape. Enabling one subgroup while a sibling vector is empty can make native DF index through an
+-- absent entry. Grow missing siblings as disabled before exposing the category flag.
+local function sp_ensure_category_vectors(b, spec)
+    local changed = false
+    for _, g in ipairs(spec.groups) do
+        if g.vec and not g.fixed then
+            local vec = g.vec(b)
+            local before = #vec
+            sp_ensure_vec(vec, sp_group_count(g))
+            if #vec ~= before then changed = true end
+        end
+    end
+    return changed
+end
+
+sp_normalize_enabled_categories = function(b)
+    local changed = 0
+    for _, spec in pairs(SP_CATEGORIES) do
+        if b.settings.flags[spec.flag] and sp_ensure_category_vectors(b, spec) then
+            changed = changed + 1
+        end
+    end
+    return changed
+end
+
 -- Resolve (category, group key) -> spec, group. Defaults to the first group if blank/unknown.
 local function sp_find_group(cat, group)
     local spec = SP_CATEGORIES[tostring(cat or '')]
@@ -579,6 +608,7 @@ function stockpile_toggle_item(id, cat, group, idx, on)
     idx = tonumber(idx)
     if not idx or idx < 0 then return false, 'bad index' end
     local ok, err = pcall(function()
+        if sp_bool(on) then sp_ensure_category_vectors(b, spec) end
         sp_group_set(g, b, idx, on)
         if sp_bool(on) then b.settings.flags[spec.flag] = true end
     end)
@@ -593,6 +623,7 @@ function stockpile_toggle_all(id, cat, group, on)
     if not g then return false, 'category not editable' end
     local want = sp_bool(on)
     local ok, err = pcall(function()
+        if want then sp_ensure_category_vectors(b, spec) end
         for i = 0, sp_group_count(g) - 1 do
             local r = sp_group_item(g, i)
             if r and g.include(r, i) then sp_group_set(g, b, i, want) end
@@ -618,11 +649,21 @@ function create_stockpile(x1, y1, x2, y2, z, preset)
     if not ok then return -1, tostring(bld) end       -- bld is the error on pcall failure
     if not bld then return -1, tostring(err or 'could not place stockpile') end
 
-    -- Configure which items it accepts, using DFHack's tested preset import.
-    local libname = STOCKPILE_PRESETS[tostring(preset or 'all'):lower()] or 'all'
-    pcall(function()
-        require('plugins.stockpiles').import_settings(libname, {id = bld.id, mode = 'enable'})
-    end)
+    -- Native DF creates an inert pile. Preserve that state for "none", and only expose a
+    -- category flag after DFHack's serializer and the sibling-vector normalizer have completed.
+    local want = tostring(preset or 'all'):lower()
+    if want ~= 'none' then
+        local libname = STOCKPILE_PRESETS[want] or 'all'
+        local imported, import_err = pcall(function()
+            require('plugins.stockpiles').import_settings(libname, {id = bld.id, mode = 'enable'})
+        end)
+        if not imported then
+            -- This pile has not escaped the request or entered a native UI cache yet.
+            pcall(dfhack.buildings.deconstruct, bld)
+            return -1, tostring(import_err)
+        end
+        sp_normalize_enabled_categories(bld)
+    end
     return bld.id, ''
 end
 
@@ -694,6 +735,147 @@ function stockpile_item_list(id, cat, group)
     end)
     if ok and res then return res end
     return '{"ok":false,"items":[],"error":' .. json_string(tostring(res)) .. '}\n'
+end
+
+-- ===== Hauling-stop desired-item filter: the SAME stockpile item machinery, pointed at a route
+-- stop instead of a pile. A df::hauling_stop.settings IS a df::stockpile_settings, so a stop is a
+-- valid `b` for every sp_* helper (they only ever touch b.settings). No second filter exists. =====
+local function get_hauling_stop(route_id, stop_id)
+    route_id, stop_id = tonumber(route_id), tonumber(stop_id)
+    if not route_id or not stop_id then return nil end
+    local found
+    pcall(function()
+        for _, r in ipairs(df.global.plotinfo.hauling.routes) do
+            if r.id == route_id then
+                for _, s in ipairs(r.stops) do
+                    if s.id == stop_id then found = s; return end
+                end
+            end
+        end
+    end)
+    return found
+end
+
+-- The 17 top-level category flags of the stop's settings, keyed by SP_CATEGORIES key (so the
+-- editor's category tabs and its item toggles speak the same names).
+function hauling_stop_snapshot(route_id, stop_id)
+    local stop = get_hauling_stop(route_id, stop_id)
+    if not stop then return '{"ok":false,"cats":{}}\n' end
+    local out = {}
+    for key, spec in pairs(SP_CATEGORIES) do
+        local on = false
+        pcall(function() on = stop.settings.flags[spec.flag] == true end)
+        out[#out + 1] = json_string(key) .. ':' .. json_bool(on)
+    end
+    return '{"ok":true,"cats":{' .. table.concat(out, ',') .. '}}\n'
+end
+
+function hauling_stop_item_list(route_id, stop_id, cat, group)
+    local b = get_hauling_stop(route_id, stop_id)
+    if not b then return '{"ok":false,"items":[]}\n' end
+    local spec, g = sp_find_group(cat, group)
+    if not g then return '{"ok":false,"error":"category not editable yet","items":[]}\n' end
+    local ok, res = pcall(function()
+        local items = {}
+        for i = 0, sp_group_count(g) - 1 do
+            local r = sp_group_item(g, i)
+            if r and g.include(r, i) then
+                items[#items + 1] = '{"idx":' .. i .. ',"name":' .. json_string(tostring(g.name(r))) ..
+                    ',"on":' .. json_bool(sp_group_get(g, b, i)) .. '}'
+            end
+        end
+        return '{"ok":true,"items":[' .. table.concat(items, ',') .. ']}\n'
+    end)
+    if ok and res then return res end
+    return '{"ok":false,"items":[],"error":' .. json_string(tostring(res)) .. '}\n'
+end
+
+function hauling_stop_toggle_item(route_id, stop_id, cat, group, idx, on)
+    local b = get_hauling_stop(route_id, stop_id)
+    if not b then return false, 'stop not found' end
+    local spec, g = sp_find_group(cat, group)
+    if not g then return false, 'category not editable' end
+    idx = tonumber(idx)
+    if not idx or idx < 0 then return false, 'bad index' end
+    local ok, err = pcall(function()
+        if sp_bool(on) then sp_ensure_category_vectors(b, spec) end
+        sp_group_set(g, b, idx, on)
+        if sp_bool(on) then b.settings.flags[spec.flag] = true end
+    end)
+    if not ok then return false, tostring(err) end
+    return true, ''
+end
+
+function hauling_stop_toggle_all(route_id, stop_id, cat, group, on)
+    local b = get_hauling_stop(route_id, stop_id)
+    if not b then return false, 'stop not found' end
+    local spec, g = sp_find_group(cat, group)
+    if not g then return false, 'category not editable' end
+    local want = sp_bool(on)
+    local ok, err = pcall(function()
+        if want then sp_ensure_category_vectors(b, spec) end
+        for i = 0, sp_group_count(g) - 1 do
+            local r = sp_group_item(g, i)
+            if r and g.include(r, i) then sp_group_set(g, b, i, want) end
+        end
+        if want then b.settings.flags[spec.flag] = true end
+    end)
+    if not ok then return false, tostring(err) end
+    return true, ''
+end
+
+function hauling_stop_set_preset(route_id, stop_id, preset, mode)
+    local stop = get_hauling_stop(route_id, stop_id)
+    if not stop then return false, 'stop not found' end
+    preset = tostring(preset or 'all'):lower()
+    if preset == 'none' then
+        stop.settings.flags.whole = 0
+        return true, ''
+    end
+    mode = tostring(mode or 'set'):lower()
+    if mode ~= 'set' and mode ~= 'enable' and mode ~= 'disable' then mode = 'set' end
+    local lib = STOCKPILE_PRESETS[preset] or preset
+    local ok, err = pcall(function()
+        require('plugins.stockpiles').import_settings(lib, {
+            route_id = tonumber(route_id),
+            stop_id = tonumber(stop_id),
+            mode = mode,
+        })
+    end)
+    if not ok then return false, tostring(err) end
+    sp_normalize_enabled_categories(stop)
+    return true, ''
+end
+
+-- Repair saves produced before the sibling-vector guard. This only grows missing vectors in
+-- categories that are already enabled and fills new entries with false. It covers stockpile
+-- buildings, minecart stops, and the fortress-wide custom-stockpile settings buffer.
+function repair_incomplete_stockpile_settings()
+    local holders, categories = 0, 0
+    local function repair(holder)
+        local changed = sp_normalize_enabled_categories(holder)
+        if changed > 0 then
+            holders = holders + 1
+            categories = categories + changed
+        end
+    end
+
+    local world = df.global.world
+    if world then
+        for _, bld in ipairs(world.buildings.all) do
+            if df.building_stockpilest:is_instance(bld) then repair(bld) end
+        end
+    end
+
+    local plotinfo = df.global.plotinfo
+    if plotinfo then
+        for _, route in ipairs(plotinfo.hauling.routes) do
+            for _, stop in ipairs(route.stops) do repair(stop) end
+        end
+        local custom = plotinfo.stockpile and plotinfo.stockpile.custom_settings
+        if custom then repair({settings = custom}) end
+    end
+    return holders, categories
 end
 
 local function token_for(btype, subtype, custom)
@@ -1002,10 +1184,9 @@ local function add_custom_build_items(items)
 end
 
 function building_catalog()
-    -- Every step is pcall-guarded: this runs on dfcapture's RENDER THREAD, and if a Lua error
-    -- escaped to DFHack's SafeCall the traceback it builds overflows the render thread's small
-    -- stack and HARD-CRASHES the game (observed: intermittent crash opening the build menu). So we
-    -- catch errors here and return a (possibly partial) catalog instead -- never crash.
+    -- Every step is pcall-guarded because this runs on dfcapture's render thread. Letting a Lua
+    -- error reach DFHack's SafeCall can overflow the thread's small stack while building a
+    -- traceback. Return a partial catalog instead.
     local items = {}
     local ok1, e1 = pcall(add_native_build_items, items)
     if not ok1 then dfhack.printerr('dfcapture building_catalog: native items failed: ' .. tostring(e1)) end
@@ -1340,8 +1521,7 @@ local function place_one(pos, btype, subtype, custom, width, height, direction, 
     return bld, ''
 end
 
--- Temporary diagnostic: append a step marker to dfcapture.log so a hang during building
--- placement reveals the last step reached. Remove once the building-placement hang is fixed.
+-- Record building-placement progress so an interrupted native construction call can be diagnosed.
 local function bp_dbg(msg)
     local ok, f = pcall(io.open, 'dfcapture.log', 'a')
     if ok and f then f:write('LUA build-place: ' .. tostring(msg) .. '\n'); f:close() end
@@ -1431,9 +1611,8 @@ function place_building(x1, y1, x2, y2, z, token, direction, options)
     -- is placed (to warm its per-type cache). That nested CallLuaModuleFunction DEADLOCKS when run
     -- from our render-thread run_on_render_thread_sync context -- which is exactly why placing a
     -- not-yet-cached furniture type hung the game. constructBuilding above already created the
-    -- building with its material filters, so it builds normally with on-hand materials (just not as
-    -- a deferred "planned" building). See dfcapture-building-hang memory for the deferred-onupdate
-    -- alternative that would restore buildingplan if we want it later.
+    -- building with its material filters, so it builds normally with on-hand materials rather than
+    -- as a deferred buildingplan entry.
     bp_dbg('placed ' .. #blds .. ' building(s) id=' .. tostring(blds[1].id) .. ' (buildingplan skipped)')
     return #blds, blds[1].id, ''
 end
@@ -1557,33 +1736,33 @@ local LOCATION_TYPES = {
 
 local LOCATION_CREATE_ORDER = {'tavern', 'temple', 'library', 'guildhall', 'hospital'}
 
-local function zone_allows_location(zone)
+function zone_allows_location(zone)
     return zone and (zone.type == df.civzone_type.MeetingHall
         or zone.type == df.civzone_type.DiningHall
         or zone.type == df.civzone_type.Bedroom)
 end
 
-local function get_civzone(zone_id)
+function get_civzone(zone_id)
     local zone = df.building.find(tonumber(zone_id) or -1)
     if not zone or not df.building_civzonest:is_instance(zone) then return nil end
     return zone
 end
 
-local function vector_contains(vec, value)
+function vector_contains(vec, value)
     for _, v in ipairs(vec or {}) do
         if v == value then return true end
     end
     return false
 end
 
-local function erase_value(vec, value)
+function erase_value(vec, value)
     if not vec then return end
     for i = #vec - 1, 0, -1 do
         if vec[i] == value then vec:erase(i) end
     end
 end
 
-local function find_location(site, location_id)
+function find_location(site, location_id)
     if not site then return nil end
     for _, loc in ipairs(site.buildings) do
         if loc.id == location_id then return loc end
@@ -1591,7 +1770,7 @@ local function find_location(site, location_id)
     return nil
 end
 
-local function location_kind(loc)
+function location_kind(loc)
     if df.abstract_building_inn_tavernst:is_instance(loc) then return 'tavern' end
     if df.abstract_building_templest:is_instance(loc) then return 'temple' end
     if df.abstract_building_libraryst:is_instance(loc) then return 'library' end
@@ -1600,18 +1779,18 @@ local function location_kind(loc)
     return 'other'
 end
 
-local function location_label(loc)
+function location_label(loc)
     local kind = location_kind(loc)
     return (LOCATION_TYPES[kind] and LOCATION_TYPES[kind].label) or tostring(df.abstract_building_type[loc:getType()] or 'Location')
 end
 
-local function location_name(loc)
+function location_name(loc)
     local ok, name = pcall(dfhack.translation.translateName, loc.name, true)
     if ok and name and #name > 0 then return name end
     return location_label(loc)
 end
 
-local function generated_location_name(name_type)
+function generated_location_name(name_type)
     local name = {
         type = name_type,
         has_name = true,
@@ -1630,13 +1809,13 @@ local function generated_location_name(name_type)
     return name
 end
 
-local function current_site()
+function current_site()
     local ok, site = pcall(dfhack.world.getCurrentSite)
     if ok then return site end
     return nil
 end
 
-local function site_owner_id(site)
+function site_owner_id(site)
     if not site then return -1 end
     for _, entity_site_link in ipairs(site.entity_links) do
         local he = df.historical_entity.find(entity_site_link.entity_id)
@@ -1647,13 +1826,13 @@ local function site_owner_id(site)
     return site.cur_owner_id or -1
 end
 
-local function set_location_flags(loc)
+function set_location_flags(loc)
     loc.flags.VISITORS_ALLOWED = true
     loc.flags.NON_CITIZENS_ALLOWED = true
     loc.flags.MEMBERS_ONLY = false
 end
 
-local function create_location(site, kind)
+function create_location(site, kind)
     local meta = LOCATION_TYPES[kind]
     if not site or not meta then return nil, 'unknown location type' end
     local loc_id = site.next_building_id
@@ -1672,7 +1851,7 @@ local function create_location(site, kind)
     return loc, ''
 end
 
-local function detach_zone_location(zone)
+function detach_zone_location(zone)
     if zone.site_id ~= -1 and zone.location_id ~= -1 then
         local old_site = df.world_site.find(zone.site_id)
         local old_loc = find_location(old_site, zone.location_id)
@@ -1683,7 +1862,7 @@ local function detach_zone_location(zone)
     zone.location_id = -1
 end
 
-local function attach_zone_location(zone, site, loc)
+function attach_zone_location(zone, site, loc)
     detach_zone_location(zone)
     zone.site_id = site.id
     zone.location_id = loc.id
@@ -1695,7 +1874,77 @@ local function attach_zone_location(zone, site, loc)
     zone:categorize(true)
 end
 
-local function location_to_json(loc, current_id)
+-- Location staffing/details reads. Occupations live on both loc.occupations and the
+-- global world.occupations.all registry; each carries type + the assigned unit/histfig
+-- (histfig_id/unit_id == -1 means the slot is open, exactly like native's Location Details).
+local OCCUPATION_LABELS = {
+    [df.occupation_type.TAVERN_KEEPER] = 'Tavern Keeper',
+    [df.occupation_type.PERFORMER]     = 'Performer',
+    [df.occupation_type.SCHOLAR]       = 'Scholar',
+    [df.occupation_type.MERCENARY]     = 'Mercenary',
+    [df.occupation_type.MONSTER_SLAYER]= 'Monster Slayer',
+    [df.occupation_type.SCRIBE]        = 'Scribe',
+    [df.occupation_type.DOCTOR]        = 'Doctor',
+    [df.occupation_type.DIAGNOSTICIAN] = 'Diagnostician',
+    [df.occupation_type.SURGEON]       = 'Surgeon',
+    [df.occupation_type.BONE_DOCTOR]   = 'Bone Doctor',
+}
+
+function occupation_label(occ_type)
+    return OCCUPATION_LABELS[occ_type] or tostring(df.occupation_type[occ_type] or 'Occupation')
+end
+
+function occupation_holder_name(occ)
+    if occ.unit_id and occ.unit_id ~= -1 then
+        local unit = df.unit.find(occ.unit_id)
+        if unit then
+            local ok, name = pcall(dfhack.units.getReadableName, unit)
+            if ok and name and #name > 0 then return name end
+        end
+    end
+    if occ.histfig_id and occ.histfig_id ~= -1 then
+        local hf = df.historical_figure.find(occ.histfig_id)
+        if hf then
+            local ok, name = pcall(dfhack.translation.translateName, hf.name, true)
+            if ok and name and #name > 0 then return name end
+        end
+    end
+    return ''
+end
+
+-- Native's four access settings map to the abstract_building flags. Keep all four states distinct;
+-- collapsing the middle two is how a real resident-only setting became a made-up citizen state.
+function location_restriction(loc)
+    if loc.flags.MEMBERS_ONLY then return 'members' end
+    if loc.flags.VISITORS_ALLOWED and loc.flags.NON_CITIZENS_ALLOWED then return 'visitors' end
+    if loc.flags.NON_CITIZENS_ALLOWED then return 'residents' end
+    return 'citizens'
+end
+
+function occupations_json(loc)
+    local out = {}
+    for _, occ in ipairs(loc.occupations) do
+        out[#out + 1] = '{"type":' .. json_string(occupation_label(occ.type)) ..
+            ',"holder":' .. json_string(occupation_holder_name(occ)) ..
+            ',"assigned":' .. json_bool(occ.histfig_id ~= -1 or occ.unit_id ~= -1) .. '}'
+    end
+    return '[' .. table.concat(out, ',') .. ']'
+end
+
+-- Guildhalls carry their dedicated guild in contents.profession; a generic guildhall is NONE.
+-- Temple deity resolution is unavailable when the location record does not expose it directly.
+function location_dedication(loc)
+    if df.abstract_building_guildhallst:is_instance(loc) then
+        local prof = loc.contents.profession
+        if prof and prof ~= df.profession.NONE then
+            local ok, label = pcall(function() return tostring(df.profession[prof]) end)
+            if ok and label and #label > 0 then return label end
+        end
+    end
+    return ''
+end
+
+function location_to_json(loc, current_id)
     local contents = loc:getContents()
     local zones = contents and contents.building_ids or {}
     return '{' ..
@@ -1705,6 +1954,9 @@ local function location_to_json(loc, current_id)
         ',"name":' .. json_string(location_name(loc)) ..
         ',"current":' .. json_bool(loc.id == current_id) ..
         ',"zoneCount":' .. tostring(#zones) ..
+        ',"restriction":' .. json_string(location_restriction(loc)) ..
+        ',"dedication":' .. json_string(location_dedication(loc)) ..
+        ',"occupations":' .. occupations_json(loc) ..
         '}'
 end
 
@@ -1759,6 +2011,811 @@ function zone_location_action(zone_id, action, kind, location_id)
         if not loc then return false, err end
         attach_zone_location(zone, site, loc)
         return true, ''
+    elseif action == 'restrict' then
+        -- Set the access policy on the target location (default: the zone's current location).
+        local loc = find_location(site, tonumber(location_id) or zone.location_id or -1)
+        if not loc then return false, 'location not found' end
+        local mode = tostring(kind or '')
+        if mode == 'everyone' then
+            loc.flags.VISITORS_ALLOWED = true
+            loc.flags.NON_CITIZENS_ALLOWED = true
+            loc.flags.MEMBERS_ONLY = false
+        elseif mode == 'citizens' then
+            loc.flags.VISITORS_ALLOWED = false
+            loc.flags.NON_CITIZENS_ALLOWED = false
+            loc.flags.MEMBERS_ONLY = false
+        elseif mode == 'members' then
+            loc.flags.MEMBERS_ONLY = true
+        else
+            return false, 'unknown restriction mode'
+        end
+        return true, ''
+    elseif action == 'rename' then
+        local loc = find_location(site, tonumber(location_id) or zone.location_id or -1)
+        if not loc then return false, 'location not found' end
+        local newname = tostring(kind or '')
+        if #newname == 0 then return false, 'empty name' end
+        local name = loc.name
+        name.has_name = true
+        name.first_name = newname
+        -- Clear the generated word slots so translateName renders just the custom first_name.
+        for i = 0, 6 do name.words[i] = -1 end
+        return true, ''
+    elseif action == 'retire' then
+        local loc = find_location(site, tonumber(location_id) or zone.location_id or -1)
+        if not loc then return false, 'location not found' end
+        -- Detach the zone in context first (mirrors the panel flow), then enforce the same
+        -- guard native uses: refuse while occupations are still assigned or other zones remain
+        -- attached. Retiring == flags.DOES_NOT_EXIST + purge the location's occupation slots from
+        -- the global registry (DFHack zone.lua's retire recipe). The record is left in
+        -- site.buildings for the engine to reap, exactly as vanilla does.
+        if zone.location_id == loc.id then detach_zone_location(zone) end
+        local assigned = 0
+        for _, occ in ipairs(loc.occupations) do
+            if occ.histfig_id ~= -1 then assigned = assigned + 1 end
+        end
+        local zones = 0
+        local contents = loc:getContents()
+        if contents then
+            for _, zid in ipairs(contents.building_ids) do
+                if df.building.find(zid) then zones = zones + 1 end
+            end
+        end
+        if assigned + zones > 0 then
+            return false, 'location in use (unassign occupations / detach zones first)'
+        end
+        loc.flags.DOES_NOT_EXIST = true
+        local all = df.global.world.occupations.all
+        for i = #all - 1, 0, -1 do
+            local occ = all[i]
+            if occ.site_id == loc.site_id and occ.location_id == loc.id then
+                all:erase(i)
+            end
+        end
+        return true, ''
+    end
+    return false, 'unknown location action'
+end
+
+-- ---------------------------------------------------------------------------
+-- Location details: occupant counts, occupation assignment, temple-deity
+-- and craft-guild pickers, rented rooms.
+--
+-- STRUCTURES (df-structures, library/xml/df.abstract_building.xml + df.occupation.xml):
+--
+--   abstract_building (class, per-site, site.buildings; id is site-local)
+--     .occupations           stl-vector<occupation*>   -- the location's staff slots
+--     .inhabitants           stl-vector<abstract_building_hf_linkst>
+--     .flags                 abstract_building_flags   -- VISITORS_ALLOWED / MEMBERS_ONLY / ...
+--     :getContents()         abstract_building_contents (location_infost)
+--                              .location_tier / .location_value / .building_ids (attached civzones)
+--                              .profession   -- the craft guild a GUILDHALL serves (v0.47+)
+--
+--   abstract_building_templest  .deity_type (religious_practice_type: NONE/WORSHIP_HFID/RELIGION_ENID)
+--                               .deity_data (union: .Deity = histfig id | .Religion = entity id)
+--   abstract_building_inn_tavernst  .room_info stl-vector<rental_roomst>, .next_room_info_id
+--   rental_roomst  {id, location (string), civzone (building id), world_x/world_y/world_z}
+--
+--   occupation (world.occupations.all, global id from df.global.occupation_next_id)
+--     {id, type (occupation_type), histfig_id, unit_id, location_id (= abstract_building.id),
+--      site_id, group_id (= the fort historical_entity), service_order stl-vector<service_orderst>,
+--      next_service_order_id}
+--   service_orderst {local_id, type (service_order_type: DRINK/ROOM_RENTAL/EXTEND_ROOM_RENTAL),
+--      customer_hfid, customer_unid, money_owed, room_ab_local_id (-> rental_roomst.id),
+--      start_year, end_year, ...}
+--
+--   The three cross-linked structs the census flags are exactly:
+--     abstract_building_inn_tavernst.room_info[] (rental_roomst)
+--       <-> occupation.service_order[] (service_orderst.room_ab_local_id == rental_roomst.id)
+--       <-> building_civzonest (rental_roomst.civzone)
+--
+--   Assignment mirrors DF's own two-sided link (same shape as the noble path in
+--   src/fort_admin.cpp do_noble_assign): the occupation carries unit_id + histfig_id, and the
+--   historical figure carries a histfig_entity_link_occupationst back to it.
+-- ---------------------------------------------------------------------------
+
+-- the ONE living-citizen predicate for every Lua assignment list. Same semantics as
+-- the C++ twin (src/fort_admin.cpp is_assignable_citizen, src/labor.cpp is_assignable_citizen):
+-- isCitizen alone still passes retained corpses and ghosts out of world.units.active.
+function is_living_citizen(unit)
+    if not unit then return false end
+    local ok, result = pcall(function()
+        return dfhack.units.isCitizen(unit, true)
+            and dfhack.units.isActive(unit)
+            and not dfhack.units.isDead(unit)
+            and not dfhack.units.isGhost(unit)
+    end)
+    return ok and result or false
+end
+
+-- Occupation types offered by each location kind. Verified slots may be created by the browser.
+-- Other slots are listed only when DF has already created the corresponding occupation record.
+local OCCUPATION_SLOTS = {
+    tavern = {
+        {type = df.occupation_type.TAVERN_KEEPER, verified = true},
+        {type = df.occupation_type.PERFORMER,     verified = true},
+        {type = df.occupation_type.MERCENARY,     verified = false},
+        {type = df.occupation_type.MONSTER_SLAYER,verified = false},
+    },
+    library = {
+        {type = df.occupation_type.SCHOLAR, verified = true},
+        {type = df.occupation_type.SCRIBE,  verified = true},
+    },
+    hospital = {
+        {type = df.occupation_type.DOCTOR,         verified = true},
+        {type = df.occupation_type.DIAGNOSTICIAN,  verified = true},
+        {type = df.occupation_type.SURGEON,        verified = true},
+        {type = df.occupation_type.BONE_DOCTOR,    verified = true},
+    },
+    temple = {
+        {type = df.occupation_type.PERFORMER, verified = false},
+    },
+    guildhall = {},
+}
+
+-- Creation is restricted to verified location/type combinations.
+local LOCATION_ALLOW_UNVERIFIED_SLOTS = false
+
+-- rental_roomst coordinates are not sufficiently described by df-structures for safe writes.
+-- Reading room assignments remains available.
+local LOCATION_ALLOW_ROOM_WRITES = false
+
+function occupation_type_key(occ_type)
+    local ok, key = pcall(function() return tostring(df.occupation_type[occ_type]) end)
+    if ok and key and #key > 0 then return key end
+    return tostring(occ_type)
+end
+
+-- Every civzone attached to the location, with its footprint, so the client can list them and so
+-- occupant counting has a region to test against.
+function location_zone_records(loc)
+    local zones = {}
+    local contents = loc:getContents()
+    if not contents then return zones end
+    for _, zid in ipairs(contents.building_ids) do
+        local z = df.building.find(zid)
+        if z and df.building_civzonest:is_instance(z) then
+            local ok_name, zname = pcall(dfhack.buildings.getName, z)
+            table.insert(zones, {
+                id = z.id,
+                name = (ok_name and zname) or '',
+                type = tostring(df.civzone_type[z.type] or z.type),
+                x1 = z.x1, x2 = z.x2, y1 = z.y1, y2 = z.y2, z = z.z,
+            })
+        end
+    end
+    return zones
+end
+
+function unit_in_zone_record(unit, rec)
+    local p = unit.pos
+    return p.z == rec.z and p.x >= rec.x1 and p.x <= rec.x2 and p.y >= rec.y1 and p.y <= rec.y2
+end
+
+-- "Inside now" is a live footprint test against the location's
+-- civzones -- the same thing native's location screen means by the people in your tavern. Split
+-- the way DF splits them, because a tavern full of visitors is a different fact from a tavern full
+-- of citizens.
+function location_occupancy(loc, zones)
+    local out = {inside = 0, citizens = 0, residents = 0, visitors = 0, others = 0, names = {}}
+    local units = df.global.world and df.global.world.units and df.global.world.units.active
+    if not units or #zones == 0 then return out end
+    for _, unit in ipairs(units) do
+        local ok = pcall(function()
+            if dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then return end
+            local hit = false
+            for _, rec in ipairs(zones) do
+                if unit_in_zone_record(unit, rec) then hit = true break end
+            end
+            if not hit then return end
+            out.inside = out.inside + 1
+            if is_living_citizen(unit) then
+                out.citizens = out.citizens + 1
+            elseif dfhack.units.isResident(unit, true) then
+                out.residents = out.residents + 1
+            elseif dfhack.units.isVisiting(unit) then
+                out.visitors = out.visitors + 1
+            else
+                out.others = out.others + 1
+            end
+            if #out.names < 24 then
+                local ok_name, name = pcall(dfhack.units.getReadableName, unit)
+                table.insert(out.names, ok_name and name or ('Unit ' .. tostring(unit.id)))
+            end
+        end)
+        -- A unit whose predicates blow up (a half-loaded corpse, a mid-transform creature) is
+        -- skipped, not fatal: a count that is one short beats a panel that fails to open.
+        local _ = ok
+    end
+    return out
+end
+
+-- Occupation rows = the slots DF already created for this location (with holders) MERGED with the
+-- vacant slots its kind offers. A vacant row has id == -1: assigning to it creates the occupation.
+function location_occupation_rows(loc, kind)
+    local rows = {}
+    local seen = {}
+    for _, occ in ipairs(loc.occupations) do
+        local key = occupation_type_key(occ.type)
+        local profession_color = -1
+        if (occ.unit_id or -1) >= 0 then
+            local unit = df.unit.find(occ.unit_id)
+            local ok_color, color = pcall(dfhack.units.getProfessionColor, unit)
+            profession_color = (ok_color and color) or -1
+        end
+        seen[occ.type] = (seen[occ.type] or 0) + 1
+        table.insert(rows, {
+            id = occ.id,
+            typeKey = key,
+            label = occupation_label(occ.type),
+            unitId = occ.unit_id,
+            histfigId = occ.histfig_id,
+            holder = occupation_holder_name(occ),
+            professionColor = profession_color,
+            assigned = (occ.histfig_id ~= -1 or occ.unit_id ~= -1),
+            verified = true,
+        })
+    end
+    for _, slot in ipairs(OCCUPATION_SLOTS[kind] or {}) do
+        if not seen[slot.type] then
+            table.insert(rows, {
+                id = -1,
+                typeKey = occupation_type_key(slot.type),
+                label = occupation_label(slot.type),
+                unitId = -1,
+                histfigId = -1,
+                holder = '',
+                professionColor = -1,
+                assigned = false,
+                verified = slot.verified,
+            })
+        end
+    end
+    return rows
+end
+
+function occupation_row_json(row)
+    return '{"id":' .. tostring(row.id) ..
+        ',"typeKey":' .. json_string(row.typeKey) ..
+        ',"label":' .. json_string(row.label) ..
+        ',"unitId":' .. tostring(row.unitId) ..
+        ',"histfigId":' .. tostring(row.histfigId) ..
+        ',"holder":' .. json_string(row.holder) ..
+        ',"professionColor":' .. tostring(row.professionColor or -1) ..
+        ',"assigned":' .. json_bool(row.assigned) ..
+        ',"verified":' .. json_bool(row.verified) .. '}'
+end
+
+function histfig_display_name(hf_id)
+    local hf = df.historical_figure.find(hf_id or -1)
+    if not hf then return '' end
+    local ok, name = pcall(dfhack.translation.translateName, hf.name, true)
+    if ok and name and #name > 0 then return name end
+    return 'Figure ' .. tostring(hf_id)
+end
+
+function entity_display_name(entity_id)
+    local he = df.historical_entity.find(entity_id or -1)
+    if not he then return '' end
+    local ok, name = pcall(dfhack.translation.translateName, he.name, true)
+    if ok and name and #name > 0 then return name end
+    return 'Group ' .. tostring(entity_id)
+end
+
+-- Native only offers temple dedications that the fort actually worships,
+-- so we derive the same list from the citizens: a deity is a histfig_hf_link_deityst on a citizen's
+-- historical figure (target_hf = the deity, link_strength = how devout); a religion is a
+-- historical_entity of type Religion that a citizen is linked to. Count of worshippers is the sort
+-- key and is shown, because "3 dwarves worship Armok" is what makes the choice.
+function temple_deity_options()
+    local deities, religions = {}, {}
+    local units = df.global.world and df.global.world.units and df.global.world.units.active or {}
+    for _, unit in ipairs(units) do
+        if is_living_citizen(unit) and (unit.hist_figure_id or -1) >= 0 then
+            local hf = df.historical_figure.find(unit.hist_figure_id)
+            if hf then
+                for _, link in ipairs(hf.histfig_links) do
+                    if df.histfig_hf_link_deityst:is_instance(link) and link.target_hf >= 0 then
+                        deities[link.target_hf] = (deities[link.target_hf] or 0) + 1
+                    end
+                end
+                for _, link in ipairs(hf.entity_links) do
+                    local he = df.historical_entity.find(link.entity_id or -1)
+                    if he and he.type == df.historical_entity_type.Religion then
+                        religions[he.id] = (religions[he.id] or 0) + 1
+                    end
+                end
+            end
+        end
+    end
+    local out = {}
+    for hf_id, count in pairs(deities) do
+        table.insert(out, {mode = 'hf', id = hf_id, name = histfig_display_name(hf_id), count = count})
+    end
+    for ent_id, count in pairs(religions) do
+        table.insert(out, {mode = 'religion', id = ent_id, name = entity_display_name(ent_id), count = count})
+    end
+    table.sort(out, function(a, b)
+        if a.count ~= b.count then return a.count > b.count end
+        return a.name < b.name
+    end)
+    return out
+end
+
+function temple_json(loc)
+    if not df.abstract_building_templest:is_instance(loc) then return 'null' end
+    local mode, id, name = 'none', -1, ''
+    if loc.deity_type == df.religious_practice_type.WORSHIP_HFID then
+        mode, id = 'hf', loc.deity_data.Deity
+        name = histfig_display_name(id)
+    elseif loc.deity_type == df.religious_practice_type.RELIGION_ENID then
+        mode, id = 'religion', loc.deity_data.Religion
+        name = entity_display_name(id)
+    end
+    local opts = {}
+    for _, o in ipairs(temple_deity_options()) do
+        table.insert(opts, '{"mode":' .. json_string(o.mode) ..
+            ',"id":' .. tostring(o.id) ..
+            ',"name":' .. json_string(o.name) ..
+            ',"worshippers":' .. tostring(o.count) ..
+            ',"current":' .. json_bool(o.mode == mode and o.id == id) .. '}')
+    end
+    return '{"mode":' .. json_string(mode) ..
+        ',"id":' .. tostring(id) ..
+        ',"name":' .. json_string(name) ..
+        ',"dedicated":' .. json_bool(mode ~= 'none') ..
+        ',"options":[' .. table.concat(opts, ',') .. ']}'
+end
+
+-- A guild is a historical_entity of type Guild whose
+-- guild_professions[0].profession is the craft it promotes (entity_focusst, v0.47+); native's
+-- location_list_interfacest.valid_craft_guild_type is that same profession list. Members = fort
+-- citizens linked to that guild entity.
+function guild_options()
+    local by_entity = {}
+    local units = df.global.world and df.global.world.units and df.global.world.units.active or {}
+    for _, unit in ipairs(units) do
+        if is_living_citizen(unit) and (unit.hist_figure_id or -1) >= 0 then
+            local hf = df.historical_figure.find(unit.hist_figure_id)
+            if hf then
+                for _, link in ipairs(hf.entity_links) do
+                    local he = df.historical_entity.find(link.entity_id or -1)
+                    if he and he.type == df.historical_entity_type.Guild then
+                        by_entity[he.id] = (by_entity[he.id] or 0) + 1
+                    end
+                end
+            end
+        end
+    end
+    local out = {}
+    for ent_id, members in pairs(by_entity) do
+        local he = df.historical_entity.find(ent_id)
+        local prof = df.profession.NONE
+        if he and #he.guild_professions > 0 then prof = he.guild_professions[0].profession end
+        if prof ~= df.profession.NONE then
+            table.insert(out, {
+                profession = prof,
+                key = tostring(df.profession[prof]),
+                name = entity_display_name(ent_id),
+                members = members,
+            })
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.members ~= b.members then return a.members > b.members end
+        return a.key < b.key
+    end)
+    return out
+end
+
+function guild_json(loc)
+    if not df.abstract_building_guildhallst:is_instance(loc) then return 'null' end
+    local prof = loc.contents.profession
+    local key = (prof and prof ~= df.profession.NONE) and tostring(df.profession[prof]) or ''
+    local opts = {}
+    for _, o in ipairs(guild_options()) do
+        table.insert(opts, '{"key":' .. json_string(o.key) ..
+            ',"name":' .. json_string(o.name) ..
+            ',"members":' .. tostring(o.members) ..
+            ',"current":' .. json_bool(o.key == key) .. '}')
+    end
+    return '{"key":' .. json_string(key) ..
+        ',"dedicated":' .. json_bool(#key > 0) ..
+        ',"options":[' .. table.concat(opts, ',') .. ']}'
+end
+
+-- Rented rooms are joined across three structures.
+-- room_info[] (rental_roomst) x occupation.service_order[] (service_orderst) x civzone.
+function rooms_json(loc)
+    if not df.abstract_building_inn_tavernst:is_instance(loc) then return 'null' end
+    -- Index every ROOM_RENTAL/EXTEND service order the location's occupations are carrying, by the
+    -- room it points at (service_orderst.room_ab_local_id == rental_roomst.id -- "not zone or ab id,
+    -- something local to ab", per df-structures).
+    local rentals = {}
+    for _, occ in ipairs(loc.occupations) do
+        for _, so in ipairs(occ.service_order) do
+            if so.type == df.service_order_type.ROOM_RENTAL or
+               so.type == df.service_order_type.EXTEND_ROOM_RENTAL then
+                rentals[so.room_ab_local_id] = so
+            end
+        end
+    end
+    local rows = {}
+    for _, room in ipairs(loc.room_info) do
+        local zone = df.building.find(room.civzone or -1)
+        local ok_name, zname = pcall(function() return zone and dfhack.buildings.getName(zone) or '' end)
+        local so = rentals[room.id]
+        local renter, renter_profession_color, owed, ends = '', -1, 0, -1
+        if so then
+            if (so.customer_unid or -1) >= 0 then
+                local u = df.unit.find(so.customer_unid)
+                local ok_u, un = pcall(function() return u and dfhack.units.getReadableName(u) or '' end)
+                renter = (ok_u and un) or ''
+                local ok_color, color = pcall(dfhack.units.getProfessionColor, u)
+                renter_profession_color = (ok_color and color) or -1
+            end
+            if #renter == 0 and (so.customer_hfid or -1) >= 0 then
+                renter = histfig_display_name(so.customer_hfid)
+            end
+            owed = so.money_owed or 0
+            ends = so.end_year or -1
+        end
+        table.insert(rows, '{"id":' .. tostring(room.id) ..
+            ',"label":' .. json_string(room.location or '') ..
+            ',"civzoneId":' .. tostring(room.civzone or -1) ..
+            ',"zoneName":' .. json_string((ok_name and zname) or '') ..
+            ',"x":' .. tostring(room.world_x or 0) ..
+            ',"y":' .. tostring(room.world_y or 0) ..
+            ',"z":' .. tostring(room.world_z or 0) ..
+            ',"rented":' .. json_bool(so ~= nil) ..
+            ',"renter":' .. json_string(renter) ..
+            ',"renterProfessionColor":' .. tostring(renter_profession_color) ..
+            ',"owed":' .. tostring(owed) ..
+            ',"endYear":' .. tostring(ends) .. '}')
+    end
+    return '{"canWrite":' .. json_bool(LOCATION_ALLOW_ROOM_WRITES) ..
+        ',"rooms":[' .. table.concat(rows, ',') .. ']}'
+end
+
+-- Appointed positions bound to THIS location: entity_position_assignment.ab_id is the abstract
+-- building the position serves (temple priests, guild representatives). Read-only here -- the
+-- write already exists and is tested at src/fort_admin.cpp /noble-assign.
+function location_positions_json(loc)
+    local fort = fort_entity()
+    if not fort then return '[]' end
+    local rows = {}
+    for _, a in ipairs(fort.positions.assignments) do
+        if a and (a.ab_id or -1) == loc.id then
+            local pname = ''
+            local holder_profession_color = -1
+            for _, p in ipairs(fort.positions.own) do
+                if p.id == a.position_id then pname = p.name[0] or '' break end
+            end
+            if (a.histfig or -1) >= 0 then
+                local units = df.global.world and df.global.world.units and df.global.world.units.active or {}
+                for _, unit in ipairs(units) do
+                    if unit and unit.hist_figure_id == a.histfig then
+                        local ok_color, color = pcall(dfhack.units.getProfessionColor, unit)
+                        holder_profession_color = (ok_color and color) or -1
+                        break
+                    end
+                end
+            end
+            table.insert(rows, '{"assignmentId":' .. tostring(a.id) ..
+                ',"positionId":' .. tostring(a.position_id) ..
+                ',"name":' .. json_string(pname) ..
+                ',"holder":' .. json_string(histfig_display_name(a.histfig)) ..
+                ',"professionColor":' .. tostring(holder_profession_color) ..
+                ',"vacant":' .. json_bool((a.histfig or -1) < 0) .. '}')
+        end
+    end
+    return '[' .. table.concat(rows, ',') .. ']'
+end
+
+-- The living-citizen candidate list for an occupation (no corpses, no ghosts).
+function location_candidates_json(loc)
+    local rows = {}
+    local units = df.global.world and df.global.world.units and df.global.world.units.active or {}
+    local holders = {}
+    for _, occ in ipairs(loc.occupations) do
+        if (occ.unit_id or -1) >= 0 then holders[occ.unit_id] = occupation_label(occ.type) end
+    end
+    for _, unit in ipairs(units) do
+        if is_living_citizen(unit) and (unit.hist_figure_id or -1) >= 0 then
+            local ok_name, name = pcall(dfhack.units.getReadableName, unit)
+            local ok_prof, prof = pcall(dfhack.units.getProfessionName, unit)
+            local ok_color, profession_color = pcall(dfhack.units.getProfessionColor, unit)
+            table.insert(rows, '{"unitId":' .. tostring(unit.id) ..
+                ',"name":' .. json_string((ok_name and name) or ('Unit ' .. tostring(unit.id))) ..
+                ',"profession":' .. json_string((ok_prof and prof) or '') ..
+                ',"professionColor":' .. tostring((ok_color and profession_color) or -1) ..
+                ',"heldOccupation":' .. json_string(holders[unit.id] or '') .. '}')
+        end
+    end
+    return '[' .. table.concat(rows, ',') .. ']'
+end
+
+-- Read-only occupation records and holder links for location inspection.
+function location_probe_json(loc)
+    local occs = {}
+    for _, occ in ipairs(loc.occupations) do
+        local links = {}
+        local hf = df.historical_figure.find(occ.histfig_id or -1)
+        if hf then
+            for _, l in ipairs(hf.entity_links) do
+                if df.histfig_entity_link_occupationst:is_instance(l) then
+                    table.insert(links, '{"kind":"entity","entityId":' .. tostring(l.entity_id) ..
+                        ',"vecIdx":' .. tostring(l.entity_vector_idx) ..
+                        ',"strength":' .. tostring(l.link_strength) ..
+                        ',"occupationId":' .. tostring(l.occupation_id) ..
+                        ',"startYear":' .. tostring(l.start_year) .. '}')
+                end
+            end
+            for _, l in ipairs(hf.site_links) do
+                if df.histfig_site_link_occupationst:is_instance(l) then
+                    table.insert(links, '{"kind":"site","site":' .. tostring(l.site) ..
+                        ',"subId":' .. tostring(l.sub_id) ..
+                        ',"entity":' .. tostring(l.entity) ..
+                        ',"occupationId":' .. tostring(l.occupation_id) .. '}')
+                end
+            end
+        end
+        table.insert(occs, '{"id":' .. tostring(occ.id) ..
+            ',"type":' .. json_string(occupation_type_key(occ.type)) ..
+            ',"unitId":' .. tostring(occ.unit_id) ..
+            ',"histfigId":' .. tostring(occ.histfig_id) ..
+            ',"locationId":' .. tostring(occ.location_id) ..
+            ',"siteId":' .. tostring(occ.site_id) ..
+            ',"groupId":' .. tostring(occ.group_id) ..
+            ',"serviceOrders":' .. tostring(#occ.service_order) ..
+            ',"nextServiceOrderId":' .. tostring(occ.next_service_order_id) ..
+            ',"hfLinks":[' .. table.concat(links, ',') .. ']}')
+    end
+    local next_id = -1
+    local ok_next = pcall(function() next_id = df.global.occupation_next_id end)
+    return '{"occupationNextId":' .. tostring(ok_next and next_id or -1) ..
+        ',"globalOccupations":' .. tostring(#df.global.world.occupations.all) ..
+        ',"occupations":[' .. table.concat(occs, ',') .. ']}'
+end
+
+function location_detail_json(location_id)
+    local site = current_site()
+    if not site then return '', 'current site unavailable' end
+    local loc = find_location(site, tonumber(location_id) or -1)
+    if not loc then return '', 'location not found' end
+    local kind = location_kind(loc)
+    local contents = loc:getContents()
+    local zones = location_zone_records(loc)
+    local occ = location_occupancy(loc, zones)
+    local zone_json = {}
+    for _, z in ipairs(zones) do
+        table.insert(zone_json, '{"id":' .. tostring(z.id) ..
+            ',"name":' .. json_string(z.name) ..
+            ',"type":' .. json_string(z.type) .. '}')
+    end
+    local occ_json = {}
+    for _, row in ipairs(location_occupation_rows(loc, kind)) do
+        table.insert(occ_json, occupation_row_json(row))
+    end
+    local names = {}
+    for _, n in ipairs(occ.names) do table.insert(names, json_string(n)) end
+    return '{"id":' .. tostring(loc.id) ..
+        ',"kind":' .. json_string(kind) ..
+        ',"label":' .. json_string(location_label(loc)) ..
+        ',"name":' .. json_string(location_name(loc)) ..
+        ',"restriction":' .. json_string(location_restriction(loc)) ..
+        ',"tier":' .. (contents and tostring(contents.location_tier) or 'null') ..
+        ',"value":' .. (contents and tostring(contents.location_value) or 'null') ..
+        ',"zones":[' .. table.concat(zone_json, ',') .. ']' ..
+        ',"occupancy":{"inside":' .. tostring(occ.inside) ..
+            ',"citizens":' .. tostring(occ.citizens) ..
+            ',"residents":' .. tostring(occ.residents) ..
+            ',"visitors":' .. tostring(occ.visitors) ..
+            ',"others":' .. tostring(occ.others) ..
+            ',"inhabitants":' .. tostring(#loc.inhabitants) ..
+            ',"names":[' .. table.concat(names, ',') .. ']}' ..
+        ',"occupations":[' .. table.concat(occ_json, ',') .. ']' ..
+        ',"allowNewSlots":' .. json_bool(LOCATION_ALLOW_UNVERIFIED_SLOTS) ..
+        ',"temple":' .. temple_json(loc) ..
+        ',"guild":' .. guild_json(loc) ..
+        ',"rooms":' .. rooms_json(loc) ..
+        ',"positions":' .. location_positions_json(loc) ..
+        ',"candidates":' .. location_candidates_json(loc) ..
+        ',"probe":' .. location_probe_json(loc) .. '}', ''
+end
+
+-- Find an occupation on this location: by global id when the client sends one (an existing slot),
+-- else the first slot of that type (a vacant catalogue row sends id -1 + typeKey).
+function find_location_occupation(loc, occ_id, type_key)
+    for _, occ in ipairs(loc.occupations) do
+        if occ_id >= 0 and occ.id == occ_id then return occ end
+    end
+    if occ_id >= 0 then return nil end
+    for _, occ in ipairs(loc.occupations) do
+        if occupation_type_key(occ.type) == type_key then return occ end
+    end
+    return nil
+end
+
+function occupation_slot_verified(kind, occ_type)
+    for _, slot in ipairs(OCCUPATION_SLOTS[kind] or {}) do
+        if slot.type == occ_type then return slot.verified end
+    end
+    return nil
+end
+
+-- Drop the histfig_entity_link_occupationst tying an old holder to this occupation (mirrors
+-- src/fort_admin.cpp unlink_position_holder -- unlink before relink, both sides stay consistent).
+function unlink_occupation_holder(hf_id, occupation_id)
+    local hf = df.historical_figure.find(hf_id or -1)
+    if not hf then return end
+    for i = #hf.entity_links - 1, 0, -1 do
+        local l = hf.entity_links[i]
+        if df.histfig_entity_link_occupationst:is_instance(l) and l.occupation_id == occupation_id then
+            hf.entity_links:erase(i)
+        end
+    end
+end
+
+function link_occupation_holder(hf, entity_id, occupation_id)
+    for _, l in ipairs(hf.entity_links) do
+        if df.histfig_entity_link_occupationst:is_instance(l) and l.occupation_id == occupation_id then
+            return
+        end
+    end
+    -- start_year + link_strength match the noble assignment path in fort_admin.cpp.
+    -- Do not synthesise a
+    -- histfig_site_link_occupationst: its `sub_id` is "from XML" in df-structures and we cannot
+    -- spell it from the structures alone. A missing descriptive link is inert; a half-formed one
+    -- is a corrupt record. A native-state comparison must establish it first.
+    hf.entity_links:insert('#', {
+        new = df.histfig_entity_link_occupationst,
+        entity_id = entity_id,
+        entity_vector_idx = -1,
+        link_strength = 100,
+        occupation_id = occupation_id,
+        start_year = df.global.cur_year,
+    })
+end
+
+-- Assign or vacate a location occupation.
+-- unit_id < 0 vacates the slot. Assigning to a slot DF never created allocates the occupation with
+-- the game's OWN id counter (df.global.occupation_next_id, a real symbol -- see symbols.xml
+-- global-address occupation_next_id) and registers it in both vectors DF keeps it in.
+function location_occupation_assign(loc, kind, occ_id, type_key, unit_id)
+    local site = current_site()
+    local fort = fort_entity()
+    if not site then return false, 'current site unavailable' end
+    if not fort then return false, 'fort entity unavailable' end
+
+    local occ = find_location_occupation(loc, occ_id, type_key)
+
+    if unit_id < 0 then
+        if not occ then return false, 'no such occupation slot' end
+        if (occ.histfig_id or -1) >= 0 then
+            unlink_occupation_holder(occ.histfig_id, occ.id)
+        end
+        occ.unit_id = -1
+        occ.histfig_id = -1
+        return true, ''
+    end
+
+    local unit = df.unit.find(unit_id)
+    if not unit then return false, 'unit not found' end
+    if not is_living_citizen(unit) then return false, 'unit is not an assignable living citizen' end
+    if (unit.hist_figure_id or -1) < 0 then return false, 'unit has no historical figure' end
+
+    if not occ then
+        local occ_type = df.occupation_type[type_key]
+        if occ_type == nil then return false, 'unknown occupation type' end
+        local verified = occupation_slot_verified(kind, occ_type)
+        if verified == nil then
+            return false, 'that location kind does not offer this occupation'
+        end
+        if not verified and not LOCATION_ALLOW_UNVERIFIED_SLOTS then
+            -- GUARDED: see LOCATION_ALLOW_UNVERIFIED_SLOTS.
+            return false, 'this slot is not verified for this location kind'
+        end
+        local new_id = df.global.occupation_next_id
+        df.global.occupation_next_id = new_id + 1
+        df.global.world.occupations.all:insert('#', {
+            new = df.occupation,
+            id = new_id,
+            type = occ_type,
+            histfig_id = -1,
+            unit_id = -1,
+            location_id = loc.id,
+            site_id = site.id,
+            group_id = fort.id,
+            next_service_order_id = 0,
+        })
+        occ = df.global.world.occupations.all[#df.global.world.occupations.all - 1]
+        loc.occupations:insert('#', occ)
+    end
+
+    if (occ.histfig_id or -1) >= 0 and occ.histfig_id ~= unit.hist_figure_id then
+        unlink_occupation_holder(occ.histfig_id, occ.id)
+    end
+    occ.unit_id = unit.id
+    occ.histfig_id = unit.hist_figure_id
+    local hf = df.historical_figure.find(unit.hist_figure_id)
+    if hf then link_occupation_holder(hf, fort.id, occ.id) end
+    return true, ''
+end
+
+-- Native picks the deity when the temple is created and offers
+-- no re-dedication, so we allow the write only while the temple is still generic -- that keeps us
+-- inside the game's own rules rather than inventing an operation DF does not have.
+function location_set_deity(loc, spec)
+    if not df.abstract_building_templest:is_instance(loc) then return false, 'not a temple' end
+    if loc.deity_type ~= df.religious_practice_type.NONE then
+        return false, 'temple is already dedicated (native offers no re-dedication -- retire and re-create)'
+    end
+    local mode, id = string.match(tostring(spec or ''), '^(%a+):(-?%d+)$')
+    id = tonumber(id or -1) or -1
+    if mode == 'hf' then
+        if not df.historical_figure.find(id) then return false, 'unknown deity' end
+        loc.deity_type = df.religious_practice_type.WORSHIP_HFID
+        loc.deity_data.Deity = id
+        return true, ''
+    elseif mode == 'religion' then
+        local he = df.historical_entity.find(id)
+        if not he or he.type ~= df.historical_entity_type.Religion then return false, 'unknown religion' end
+        loc.deity_type = df.religious_practice_type.RELIGION_ENID
+        loc.deity_data.Religion = id
+        return true, ''
+    end
+    return false, 'bad deity spec (expected hf:<id> or religion:<id>)'
+end
+
+-- Guildhall dedication uses abstract_building_contents.profession, which
+-- is exactly what native's location_list_interfacest.selected_craft_guild resolves to. Same
+-- create-time-only rule as the temple.
+function location_set_guild(loc, prof_key)
+    if not df.abstract_building_guildhallst:is_instance(loc) then return false, 'not a guildhall' end
+    if loc.contents.profession ~= df.profession.NONE then
+        return false, 'guildhall is already dedicated (retire and re-create to change it)'
+    end
+    local prof = df.profession[tostring(prof_key or '')]
+    if prof == nil or prof == df.profession.NONE then return false, 'unknown craft guild' end
+    local allowed = false
+    for _, o in ipairs(guild_options()) do
+        if o.profession == prof then allowed = true break end
+    end
+    if not allowed then return false, 'no guild of that craft exists in this fort' end
+    loc.contents.profession = prof
+    return true, ''
+end
+
+-- id = LOCATION id (not a zone id). kind carries the action's payload:
+--   occupation-assign  kind='<OCCUPATION_TYPE>' or 'id:<occupationId>', unit = unit id (-1 vacates)
+--   deity              kind='hf:<histfigId>' | 'religion:<entityId>'
+--   guild              kind='<PROFESSION>'
+function location_action(location_id, action, kind, unit_id)
+    local site = current_site()
+    if not site then return false, 'current site unavailable' end
+    local loc = find_location(site, tonumber(location_id) or -1)
+    if not loc then return false, 'location not found' end
+    action = tostring(action or '')
+    kind = tostring(kind or '')
+    unit_id = tonumber(unit_id) or -1
+    if action == 'occupation-assign' then
+        local occ_id, type_key = -1, kind
+        local explicit = string.match(kind, '^id:(%d+)$')
+        if explicit then occ_id, type_key = tonumber(explicit), '' end
+        return location_occupation_assign(loc, location_kind(loc), occ_id, type_key, unit_id)
+    elseif action == 'deity' then
+        return location_set_deity(loc, kind)
+    elseif action == 'guild' then
+        return location_set_guild(loc, kind)
+    elseif action == 'room-add' or action == 'room-remove' then
+        -- GUARDED: see LOCATION_ALLOW_ROOM_WRITES. rental_roomst.world_x/y/z ("abs_room_x") has an
+        -- undetermined coordinate space; a room written at the wrong origin is a room the tavern
+        -- keeper can rent out but nobody can find.
+        if not LOCATION_ALLOW_ROOM_WRITES then
+            return false, 'rented-room writes remain disabled until rental-room coordinates are verified'
+        end
+        return false, 'rented-room writes not implemented'
     end
     return false, 'unknown location action'
 end
@@ -2051,6 +3108,178 @@ local function building_label(b)
     return pretty_enum_name(df.building_type[btype], 'Building')
 end
 
+-- Burial and memorial controls. These mutate the same object graph as DF's
+-- coffin panel without opening or driving the host's native viewscreen.
+local function vec_has_ptr(vec, ptr)
+    if not vec or not ptr then return false end
+    for _, v in ipairs(vec) do
+        if v == ptr then return true end
+    end
+    return false
+end
+
+local function get_built_coffin(id)
+    local b = df.building.find(tonumber(id) or -1)
+    if not b or not df.building_coffinst:is_instance(b) then
+        return nil, 'building is not a coffin'
+    end
+    local ok, built = pcall(function()
+        return b:getBuildStage() >= b:getMaxBuildStage()
+    end)
+    if not ok or not built then return nil, 'coffin is not built' end
+    return b, ''
+end
+
+local function tomb_for_coffin(coffin)
+    if not coffin then return nil end
+    for _, z in ipairs(coffin.relations or {}) do
+        if z and df.building_civzonest:is_instance(z) and z.type == df.civzone_type.Tomb then
+            return z
+        end
+    end
+    local other = df.global.world and df.global.world.buildings and df.global.world.buildings.other
+    for _, z in ipairs((other and other.ZONE_TOMB) or {}) do
+        if z and vec_has_ptr(z.contained_buildings, coffin) then return z end
+    end
+    return nil
+end
+
+local function link_coffin_tomb(coffin, tomb)
+    if not coffin or not tomb then return end
+    if not vec_has_ptr(tomb.contained_buildings, coffin) then
+        tomb.contained_buildings:insert('#', coffin)
+    end
+    if not vec_has_ptr(coffin.relations, tomb) then
+        coffin.relations:insert('#', tomb)
+    end
+end
+
+local function ensure_tomb_for_coffin(coffin)
+    local tomb = tomb_for_coffin(coffin)
+    if tomb then return tomb, '' end
+    local id, err = create_zone(coffin.x1, coffin.y1, coffin.x1, coffin.y1, coffin.z, 'tomb')
+    if not id or id < 0 then return nil, err or 'could not create tomb zone' end
+    tomb = df.building.find(id)
+    if not tomb or not df.building_civzonest:is_instance(tomb) or tomb.type ~= df.civzone_type.Tomb then
+        return nil, 'created zone was not a tomb'
+    end
+    link_coffin_tomb(coffin, tomb)
+    return tomb, ''
+end
+
+local function unit_display_name(unit)
+    if not unit then return '' end
+    local ok, name = pcall(dfhack.units.getReadableName, unit)
+    if ok and name and #name > 0 then return name end
+    ok, name = pcall(dfhack.units.getRaceName, unit)
+    if ok and name and #name > 0 then return name end
+    return 'Unit ' .. tostring(unit.id)
+end
+
+local function clear_tomb_owner(tomb)
+    if not tomb then return end
+    local old = df.unit.find(tomb.assigned_unit_id or -1)
+    if old and old.owned_buildings then
+        for i = #old.owned_buildings - 1, 0, -1 do
+            if old.owned_buildings[i] == tomb then old.owned_buildings:erase(i) end
+        end
+    end
+    tomb.assigned_unit_id = -1
+    tomb.owner_unit_cached_index = -1
+    tomb.retained_owner = -1
+end
+
+function burial_coffin_info(id)
+    local coffin, err = get_built_coffin(id)
+    if not coffin then return '{"ok":false,"error":' .. json_string(err) .. '}\n' end
+    local tomb = tomb_for_coffin(coffin)
+    local owner = tomb and df.unit.find(tomb.assigned_unit_id or -1) or nil
+    return '{"ok":true,"isCoffin":true,"built":true' ..
+        ',"id":' .. tostring(coffin.id) ..
+        ',"name":' .. json_string(building_label(coffin)) ..
+        ',"tombId":' .. tostring(tomb and tomb.id or -1) ..
+        ',"tombName":' .. json_string(tomb and building_label(tomb) or '') ..
+        ',"owner":{"id":' .. tostring(owner and owner.id or -1) ..
+        ',"name":' .. json_string(unit_display_name(owner)) .. '}' ..
+        ',"tomb":{"citizens":' .. json_bool(tomb and not tomb.zone_settings.tomb.flags.no_citizens) ..
+        ',"pets":' .. json_bool(tomb and not tomb.zone_settings.tomb.flags.no_pets) .. '}}\n'
+end
+
+function burial_coffin_action(id, action)
+    local coffin, err = get_built_coffin(id)
+    if not coffin then return false, err end
+    action = tostring(action or '')
+    local tomb = tomb_for_coffin(coffin)
+    if action == 'ensure-tomb' or action == 'any-citizen' or action == 'citizens-on' or
+            action == 'citizens-off' or action == 'pets-on' or action == 'pets-off' then
+        tomb, err = ensure_tomb_for_coffin(coffin)
+        if not tomb then return false, err end
+    else
+        return false, 'unknown coffin action'
+    end
+    if action == 'any-citizen' then
+        clear_tomb_owner(tomb)
+        tomb.zone_settings.tomb.flags.no_citizens = false
+        tomb.zone_settings.tomb.flags.no_pets = true
+    elseif action == 'citizens-on' then
+        tomb.zone_settings.tomb.flags.no_citizens = false
+    elseif action == 'citizens-off' then
+        tomb.zone_settings.tomb.flags.no_citizens = true
+    elseif action == 'pets-on' then
+        tomb.zone_settings.tomb.flags.no_pets = false
+    elseif action == 'pets-off' then
+        tomb.zone_settings.tomb.flags.no_pets = true
+    end
+    link_coffin_tomb(coffin, tomb)
+    return true, ''
+end
+
+local function has_memorial_slab_or_order(hfid)
+    local world = df.global.world
+    if not world then return false, '' end
+    for _, order in ipairs(world.manager_orders.all) do
+        if order and order.job_type == df.job_type.EngraveSlab and
+                order.specdata.hist_figure_id == hfid then
+            return true, 'memorial slab order already exists'
+        end
+    end
+    for _, slab in ipairs(world.items.other.SLAB) do
+        if slab and df.item_slabst:is_instance(slab) and
+                slab.engraving_type == df.slab_engraving_type.Memorial and slab.topic == hfid then
+            return true, 'memorial slab already engraved'
+        end
+    end
+    return false, ''
+end
+
+function queue_memorial_slab(unit_id)
+    local world = df.global.world
+    if not world then return false, 'world unavailable' end
+    local unit = df.unit.find(tonumber(unit_id) or -1)
+    if not unit then return false, 'unit not found' end
+    local alive = false
+    pcall(function() alive = dfhack.units.isAlive(unit) end)
+    if alive then return false, 'cannot memorialize a living unit' end
+    local own = false
+    pcall(function() own = dfhack.units.isOwnGroup(unit) end)
+    if not own then return false, 'unit is not from this fortress' end
+    local hfid = unit.hist_figure_id or -1
+    if hfid < 0 then return false, 'unit has no historical figure id' end
+    local exists, reason = has_memorial_slab_or_order(hfid)
+    if exists then return false, reason end
+
+    local order = df.manager_order:new()
+    order.id = world.manager_orders.manager_order_next_id
+    world.manager_orders.manager_order_next_id = world.manager_orders.manager_order_next_id + 1
+    order.job_type = df.job_type.EngraveSlab
+    order.specdata.hist_figure_id = hfid
+    order.amount_left = 1
+    order.amount_total = 1
+    order.frequency = df.workquota_frequency_type.OneTime
+    world.manager_orders.all:insert('#', order)
+    return true, 'memorial slab order queued'
+end
+
 -- Workshops/furnaces that can receive workshop-specific manager orders.
 function order_workshops()
     local ok, result = pcall(function()
@@ -2096,21 +3325,9 @@ function order_workshops()
     return '{"ok":false,"workshops":[],"error":' .. json_string(result) .. '}\n'
 end
 
--- DIAG (crash hunt): flush-guaranteed file tracer. Open/write/close per line so the
--- line is durably on disk BEFORE the next operation runs -> the last line in the file
--- is unambiguously the last thing that executed before a hard crash. REMOVE once fixed.
+-- Workshop diagnostics must never raise onto the render thread.
 local function wtrace(msg)
-    -- ALWAYS printerr (known to flush per-line in practice) so a trace exists even if file I/O
-    -- is unavailable in DFHack's sandbox. The whole file attempt is wrapped in pcall so it can
-    -- NEVER raise an error onto the render thread (a raised error here would itself crash).
-    dfhack.printerr('dfcap-wshop: ' .. tostring(msg))
-    pcall(function()
-        local f = io.open('C:/DaMain/Games/Steam/steamapps/common/Dwarf Fortress/dfcap-wshop-trace.log', 'a')
-        if f and type(f) == 'userdata' then
-            f:write(tostring(msg) .. '\n')
-            f:close()
-        end
-    end)
+    pcall(dfhack.printerr, 'dfcap-wshop: ' .. tostring(msg))
 end
 
 -- Strip DFHack's "unknown material" placeholder so labels match DF's native UI, which simply omits
@@ -2139,10 +3356,10 @@ end
 local function order_material(o)
     if not o.mat_type or o.mat_type < 0 then return '' end
     wtrace('order_material: decode mat_type=' .. tostring(o.mat_type) ..
-        ' mat_index=' .. tostring(o.mat_index))   -- DIAG (crash hunt): remove once localized
+        ' mat_index=' .. tostring(o.mat_index))
     local ok, mi = pcall(dfhack.matinfo.decode, o.mat_type, o.mat_index)
     if ok and mi then
-        wtrace('order_material: toString')   -- DIAG
+        wtrace('order_material: toString')
         local ok2, tok = pcall(function() return mi:toString() end)
         if ok2 and tok then return tok end
     end
@@ -2193,6 +3410,18 @@ local function condition_adjective_label(c)
     return table.concat(words, ' ')
 end
 
+local function condition_adjective_key(c)
+    local keys = {}
+    local ok_empty, empty = pcall(function() return c.flags1.empty end)
+    if ok_empty and empty then table.insert(keys, 'empty') end
+    for key, spec in pairs(CONDITION_ADJECTIVES) do
+        local ok, on = pcall(function() return c[spec[1]][spec[2]] end)
+        if ok and on then table.insert(keys, key) end
+    end
+    table.sort(keys)
+    return table.concat(keys, ',')
+end
+
 local function item_condition_label(c)
     local target = item_type_label(c.item_type)
     if c.mat_type and c.mat_type >= 0 then
@@ -2226,7 +3455,14 @@ local function conditions_json(o)
             if c then
                 local ok, label = pcall(item_condition_label, c)
                 table.insert(items, '{"idx":' .. i ..
-                    ',"label":' .. json_string(ok and label or 'condition') .. '}')
+                    ',"label":' .. json_string(ok and label or 'condition') ..
+                    ',"item":' .. json_string(df.item_type[c.item_type] or '') ..
+                    ',"compare":' .. json_string(df.logic_condition_type[c.compare_type] or '') ..
+                    ',"value":' .. tostring(c.compare_val or 0) ..
+                    ',"adjective":' .. json_string(condition_adjective_key(c)) ..
+                    ',"material":' .. json_string(
+                        (c.mat_type and c.mat_type >= 0) and
+                        (tostring(c.mat_type) .. ':' .. tostring(c.mat_index)) or '') .. '}')
             end
         end
     end
@@ -2341,12 +3577,12 @@ local function worker_label(job)
 end
 
 local function shop_tasks(b)
-    wtrace('shop_tasks: enter type=' .. tostring(b:getType()) .. ' sub=' .. tostring(b:getSubtype()) .. ' custom=' .. tostring(b:getCustomType()))   -- DIAG
+    wtrace('shop_tasks: enter type=' .. tostring(b:getType()) .. ' sub=' .. tostring(b:getSubtype()) .. ' custom=' .. tostring(b:getCustomType()))
     local tasks = {}
     local ok, jobs = pcall(function()
         return require('dfhack.workshops').getJobs(b:getType(), b:getSubtype(), b:getCustomType())
     end)
-    wtrace('shop_tasks: getJobs returned ok=' .. tostring(ok))   -- DIAG
+    wtrace('shop_tasks: getJobs returned ok=' .. tostring(ok))
     if not ok or not jobs then return tasks end
     for key, def in pairs(jobs) do
         if type(def) == 'table' then
@@ -2485,8 +3721,7 @@ end
 
 -- Run one workshop_info section under pcall so a single failing section degrades to a safe
 -- fallback (empty list) instead of taking down the WHOLE panel ("Workshop data unavailable").
--- Logs the exact section + error so the root cause is still pinpointed. The CoreSuspender fix
--- makes raising/catching a Lua error here safe (full stack -> no traceback overflow).
+-- Logs the section and error while returning a safe fallback.
 local function ws_section(label, fn, fallback)
     wtrace('workshop_info: ' .. label)
     local ok, res = pcall(fn)
@@ -2501,8 +3736,48 @@ local function ws_safe_str(fn, fallback)
     return fallback
 end
 
+local function profile_blocked_labors_json(profile)
+    local out = {}
+    pcall(function()
+        local blocked = profile.blocked_labors
+        if not blocked then return end
+        for i = 0, #blocked - 1 do
+            if blocked[i] then
+                local name = df.unit_labor[i] or tostring(i)
+                out[#out + 1] = '{"id":' .. i .. ',"name":' ..
+                    json_string(tostring(name)) .. '}'
+            end
+        end
+    end)
+    return '[' .. table.concat(out, ',') .. ']'
+end
+
+local function profile_all_labors_json(profile)
+    local out = {}
+    pcall(function()
+        local blocked = profile.blocked_labors
+        if not blocked then return end
+        for i = 0, #blocked - 1 do
+            local name = df.unit_labor[i]
+            if name then
+                out[#out + 1] = '{"id":' .. i .. ',"name":' ..
+                    json_string(tostring(name)) .. '}'
+            end
+        end
+    end)
+    return '[' .. table.concat(out, ',') .. ']'
+end
+
+local function profile_general_orders_banned(profile)
+    local value = false
+    pcall(function()
+        value = profile.flags and profile.flags.block_general_orders or false
+    end)
+    return value
+end
+
 function workshop_info(id)
-    wtrace('workshop_info: ENTER id=' .. tostring(id))   -- DIAG: logged BEFORE get_shop (fishery hunt)
+    wtrace('workshop_info: enter id=' .. tostring(id))
     local ok_gs, b = pcall(get_shop, id)
     if not ok_gs then
         wtrace('workshop_info: get_shop THREW id=' .. tostring(id) .. ': ' .. tostring(b))
@@ -2516,7 +3791,7 @@ function workshop_info(id)
             ' isFurnace=' .. tostring(okr and raw and df.building_furnacest:is_instance(raw)))
         return '{"ok":false,"error":"workshop not found"}\n'
     end
-    wtrace('workshop_info: id=' .. tostring(id))   -- DIAG (crash hunt)
+    wtrace('workshop_info: id=' .. tostring(id))
     local profile = b.profile or {}
     local tasks    = ws_section('shop_tasks',        function() return shop_tasks(b) end, {})
     local j_jobs   = ws_section('shop_jobs_json',    function() return shop_jobs_json(b) end, '[]')
@@ -2524,7 +3799,7 @@ function workshop_info(id)
     local j_orders = ws_section('shop_orders_json',  function() return shop_orders_json(b.id) end, '[]')
     local j_items  = ws_section('shop_items_json',   function() return shop_items_json(b) end, '[]')
     local j_workers= ws_section('shop_workers_json', function() return shop_workers_json(b) end, '[]')
-    wtrace('workshop_info: assemble')   -- DIAG
+    wtrace('workshop_info: assemble')
     local parts = {
         '"ok":true',
         '"id":' .. tostring(b.id),
@@ -2541,7 +3816,10 @@ function workshop_info(id)
         '"profile":{"maxGeneralOrders":' .. tostring(profile.max_general_orders or 0) ..
             ',"permittedCount":' .. tostring((profile.permitted_workers and #profile.permitted_workers) or 0) ..
             ',"minLevel":' .. tostring(profile.min_level or -1) ..
-            ',"maxLevel":' .. tostring(profile.max_level or -1) .. '}',
+            ',"maxLevel":' .. tostring(profile.max_level or -1) ..
+            ',"generalOrdersBanned":' .. json_bool(profile_general_orders_banned(profile)) ..
+            ',"blockedLabors":' .. profile_blocked_labors_json(profile) ..
+            ',"allLabors":' .. profile_all_labors_json(profile) .. '}',
         '"workers":' .. j_workers,
         '"canAddTasks":' .. json_bool(#tasks > 0),
     }
@@ -2616,8 +3894,8 @@ local function create_shop_order_from_task(b, def, amount, frequency)
         workshop_id = b.id,
     }
     if not df.workquota_frequency_type[order_def.frequency] then order_def.frequency = 'OneTime' end
-    -- job is the STRING name (workorder's ensure_df_id accepts string or int; string matches the
-    -- proven Manager create_order). material_category restored so the order shows its material.
+    -- job is the string name accepted by workorder's ensure_df_id. Restore material_category so
+    -- the order shows its material.
     local job_name = (type(job_type) == 'string') and job_type or df.job_type[job_type]
     if job_name == 'CustomReaction' then
         if not job_fields.reaction_name or #job_fields.reaction_name == 0 then
@@ -2635,14 +3913,14 @@ local function create_shop_order_from_task(b, def, amount, frequency)
     local ok_req, wo = pcall(reqscript, 'workorder')
     if not ok_req or not wo then return false, 'workorder module unavailable' end
     wtrace('create_shop_order: job=' .. tostring(order_def.job) ..
-        ' mat_cat=' .. tostring(order_def.material_category and 'set' or 'nil'))   -- DIAG (crash hunt)
+        ' mat_cat=' .. tostring(order_def.material_category and 'set' or 'nil'))
     local ok, err = pcall(function()
         local orders = wo.preprocess_orders({order_def})
-        wtrace('create_shop_order: preprocess ok, fillin_defaults')   -- DIAG
+        wtrace('create_shop_order: preprocess ok, fillin_defaults')
         wo.fillin_defaults(orders)
-        wtrace('create_shop_order: fillin ok, create_orders')   -- DIAG
+        wtrace('create_shop_order: fillin ok, create_orders')
         wo.create_orders(orders, true)
-        wtrace('create_shop_order: create_orders ok')   -- DIAG
+        wtrace('create_shop_order: create_orders ok')
     end)
     if not ok then return false, tostring(err) end
     return true, 'shop work order queued'
@@ -2671,25 +3949,6 @@ local function build_job_item(item_def)
     if type(item_def.flags4) == 'number' then ji.flags4 = item_def.flags4 end
     if type(item_def.flags5) == 'number' then ji.flags5 = item_def.flags5 end
     return ji
-end
-
--- DIAG (material hunt): dump every job of a given type with the exact fields DF's namer reads,
--- so a natively-queued bed (shows "Make bed") can be compared field-by-field with ours
--- (shows "Make unknown material bed"). REMOVE once the field difference is found + fixed.
-local function dump_jobs_of_type(jt)
-    local link = df.global.world.jobs.list.next
-    while link do
-        local j = link.item
-        if j and j.job_type == jt then
-            local okn, nm = pcall(dfhack.job.getName, j)
-            wtrace(string.format('DUMP-JOB id=%s mat_type=%s mat_index=%s item_type=%s item_subtype=%s specflag=%s matcat=%s njobitems=%s name=%s',
-                tostring(j.id), tostring(j.mat_type), tostring(j.mat_index),
-                tostring(j.item_type), tostring(j.item_subtype),
-                tostring(j.specflag.whole), tostring(j.material_category.whole),
-                tostring(#j.job_items.elements), tostring(okn and nm or 'ERR')))
-        end
-        link = link.next
-    end
 end
 
 -- Add a SINGLE direct job to the workshop building (exactly what DF's "Add new task" does):
@@ -2722,16 +3981,16 @@ local function add_workshop_task(b, def)
     job.general_refs:insert('#', { new = df.general_ref_building_holderst, building_id = b.id })
     b.jobs:insert('#', job)
     wtrace('add_task: job_type=' .. tostring(df.job_type[job_type]) .. ' job.mat_type=' .. tostring(job.mat_type) ..
-        ' #def.items=' .. tostring(def.items and #def.items or 0))   -- DIAG (material hunt)
+        ' #def.items=' .. tostring(def.items and #def.items or 0))
     for i, item_def in ipairs(def.items or {}) do
         wtrace('add_task: item[' .. i .. '] item_type=' .. tostring(item_def.item_type) ..
             ' mat_type=' .. tostring(item_def.mat_type) .. ' vector_id=' .. tostring(item_def.vector_id) ..
-            ' quantity=' .. tostring(item_def.quantity))   -- DIAG
+            ' quantity=' .. tostring(item_def.quantity))
         job.job_items.elements:insert('#', build_job_item(item_def))
     end
-    wtrace('add_task: built #job_items=' .. tostring(#job.job_items.elements))   -- DIAG
+    wtrace('add_task: built #job_items=' .. tostring(#job.job_items.elements))
     local ok_nm, nm = pcall(dfhack.job.getName, job)
-    wtrace('add_task: getName=' .. tostring(ok_nm and nm or 'ERR'))   -- DIAG
+    wtrace('add_task: getName=' .. tostring(ok_nm and nm or 'ERR'))
 
     local ok, err = pcall(dfhack.job.linkIntoWorld, job, true)
     if not ok then
@@ -2742,7 +4001,6 @@ local function add_workshop_task(b, def)
         return false, 'could not link job: ' .. tostring(err)
     end
     pcall(dfhack.job.checkBuildingsNow)
-    pcall(dump_jobs_of_type, job_type)   -- DIAG: dump ALL ConstructBed jobs (native + ours) to compare
     return true, 'task added'
 end
 
@@ -2786,6 +4044,49 @@ function workshop_workers_clear(id)
     if not b.profile then return false, 'workshop has no profile' end
     b.profile.permitted_workers:resize(0)
     return true, ''
+end
+
+function workshop_profile_set(id, field, value)
+    local b = get_shop(id)
+    if not b then return false, 'workshop not found' end
+    local profile = b.profile
+    if not profile then return false, 'workshop has no profile' end
+    field = tostring(field or '')
+    value = tonumber(value)
+    if value == nil then return false, 'missing/invalid value' end
+    local function clampi(v, lo, hi)
+        v = math.floor(v)
+        if v < lo then return lo elseif v > hi then return hi end
+        return v
+    end
+    if field == 'minLevel' then
+        local v = clampi(value, 0, 3000)
+        profile.min_level = v
+        if (profile.max_level or 3000) < v then profile.max_level = v end
+        return true, ''
+    elseif field == 'maxLevel' then
+        local v = clampi(value, 0, 3000)
+        profile.max_level = v
+        if (profile.min_level or 0) > v then profile.min_level = v end
+        return true, ''
+    elseif field == 'maxGeneralOrders' then
+        profile.max_general_orders = clampi(value, 0, 10)
+        return true, ''
+    elseif field == 'blockLabor' or field == 'unblockLabor' then
+        local idx = math.floor(value)
+        local n = 0
+        local ok = pcall(function() n = #profile.blocked_labors end)
+        if not ok or idx < 0 or idx >= n then return false, 'labor index out of range' end
+        profile.blocked_labors[idx] = (field == 'blockLabor')
+        return true, ''
+    elseif field == 'banGeneralOrders' then
+        local ok = pcall(function()
+            profile.flags.block_general_orders = (value ~= 0)
+        end)
+        if not ok then return false, 'cannot set general-order ban' end
+        return true, ''
+    end
+    return false, 'unknown profile field: ' .. field
 end
 
 local function find_order(id)
@@ -2832,44 +4133,97 @@ function create_order(key, amount, frequency, workshop_id)
     end
 
     local ok_req, wo = pcall(reqscript, 'workorder')
-    if not ok_req or not wo then return false, 'workorder module unavailable' end
+    if not ok_req or not wo then return false, 'workorder module unavailable', {} end
+    local manager_orders = df.global.world.manager_orders.all
+    local first_new = #manager_orders
     local ok, err = pcall(function()
         local orders = wo.preprocess_orders({def})
         wo.fillin_defaults(orders)
         wo.create_orders(orders, true)
     end)
-    if not ok then return false, tostring(err) end
-    return true, 'order queued'
+    if not ok then return false, tostring(err), {} end
+    local ids = {}
+    for i = first_new, #manager_orders - 1 do
+        local order = manager_orders[i]
+        if order then ids[#ids + 1] = order.id end
+    end
+    return true, 'order queued', ids
 end
 
--- Add a stock condition: "amount of [adjective] [material] <item_name> <compare> <value>".
--- material = "matType:matIndex" (optional), adjective = a CONDITION_ADJECTIVES key (optional).
-function add_item_condition(order_id, compare, value, item_name, material, adjective)
-    local o = find_order(order_id)
-    if not o then return false, 'order not found' end
-    local ctype = df.logic_condition_type[tostring(compare or 'AtMost')]
-    if ctype == nil then return false, 'bad comparison' end
-    value = clamp(tonumber(value) or 0, 0, 999999)
+function missions_rescue_stuck()
+    local ok, mod = pcall(reqscript, 'fix/stuck-squad')
+    if not ok or not mod or type(mod.scan_fort_armies) ~= 'function' then
+        return -1, 'DFHack fix/stuck-squad is not available in this DFHack build'
+    end
+    local scanned, stuck, returning = pcall(mod.scan_fort_armies)
+    if not scanned then return -1, tostring(stuck) end
+    local stuck_n = stuck and #stuck or 0
+    if stuck_n == 0 then return -1, 'No stranded squads to rescue.' end
+    if not returning then
+        return -1, 'No army or messenger is returning to carry stranded squads home.'
+    end
+    local ran, run_err = pcall(dfhack.run_script, 'fix/stuck-squad')
+    if not ran then return -1, tostring(run_err) end
+    local left = select(1, mod.scan_fort_armies())
+    local remaining = left and #left or 0
+    return stuck_n - remaining,
+        ('fix/stuck-squad: %d stranded squad(s) found, %d rescued.'):format(
+            stuck_n, stuck_n - remaining)
+end
+
+local function resolve_condition_adjectives(adjective)
+    local specs = {}
+    for key in tostring(adjective or ''):gmatch('[^,]+') do
+        local spec = key == 'empty' and {'flags1', 'empty'} or CONDITION_ADJECTIVES[key]
+        if not spec then return nil, 'bad adjective: ' .. tostring(key) end
+        specs[#specs + 1] = spec
+    end
+    return specs
+end
+
+local function validate_item_condition_input(compare, value, item_name, material, adjective)
+    local ctype = df.logic_condition_type[tostring(compare or '')]
+    if ctype == nil or ctype < 0 then return nil, 'bad comparison: ' .. tostring(compare) end
+    local v = tonumber(value)
+    if v == nil then return nil, 'bad value: ' .. tostring(value) end
+    v = clamp(math.floor(v), 0, 999999)
     local it = df.item_type.NONE
     if item_name and item_name ~= '' then
         local resolved = df.item_type[tostring(item_name)]
-        if resolved == nil then return false, 'bad item type: ' .. tostring(item_name) end
+        if resolved == nil then return nil, 'bad item type: ' .. tostring(item_name) end
         it = resolved
     end
     local mt, mi = -1, -1
     if material and material ~= '' then
         local a, b = tostring(material):match('^(-?%d+):(-?%d+)$')
-        if a then mt, mi = tonumber(a), tonumber(b) end
+        if not a then return nil, 'bad material: ' .. tostring(material) end
+        mt, mi = tonumber(a), tonumber(b)
+        local ok, info = pcall(dfhack.matinfo.decode, mt, mi)
+        if not ok or not info then return nil, 'bad material: ' .. tostring(material) end
     end
-    local adj_spec = adjective and adjective ~= '' and CONDITION_ADJECTIVES[tostring(adjective)] or nil
+    local adjectives, err = resolve_condition_adjectives(adjective)
+    if not adjectives then return nil, err end
+    return {
+        compare = ctype, value = v, item = it, mat_type = mt, mat_index = mi,
+        adjectives = adjectives,
+    }
+end
+
+-- Add a validated stock condition: amount of [properties] [material] item compared to value.
+function add_item_condition(order_id, compare, value, item_name, material, adjective)
+    local o = find_order(order_id)
+    if not o then return false, 'order not found' end
+    local spec, err = validate_item_condition_input(
+        compare, value, item_name, material, adjective)
+    if not spec then return false, err end
     local c = df.manager_order_condition_item:new()
-    local ok, err = pcall(function()
-        c.compare_type = ctype
-        c.compare_val = value
-        c.item_type = it
+    local ok, write_err = pcall(function()
+        c.compare_type = spec.compare
+        c.compare_val = spec.value
+        c.item_type = spec.item
         c.item_subtype = -1
-        c.mat_type = mt
-        c.mat_index = mi
+        c.mat_type = spec.mat_type
+        c.mat_index = spec.mat_index
         c.min_dimension = -1
         c.reaction_id = -1
         -- CRITICAL: these have NO init-value in df-structures, so :new() leaves them at 0 -- but DF's
@@ -2878,11 +4232,40 @@ function add_item_condition(order_id, compare, value, item_name, material, adjec
         c.metal_ore = -1
         c.has_tool_use = -1   -- df.tool_uses.NONE
         c.dye_color = -1
-        if adj_spec then c[adj_spec[1]][adj_spec[2]] = true end
+        for _, adj in ipairs(spec.adjectives) do c[adj[1]][adj[2]] = true end
         o.item_conditions:insert('#', c)
     end)
-    if not ok then pcall(function() c:delete() end); return false, tostring(err) end
+    if not ok then pcall(function() c:delete() end); return false, tostring(write_err) end
     return true, 'condition added'
+end
+
+function edit_item_condition(order_id, idx, compare, value, item_name, material, adjective)
+    local o = find_order(order_id)
+    if not o then return false, 'order not found' end
+    idx = tonumber(idx)
+    if not idx or idx < 0 or idx >= #o.item_conditions then
+        return false, 'bad condition index'
+    end
+    local spec, err = validate_item_condition_input(
+        compare, value, item_name, material, adjective)
+    if not spec then return false, err end
+    local c = o.item_conditions[idx]
+    if not c then return false, 'bad condition index' end
+    local ok, write_err = pcall(function()
+        c.compare_type = spec.compare
+        c.compare_val = spec.value
+        if c.item_type ~= spec.item then c.item_subtype = -1 end
+        c.item_type = spec.item
+        c.mat_type = spec.mat_type
+        c.mat_index = spec.mat_index
+        c.flags1.empty = false
+        for _, owned in pairs(CONDITION_ADJECTIVES) do
+            c[owned[1]][owned[2]] = false
+        end
+        for _, adj in ipairs(spec.adjectives) do c[adj[1]][adj[2]] = true end
+    end)
+    if not ok then return false, tostring(write_err) end
+    return true, 'condition updated'
 end
 
 -- Materials available in the fort for a given condition item type (for the condition "Mat" picker).
@@ -3109,12 +4492,59 @@ local function safe_json(fn)
     end
 end
 
+-- ---------------------------------------------------------------------------
+-- Browser DFHack command console
+-- ---------------------------------------------------------------------------
+-- SECURITY: the BLOCKLIST LIVES IN C++ (src/console_policy.h), enforced twice on the way in --
+-- once in the POST /console/run handler and again in the console_run_via_lua bridge fn, both
+-- calling the single command_denied table, host included. Nothing reaches console_run() below
+-- that has not already cleared that gate. Do NOT add a second, divergent deny table here.
+--
+-- The catalog is helpdb's own (the data DFHack's native autocomplete ranks against). It is
+-- static for a play session, so the client fetches it ONCE and filters offline -- only
+-- EXECUTING a command touches the core lock.
+
+-- Cap what a single command may hand back; anything huge is truncated with an explicit marker.
+local CONSOLE_OUTPUT_CAP = 64 * 1024
+
+function console_catalog()
+    local helpdb = require('helpdb')
+    local out = {}
+    for _, name in ipairs(helpdb.get_commands()) do
+        local short = ''
+        local ok, s = pcall(helpdb.get_entry_short_help, name)
+        if ok and type(s) == 'string' then short = s end
+        out[#out + 1] = '{"name":' .. json_string(name) .. ',"short":' .. json_string(short) .. '}'
+    end
+    return '{"ok":true,"commands":[' .. table.concat(out, ',') .. ']}\n'
+end
+
+-- Run one already-gate-cleared command line; returns (status:int, text:string). status 0 = CR_OK.
+-- dfhack.run_command_silent takes its own CoreSuspender, so a command
+-- runs with DF's core lock held for its whole duration and cannot be interrupted -- containment
+-- is prevention (the C++ blocklist), not recovery, and the panel says so before Run.
+function console_run(cmd)
+    cmd = tostring(cmd or '')
+    if cmd:match('^%s*$') then return -1, 'empty command' end
+    local ok, output, status = pcall(dfhack.run_command_silent, cmd)
+    if not ok then
+        return -1, tostring(output)   -- `output` is the pcall error here
+    end
+    output = tostring(output or '')
+    if #output > CONSOLE_OUTPUT_CAP then
+        output = output:sub(1, CONSOLE_OUTPUT_CAP) ..
+            '\n... (output truncated at ' .. CONSOLE_OUTPUT_CAP .. ' bytes)'
+    end
+    return tonumber(status) or 0, output
+end
+
 order_catalog = safe_json(order_catalog)
 condition_targets = safe_json(condition_targets)
 order_workshops = safe_json(order_workshops)
 list_orders = safe_json(list_orders)
 order_presets = safe_json(order_presets)
 workshop_info = safe_json(workshop_info)
+console_catalog = safe_json(console_catalog)
 
 return _ENV
 

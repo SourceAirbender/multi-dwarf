@@ -1,5 +1,5 @@
 ﻿// dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -22,12 +22,15 @@
 
 #include "diagnostics.h"
 #include "image_encoder.h"
+#include "render_thread_wait.h"
+#include "save_barrier.h"
 #include "Core.h"
 #include "DataDefs.h"
 #include "PluginManager.h"
 #include "VersionInfo.h"
 #include "modules/DFSDL.h"
 #include "modules/Gui.h"
+#include "modules/Screen.h"
 
 #include "df/buildreq.h"
 #include "df/enabler.h"
@@ -38,6 +41,7 @@
 #include "df/graphic_viewportst.h"
 #include "df/main_interface.h"
 #include "df/renderer.h"
+#include "df/renderer_2d.h"
 #include "df/viewscreen.h"
 #include "df/viewscreen_dwarfmodest.h"
 #include "df/world.h"
@@ -131,17 +135,19 @@ constexpr const char* HOST_INTERACTION_SKIP =
     "host interaction active; independent frame skipped";
 
 #ifdef _WIN32
-constexpr int32_t GRID_TEXPOS = 128903;
-constexpr int32_t CURSOR_TEXPOS = 128909;
-constexpr int32_t RECT_TL = 128777;
-constexpr int32_t RECT_T = 128778;
-constexpr int32_t RECT_TR = 128779;
-constexpr int32_t RECT_L = 128783;
-constexpr int32_t RECT_C = 128784;
-constexpr int32_t RECT_R = 128785;
-constexpr int32_t RECT_BL = 128789;
-constexpr int32_t RECT_B = 128790;
-constexpr int32_t RECT_BR = 128791;
+struct CursorTiles {
+    int32_t grid = 0;
+    int32_t cursor = 0;
+    int32_t rect_tl = 0;
+    int32_t rect_t = 0;
+    int32_t rect_tr = 0;
+    int32_t rect_l = 0;
+    int32_t rect_c = 0;
+    int32_t rect_r = 0;
+    int32_t rect_bl = 0;
+    int32_t rect_b = 0;
+    int32_t rect_br = 0;
+};
 #endif
 
 #ifdef _WIN32
@@ -385,14 +391,11 @@ bool resolve_render_map(std::string* err = nullptr) {
         return false;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(exe);
-    // DF 53.15 (Steam) native map-render RVAs. Re-derived 2026-06-27 after DF updated
-    // 53.14 -> 53.15 (the engine moved this machine code, which silently broke per-player
-    // pan/zoom). The prologue signatures below are byte-identical across the two builds;
-    // only the addresses moved. Old 53.14 values kept in comments for reference.
-    const uintptr_t CLEAR_RVA = 0x8bcb60; // 53.14 was 0x8ba0f0
-    const uintptr_t SETUP_RVA = 0x801630; // 53.14 was 0x7febc0
-    const uintptr_t FILL_RVA = 0xe949e0;  // 53.14 was 0xe915c0
-    const uintptr_t BLIT_RVA = 0xaeead0;  // 53.14 was 0xaec020
+    // Steam DF 53.15 native map-render RVAs. Prologue checks below fail closed on binary mismatch.
+    const uintptr_t CLEAR_RVA = 0x8bcb60;
+    const uintptr_t SETUP_RVA = 0x801630;
+    const uintptr_t FILL_RVA = 0xe949e0;
+    const uintptr_t BLIT_RVA = 0xaeead0;
 
     struct Probe {
         uintptr_t rva;
@@ -691,7 +694,26 @@ public:
         live_host_zoom_ = gps_->viewport_zoom_factor > 0 ? gps_->viewport_zoom_factor : 192;
         int ref_zoom = g_ref_zoom_factor.load() > 0 ? g_ref_zoom_factor.load() : live_host_zoom_;
         int percent = zoom_percent_for_camera(camera);
-        target_zoom_ = std::max(16, std::min(2048, (ref_zoom * 100 + percent / 2) / percent));
+        const int raw_target_zoom =
+            std::max(16, std::min(2048, (ref_zoom * 100 + percent / 2) / percent));
+        // renderer_2d floors tile origins and tile widths independently:
+        //   origin + floor(zoom * tile / 4), width = floor(zoom / 4)
+        // A zoom factor that is not divisible by four therefore leaves periodic
+        // one-pixel gaps between tiles. They appear as a heavy black grid after
+        // the browser scales the captured frame. Quantizing the private capture
+        // scale keeps every tile boundary contiguous without touching host zoom.
+        target_zoom_ = std::max(16, std::min(2048, ((raw_target_zoom + 2) / 4) * 4));
+        {
+            static std::atomic<int> s_last_raw_target{-1};
+            static std::atomic<int> s_last_quantized_target{-1};
+            const int previous_raw = s_last_raw_target.exchange(raw_target_zoom);
+            const int previous_quantized = s_last_quantized_target.exchange(target_zoom_);
+            if (previous_raw != raw_target_zoom || previous_quantized != target_zoom_) {
+                diagnostics_log("DIAG zoom: percent=" + std::to_string(percent) +
+                                " raw_target=" + std::to_string(raw_target_zoom) +
+                                " seam_safe_target=" + std::to_string(target_zoom_));
+            }
+        }
         effective_zoom_dims(camera, main_vp->dim_x, main_vp->dim_y, target_dim_x_, target_dim_y_);
 
         if (target_dim_x_ == main_vp->dim_x && target_dim_y_ == main_vp->dim_y &&
@@ -801,20 +823,43 @@ private:
 #endif
 
 #ifdef _WIN32
-int32_t rect_9slice(int x, int y, int x0, int x1, int y0, int y1) {
+bool resolve_cursor_tiles(CursorTiles& tiles) {
+    auto find = [](int x, int y, int32_t& tile) {
+        int resolved = 0;
+        if (!DFHack::Screen::findGraphicsTile("CURSORS", x, y, &resolved) || resolved <= 0)
+            return false;
+        tile = resolved;
+        return true;
+    };
+
+    return find(0, 22, tiles.grid) &&
+        find(0, 23, tiles.cursor) &&
+        find(0, 1, tiles.rect_tl) &&
+        find(1, 1, tiles.rect_t) &&
+        find(2, 1, tiles.rect_tr) &&
+        find(0, 2, tiles.rect_l) &&
+        find(1, 2, tiles.rect_c) &&
+        find(2, 2, tiles.rect_r) &&
+        find(0, 3, tiles.rect_bl) &&
+        find(1, 3, tiles.rect_b) &&
+        find(2, 3, tiles.rect_br);
+}
+
+int32_t rect_9slice(const CursorTiles& tiles, int x, int y,
+                    int x0, int x1, int y0, int y1) {
     bool left = x == x0;
     bool right = x == x1;
     bool top = y == y0;
     bool bottom = y == y1;
-    if (top && left) return RECT_TL;
-    if (top && right) return RECT_TR;
-    if (bottom && left) return RECT_BL;
-    if (bottom && right) return RECT_BR;
-    if (top) return RECT_T;
-    if (bottom) return RECT_B;
-    if (left) return RECT_L;
-    if (right) return RECT_R;
-    return RECT_C;
+    if (top && left) return tiles.rect_tl;
+    if (top && right) return tiles.rect_tr;
+    if (bottom && left) return tiles.rect_bl;
+    if (bottom && right) return tiles.rect_br;
+    if (top) return tiles.rect_t;
+    if (bottom) return tiles.rect_b;
+    if (left) return tiles.rect_l;
+    if (right) return tiles.rect_r;
+    return tiles.rect_c;
 }
 
 bool seh_copy_ints(int32_t* dst, const int32_t* src, int n) {
@@ -836,9 +881,33 @@ bool seh_fill_ints(int32_t* dst, int n, int32_t val) {
     }
 }
 
+bool read_capture_geometry_seh(df::renderer* renderer, df::graphic_viewportst* vp,
+                               CaptureGeometry& geometry) {
+    bool ok = false;
+    __try {
+        auto renderer_2d = DFHack::virtual_cast<df::renderer_2d>(renderer);
+        if (renderer_2d && vp && renderer_2d->viewport_zoom_factor > 0 &&
+                vp->dim_x > 0 && vp->dim_y > 0) {
+            geometry.origin_x = renderer_2d->origin_x;
+            geometry.origin_y = renderer_2d->origin_y;
+            geometry.zoom_factor = renderer_2d->viewport_zoom_factor;
+            geometry.viewport_width = vp->dim_x;
+            geometry.viewport_height = vp->dim_y;
+            geometry.valid = true;
+            ok = true;
+        }
+    } __except(dfcapture_seh_filter(GetExceptionInformation())) {
+        ok = false;
+    }
+    return ok;
+}
+
 bool draw_designation_grid_seh(df::graphic_viewportst* vp, const Camera& camera) {
     bool ok = false;
     __try {
+        CursorTiles tiles;
+        if (!resolve_cursor_tiles(tiles))
+            return false;
         int32_t* iface = vp ? vp->screentexpos_interface : nullptr;
         int dimx = vp ? vp->dim_x : 0;
         int dimy = vp ? vp->dim_y : 0;
@@ -847,9 +916,14 @@ bool draw_designation_grid_seh(df::graphic_viewportst* vp, const Camera& camera)
             int y0 = std::max(0, vp->clipy[0]);
             int x1 = std::min(dimx - 1, vp->clipx[1]);
             int y1 = std::min(dimy - 1, vp->clipy[1]);
+            // The VIEWPORT_GRID sprite is transparent except for DF's gold grid marks. When it is
+            // injected after the recovered native render, update_full_viewport() can composite
+            // those transparent edges as opaque black at non-host zoom factors. Clear this private
+            // interface layer and let the browser repeat the exact native sprite with normal alpha;
+            // cursor and rectangle sprites below remain native DF graphics.
             for (int x = x0; x <= x1; ++x)
                 for (int y = y0; y <= y1; ++y)
-                    iface[x * dimy + y] = GRID_TEXPOS;
+                    iface[x * dimy + y] = 0;
 
             auto to_idx = [](int p, int dim, int frame) {
                 if (frame <= 0 || dim <= 0) return 0;
@@ -874,7 +948,8 @@ bool draw_designation_grid_seh(df::graphic_viewportst* vp, const Camera& camera)
                     for (int x = rx0; x <= rx1; ++x)
                         for (int y = ry0; y <= ry1; ++y)
                             if (in_clip(x, y))
-                                iface[x * dimy + y] = rect_9slice(x, y, rx0, rx1, ry0, ry1);
+                                iface[x * dimy + y] =
+                                    rect_9slice(tiles, x, y, rx0, rx1, ry0, ry1);
                 } else if (camera.drag_active) {
                     int ax = to_idx(camera.drag_px, dimx, camera.ui_frame_w);
                     int ay = to_idx(camera.drag_py, dimy, camera.ui_frame_h);
@@ -887,12 +962,13 @@ bool draw_designation_grid_seh(df::graphic_viewportst* vp, const Camera& camera)
                     for (int x = rx0; x <= rx1; ++x)
                         for (int y = ry0; y <= ry1; ++y)
                             if (in_clip(x, y))
-                                iface[x * dimy + y] = rect_9slice(x, y, rx0, rx1, ry0, ry1);
+                                iface[x * dimy + y] =
+                                    rect_9slice(tiles, x, y, rx0, rx1, ry0, ry1);
                 } else if (camera.hover_px >= 0 && camera.hover_py >= 0) {
                     int cx = to_idx(camera.hover_px, dimx, camera.ui_frame_w);
                     int cy = to_idx(camera.hover_py, dimy, camera.ui_frame_h);
                     if (in_clip(cx, cy))
-                        iface[cx * dimy + cy] = CURSOR_TEXPOS;
+                        iface[cx * dimy + cy] = tiles.cursor;
                 }
             }
         }
@@ -1044,6 +1120,11 @@ bool run_read_host_camera(Camera& camera, std::string* err) {
     auto future = request->done.get_future();
 
     DFHack::runOnRenderThread([request]() {
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         if (!df::global::window_x || !df::global::window_y || !df::global::window_z) {
             request->err = "DF window coordinates are unavailable";
             request->done.set_value(false);
@@ -1055,13 +1136,12 @@ bool run_read_host_camera(Camera& camera, std::string* err) {
         request->done.set_value(true);
     });
 
-    if (future.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
-        if (err) *err = "timed out reading host camera on render thread";
-        diagnostics_log("WARN: timed out reading host camera on render thread");
+    bool ok = false;
+    if (!render_future_get(future, ok, 3)) {
+        if (err) *err = "host-camera render-thread request timed out or was abandoned";
+        diagnostics_log("WARN: host-camera render-thread request timed out or was abandoned");
         return false;
     }
-
-    bool ok = future.get();
     if (!ok) {
         if (err) *err = request->err;
         return false;
@@ -1233,13 +1313,12 @@ bool capture_camera_frame_on_render_thread(const Camera& requested,
         request->done.set_value(capture_camera_frame(request->camera, request->frame, &request->err));
     });
 
-    if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
-        if (err) *err = "timed out capturing frame on render thread";
-        diagnostics_log("WARN: timed out capturing frame on render thread");
+    bool ok = false;
+    if (!render_future_get(future, ok, 10)) {
+        if (err) *err = "frame-capture render-thread request timed out or was abandoned";
+        diagnostics_log("WARN: frame-capture render-thread request timed out or was abandoned");
         return false;
     }
-
-    bool ok = future.get();
     if (!ok) {
         if (err) *err = request->err;
         return false;
@@ -1267,6 +1346,11 @@ bool clamp_camera(Camera& camera, std::string* err) {
 #ifdef _WIN32
         __try {
 #endif
+        if (save_barrier_active()) {
+            request->err = "Dwarf Fortress is saving or unloading";
+            request->done.set_value(false);
+            return;
+        }
         auto world = df::global::world;
         if (!world) {
             request->err = "world/map not available";
@@ -1286,13 +1370,12 @@ bool clamp_camera(Camera& camera, std::string* err) {
 #endif
     });
 
-    if (future.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
-        if (err) *err = "timed out clamping camera on render thread";
-        diagnostics_log("WARN: timed out clamping camera on render thread");
+    bool ok = false;
+    if (!render_future_get(future, ok, 3)) {
+        if (err) *err = "camera-clamp render-thread request timed out or was abandoned";
+        diagnostics_log("WARN: camera-clamp render-thread request timed out or was abandoned");
         return false;
     }
-
-    bool ok = future.get();
     if (!ok) {
         if (err) *err = request->err;
         return false;
@@ -1384,6 +1467,10 @@ bool capture_current_frame(CapturedFrame& frame, bool include_ui = true,
     CapturedFrame next;
     next.width = width;
     next.height = height;
+#ifdef _WIN32
+    if (gps && gps->main_viewport)
+        read_capture_geometry_seh(renderer, gps->main_viewport, next.geometry);
+#endif
     next.bgra.resize(static_cast<size_t>(width) * height * 4);
     int rc = p_RenderReadPixels(sdl_renderer, nullptr, SDL_PIXELFORMAT_ARGB8888,
                                 next.bgra.data(), width * 4);
@@ -1409,16 +1496,10 @@ bool capture_shifted(const Camera& camera, CapturedFrame& frame,
     // one, which can never run while we're occupying the render thread -> 3s self-deadlock timeout
     // ("timed out reading host camera on render thread") -> every frame fails -> black webview.
 #ifdef _WIN32
-    // HARD GATE (crash fix 2026-06-27): only run the native map render while a fortress map view
-    // is actually live. During title/load/save -- and especially world TEARDOWN when a fort is
-    // exited (top viewscreen becomes viewscreen_titlest / viewscreen_game_cleanerst) -- DF's MAIN
-    // thread frees the map + renderer while this render thread would still be reading them. That
-    // produced the null/wild-pointer "NATIVE FAULT @ fill/blit" entries in dfcapture.log AND, more
-    // seriously, a crash on DF's own main thread mid-teardown ("Advancing unit moves") that our
-    // SEH cannot catch (SEH only guards THIS thread; it can't stop the main thread from faulting
-    // on a map we race). getViewscreenByType<dwarfmodest>(0) scans the whole viewscreen stack, so
-    // it stays valid under menus/overlays during play and is null only when there is genuinely no
-    // live fort -- exactly the moments we must not touch the map.
+    // Run native map rendering only while a fortress map view is live. During title, load, save,
+    // and teardown, DF can free map and renderer state concurrently with capture. SEH only protects
+    // this thread and cannot make that cross-thread lifetime safe. getViewscreenByType scans the
+    // whole stack, so menus and overlays during fortress play remain valid.
     if (!DFHack::Gui::getViewscreenByType<df::viewscreen_dwarfmodest>(0)) {
         if (err) *err = "no live fortress view (capture skipped during menu/load/teardown)";
         return false;
@@ -1678,6 +1759,10 @@ bool composite_seedown_into(const Camera& camera, CapturedFrame& top, bool inclu
 }
 
 bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::string* err) {
+    if (save_barrier_active()) {
+        if (err) *err = "Dwarf Fortress is saving or unloading";
+        return false;
+    }
     auto started = std::chrono::steady_clock::now();
     auto elapsed_ms = [&]() {
         auto elapsed = std::chrono::steady_clock::now() - started;
@@ -1701,10 +1786,13 @@ bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::strin
     return ok;
 }
 
-bool capture_camera_jpeg(const Camera& camera, std::vector<uint8_t>& jpeg, std::string* err) {
+bool capture_camera_jpeg(const Camera& camera, std::vector<uint8_t>& jpeg,
+                         CaptureGeometry* geometry, std::string* err) {
     CapturedFrame frame;
     if (!capture_camera_frame_on_render_thread(camera, frame, err))
         return false;
+    if (geometry)
+        *geometry = frame.geometry;
     return encode_jpeg(frame, jpeg, DEFAULT_JPEG_QUALITY, err);
 }
 

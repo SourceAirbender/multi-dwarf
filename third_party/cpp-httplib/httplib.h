@@ -476,6 +476,11 @@ public:
                                                const char *mime);
   void set_file_request_handler(Handler handler);
 
+  // Runs before static-file handling and route dispatch. Returning true means the handler fully
+  // formed the response and normal routing must stop.
+  using PreRoutingHandler = std::function<bool(const Request &, Response &)>;
+  void set_pre_routing_handler(PreRoutingHandler handler);
+
   void set_error_handler(Handler handler);
   void set_logger(Logger logger);
 
@@ -547,6 +552,7 @@ private:
   std::vector<std::pair<std::string, std::string>> base_dirs_;
   std::map<std::string, std::string> file_extension_and_mimetype_map_;
   Handler file_request_handler_;
+  PreRoutingHandler pre_routing_handler_;
   Handlers get_handlers_;
   Handlers post_handlers_;
   HandlersForContentReader post_handlers_for_content_reader_;
@@ -3084,6 +3090,10 @@ inline void Server::set_file_request_handler(Handler handler) {
   file_request_handler_ = std::move(handler);
 }
 
+inline void Server::set_pre_routing_handler(PreRoutingHandler handler) {
+  pre_routing_handler_ = std::move(handler);
+}
+
 inline void Server::set_error_handler(Handler handler) {
   error_handler_ = std::move(handler);
 }
@@ -3521,6 +3531,8 @@ inline bool Server::listen_internal() {
 }
 
 inline bool Server::routing(Request &req, Response &res, Stream &strm) {
+  if (pre_routing_handler_ && pre_routing_handler_(req, res)) { return true; }
+
   // File handler
   bool is_head_request = req.method == "HEAD";
   if ((req.method == "GET" || is_head_request) &&

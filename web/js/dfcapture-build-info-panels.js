@@ -1,5 +1,5 @@
 // dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -578,15 +578,52 @@
     const kind = String(row?.kind || "");
     const id = Number(row?.buildingId ?? -1);
     const itemId = Number(row?.itemId ?? -1);
-    const canOpenPlace = id >= 0 && ["stockpile", "workshop", "zone", "building"].includes(kind);
+    const locationId = Number(row?.locationId ?? -1);
+    const canOpenPlace = (id >= 0 && ["stockpile", "workshop", "zone", "building"].includes(kind)) ||
+      (locationId >= 0 && kind === "location");
     const canOpenItem = itemId >= 0 && kind === "item";
     const canOpen = canOpenPlace || canOpenItem;
     const canCenter = !!infoRowPos(row);
-    if (!canOpen && !canCenter) return "";
+    const jobId = Number(row?.jobId ?? -1);
+    const canCancelTask = activeInfoSection === "tasks" && Number.isInteger(jobId) && jobId >= 0;
+    const unitId = Number(row?.unitId ?? -1);
+    const canMemorial = activeInfoDetail === "dead" &&
+      Number.isInteger(unitId) && unitId >= 0;
+    if (!canOpen && !canCenter && !canCancelTask && !canMemorial) return "";
     return `<div class="info-row-actions">
       ${canOpen ? `<button class="info-row-action" data-info-open title="Open / manage">&#128269;</button>` : ""}
       ${canCenter ? `<button class="info-row-action" data-info-center title="Center and flash">&#127909;</button>` : ""}
+      ${canCancelTask ? `<button class="info-row-action danger" data-task-cancel="${jobId}" title="Cancel task">X</button>` : ""}
+      ${canMemorial ? `<button class="info-row-action" data-memorial-unit="${unitId}" title="Queue memorial slab">Slab</button>` : ""}
     </div>`;
+  }
+
+  function livestockActionsHtml(row) {
+    if (activeInfoDetail !== "pets" || !row?.livestock) return "";
+    const state = row.livestock;
+    const unitId = Number(row.unitId);
+    if (!Number.isInteger(unitId) || unitId < 0) return "";
+    const button = (action, active, label, title) =>
+      `<button class="livestock-btn${active ? " active" : ""}" data-livestock-action="${action}" data-livestock-unit="${unitId}" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+    let html = button("slaughter", state.slaughter, "Slaughter",
+      state.slaughter ? "Cancel slaughter designation" : "Mark for slaughter");
+    if (state.geldable)
+      html += button("geld", state.geld, "Geld",
+        state.geld ? "Cancel gelding designation" : "Mark for gelding");
+    if (state.trainableWar)
+      html += button("war", state.war, "War",
+        state.war ? "Cancel war training" : "Train for war");
+    if (state.trainableHunt)
+      html += button("hunt", state.hunt, "Hunt",
+        state.hunt ? "Cancel hunting training" : "Train for hunting");
+    if (!state.pet)
+      html += button("pet", state.adoption, "Make pet",
+        state.adoption ? "Remove from adoption list" : "Make available for adoption");
+    if (state.tamable)
+      html += button(state.training ? "unassign-trainer" : "assign-trainer",
+        state.training, state.training ? "Taming" : "Tame",
+        state.training ? "Cancel training assignment" : "Assign any available trainer");
+    return `<div class="livestock-actions">${html}</div>`;
   }
 
   function renderInfoRows(rows) {
@@ -612,6 +649,7 @@
               data-unit-id="${escapeHtml(row.unitId ?? -1)}"
               data-place-kind="${escapeHtml(kind)}"
               data-building-id="${escapeHtml(row.buildingId ?? -1)}"
+              data-location-id="${escapeHtml(row.locationId ?? -1)}"
               data-item-id="${escapeHtml(row.itemId ?? -1)}"
               ${pos ? `data-pos-x="${escapeHtml(pos.x)}" data-pos-y="${escapeHtml(pos.y)}" data-pos-z="${escapeHtml(pos.z)}"` : ""}>
               ${hasUnit ? unitPortraitMarkup(row, "info-portrait-small") : infoPlaceIconMarkup(row)}
@@ -625,6 +663,7 @@
                 ${status ? `<div class="info-status ${tone}">${escapeHtml(status)}</div>` : ""}
                 ${row.job ? `<div class="info-muted">${escapeHtml(row.job)}</div>` : ""}
                 ${badges.length ? `<div class="info-badges">${badges.map(badge => `<span class="info-badge">${escapeHtml(badge)}</span>`).join("")}</div>` : ""}
+                ${livestockActionsHtml(row)}
                 ${infoRowActions(row)}
               </div>
             </div>
@@ -960,7 +999,7 @@
     });
     clientPanel.querySelectorAll("[data-unit-id]").forEach(row => {
       row.addEventListener("click", event => {
-        if (event.target.closest("[data-info-open], [data-info-center]")) return;
+        if (event.target.closest("[data-info-open], [data-info-center], [data-livestock-action], [data-task-cancel], [data-memorial-unit]")) return;
         event.preventDefault();
         event.stopPropagation();
         const id = Number(row.dataset.unitId);
@@ -970,13 +1009,17 @@
         }
         const kind = row.dataset.placeKind || "";
         const buildingId = Number(row.dataset.buildingId ?? -1);
+        const locationId = Number(row.dataset.locationId ?? -1);
         const itemId = Number(row.dataset.itemId ?? -1);
         if (Number.isInteger(itemId) && itemId >= 0) {
           closeClientPanel();
           openItemPanel(itemId);
           return;
         }
-        if (Number.isInteger(buildingId) && buildingId >= 0 && kind)
+        if (kind === "location" && Number.isInteger(locationId) && locationId >= 0) {
+          closeClientPanel();
+          openLocationPanel(locationId);
+        } else if (Number.isInteger(buildingId) && buildingId >= 0 && kind)
           openInfoPlace(kind, buildingId);
       });
     });
@@ -987,13 +1030,17 @@
         const row = button.closest(".info-row");
         const kind = row?.dataset.placeKind || "";
         const buildingId = Number(row?.dataset.buildingId ?? -1);
+        const locationId = Number(row?.dataset.locationId ?? -1);
         const itemId = Number(row?.dataset.itemId ?? -1);
         if (Number.isInteger(itemId) && itemId >= 0) {
           closeClientPanel();
           openItemPanel(itemId);
           return;
         }
-        if (Number.isInteger(buildingId) && buildingId >= 0)
+        if (kind === "location" && Number.isInteger(locationId) && locationId >= 0) {
+          closeClientPanel();
+          openLocationPanel(locationId);
+        } else if (Number.isInteger(buildingId) && buildingId >= 0)
           openInfoPlace(kind, buildingId);
       });
     });
@@ -1009,6 +1056,71 @@
         };
         if (Number.isFinite(pos.x) && Number.isFinite(pos.y) && Number.isFinite(pos.z))
           await centerAndFlashMapPos(pos);
+      });
+    });
+    clientPanel.querySelectorAll("[data-memorial-unit]").forEach(button => {
+      button.addEventListener("click", async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const unitId = Number(button.dataset.memorialUnit);
+        if (!Number.isInteger(unitId) || unitId < 0) return;
+        button.disabled = true;
+        try {
+          const data = await buildingPanelPost("/memorial-slab", { unit: unitId });
+          button.textContent = "Queued";
+          if (data.message && typeof toast === "function") toast(data.message);
+        } catch (error) {
+          button.disabled = false;
+          if (typeof toast === "function") toast(error.message || "Could not queue memorial slab");
+        }
+      });
+    });
+    clientPanel.querySelectorAll("[data-livestock-action]").forEach(button => {
+      button.addEventListener("click", async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const unitId = Number(button.dataset.livestockUnit);
+        const action = button.dataset.livestockAction || "";
+        if (!Number.isInteger(unitId) || unitId < 0 || !action) return;
+        button.disabled = true;
+        try {
+          const response = await fetch(
+            `/livestock-action?player=${encodeURIComponent(player)}&unit=${unitId}&action=${encodeURIComponent(action)}&t=${Date.now()}`,
+            { method: "POST", cache: "no-store" });
+          const result = await response.json();
+          if (!response.ok || !result?.livestock)
+            throw new Error(result?.error || "livestock action failed");
+          const row = Array.isArray(data.rows)
+            ? data.rows.find(candidate => Number(candidate.unitId) === unitId) : null;
+          if (row) row.livestock = result.livestock;
+          renderInfoPanel(data);
+        } catch (error) {
+          console.warn("livestock action failed", error);
+          button.disabled = false;
+        }
+        focusPage();
+      });
+    });
+    clientPanel.querySelectorAll("[data-task-cancel]").forEach(button => {
+      button.addEventListener("click", async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const jobId = Number(button.dataset.taskCancel);
+        if (!Number.isInteger(jobId) || jobId < 0) return;
+        button.disabled = true;
+        try {
+          const response = await fetch(
+            `/task-cancel?player=${encodeURIComponent(player)}&job=${jobId}&t=${Date.now()}`,
+            { method: "POST", cache: "no-store" });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result?.error || "task cancellation failed");
+          data.rows = (data.rows || []).filter(row => Number(row.jobId) !== jobId);
+          renderInfoPanel(data);
+        } catch (error) {
+          console.warn("task cancellation failed", error);
+          button.disabled = false;
+        }
+        focusPage();
       });
     });
   }
@@ -1044,6 +1156,23 @@
     if (name === "zone") { toggleZonePalette(); return; }
     if (name === "build") { openBuildPanel(); return; }
     if (name === "workorders") { openWorkOrdersPanel(); return; }
+    if (name === "squads") { openSquadsPanel(); return; }
+    if (name === "worldmap") { openWorldmapPanel(); return; }
+    if (name === "hospital") { openHospitalPanel(); return; }
+    // Kitchen has no toolbar button of its own -- it lives in Labor's "Kitchen" tab (DF's own
+    // home for it). This case stays so a direct openPanel("kitchen") still works.
+    if (name === "kitchen") { openKitchenPanel(); return; }
+    if (name === "tradedepot") { openTradeDepotPanel(); return; }
+    if (name === "console") { openConsolePanel(); return; }
+    if (name === "help") { openHelpPanel(); return; }
+    if (name === "reports") { openReportsPanel(); return; }
+    // Nobles and justice use the interactive fort administration panel.
+    if (name === "nobles") { openFortAdminPanel("nobles"); return; }
+    if (name === "justice") { openFortAdminPanel("justice"); return; }
+    if (name === "diplo") { openDiploPanel(); return; }
+    if (name === "vote") { openVotePanel(); return; }
+    if (name === "burrows") { openBurrowsPanel(); return; }
+    if (name === "hauling") { openHaulingPanel(); return; }
     if (name === "alerts") { openNotificationsPanel(); return; }
     clearBuildPlacement(false);
     const backendPanels = new Set(["citizens", "labor", "locations", "orders", "workorders", "nobles", "objects", "justice", "stocks"]);

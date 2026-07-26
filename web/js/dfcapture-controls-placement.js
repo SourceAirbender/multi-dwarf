@@ -1,5 +1,5 @@
 // dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
-// Copyright (C) 2026 Gabriel Rios
+// Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -148,6 +148,80 @@
   }
   refreshSettingsUi();
 
+  // Camera zoom and browser-interface scale are session-local. They use the per-player /zoom
+  // route and never touch the host's global UI state.
+  const zoomOutBtn = document.getElementById("zoomOutBtn");
+  const zoomInBtn = document.getElementById("zoomInBtn");
+  const zoomResetBtn = document.getElementById("zoomResetBtn");
+  const zoomReadout = document.getElementById("zoomReadout");
+  const resetCameraRow = document.getElementById("resetCameraRow");
+  if (zoomOutBtn) zoomOutBtn.addEventListener("click", event => {
+    event.preventDefault(); event.stopPropagation(); sendZoom("out"); focusPage();
+  });
+  if (zoomInBtn) zoomInBtn.addEventListener("click", event => {
+    event.preventDefault(); event.stopPropagation(); sendZoom("in"); focusPage();
+  });
+  if (zoomResetBtn) zoomResetBtn.addEventListener("click", event => {
+    event.preventDefault(); event.stopPropagation(); sendZoom("reset"); focusPage();
+  });
+  if (resetCameraRow) resetCameraRow.addEventListener("click", event => {
+    event.preventDefault(); event.stopPropagation(); resetToHost(); focusPage();
+  });
+
+  const UI_SCALE_MIN = 0.7;
+  const UI_SCALE_MAX = 1.6;
+  const UI_SCALE_STEP = 0.1;
+  let uiScale = 1;
+  try {
+    const saved = Number.parseFloat(localStorage.getItem("dfplex.uiScale"));
+    if (Number.isFinite(saved)) uiScale = Math.max(UI_SCALE_MIN, Math.min(UI_SCALE_MAX, saved));
+  } catch (_) {}
+  const uiScaleReadout = document.getElementById("uiScaleReadout");
+  function applyUiScale() {
+    document.documentElement.style.setProperty("--ui-scale", String(uiScale));
+    if (uiScaleReadout) uiScaleReadout.textContent = Math.round(uiScale * 100) + "%";
+  }
+  function setUiScale(value) {
+    uiScale = Math.max(UI_SCALE_MIN, Math.min(UI_SCALE_MAX, Math.round(value * 10) / 10));
+    try { localStorage.setItem("dfplex.uiScale", String(uiScale)); } catch (_) {}
+    applyUiScale();
+  }
+  function adjustUiScale(direction) {
+    setUiScale(uiScale + (direction > 0 ? UI_SCALE_STEP : -UI_SCALE_STEP));
+  }
+  document.getElementById("uiScaleOutBtn")?.addEventListener("click", event => {
+    event.preventDefault(); event.stopPropagation(); adjustUiScale(-1); focusPage();
+  });
+  document.getElementById("uiScaleInBtn")?.addEventListener("click", event => {
+    event.preventDefault(); event.stopPropagation(); adjustUiScale(1); focusPage();
+  });
+  document.getElementById("uiScaleResetBtn")?.addEventListener("click", event => {
+    event.preventDefault(); event.stopPropagation(); setUiScale(1); focusPage();
+  });
+  window.DFCaptureUIScale = {
+    adjust: adjustUiScale,
+    reset: () => setUiScale(1),
+    get: () => uiScale
+  };
+  applyUiScale();
+
+  window.dfcSyncClientChrome = function(hud) {
+    const zoom = Number(hud && hud.camera && hud.camera.zoom);
+    if (zoomReadout && Number.isFinite(zoom)) zoomReadout.textContent = Math.round(zoom) + "%";
+    if (typeof window.syncMinimapControls === "function") window.syncMinimapControls();
+  };
+
+  window.addEventListener("keydown", event => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+    if (event.key === "=" || event.key === "+" || event.key === "Add") {
+      event.preventDefault(); adjustUiScale(1);
+    } else if (event.key === "-" || event.key === "_" || event.key === "Subtract") {
+      event.preventDefault(); adjustUiScale(-1);
+    } else if (event.key === "0") {
+      event.preventDefault(); setUiScale(1);
+    }
+  }, { capture: true });
+
   document.querySelectorAll("[data-move-z]").forEach(button => {
     button.addEventListener("click", event => {
       event.preventDefault();
@@ -192,11 +266,14 @@
   let stockPreset = null;
   let stockRepaintId = null;
   let zonePreset = null;
+  let zoneRepaintId = null;
+  let zoneRepaintMode = "add";
   let currentTool = null; // backend-supported paint tool, or null for inspect/pan mode
   let selectedDesignation = null; // visual selection, including tools not wired yet
   let digMenuOpen = false;
   let plantMenuOpen = false;
   let smoothMenuOpen = false;
+  let itemDesigMenuOpen = false;
   // Dig-menu options (DF parity): priority 1-7 (default 4), marker mode, dig-through-warm/damp,
   // mine mode (0=all,1=automine,2=ore,3=gems), and whether the advanced options are expanded.
   let digPriority = 4;
@@ -207,7 +284,8 @@
   let plantAdvOpen = false;
   let smoothAdvOpen = false;
   function placementActive() {
-    return !!(currentTool || selectedDesignation || stockPreset || stockRepaintId || selectedBuild || zonePreset);
+    return !!(currentTool || selectedDesignation || stockPreset || stockRepaintId ||
+      selectedBuild || zonePreset || zoneRepaintId);
   }
   let lastPlacementActive = null;
   function updatePlacementMode() {
@@ -237,7 +315,8 @@
     fetch(`/placement-cursor?${q}`, { method: "POST", cache: "no-store" }).catch(() => {});
   }
   function updateToolCursor() {
-    view.style.cursor = (currentTool || stockPreset || stockRepaintId || selectedBuild || zonePreset) ? "crosshair" : "";
+    view.style.cursor = (currentTool || stockPreset || stockRepaintId || selectedBuild ||
+      zonePreset || zoneRepaintId) ? "crosshair" : "";
     updatePlacementMode();
   }
   const SHEET = "/asset/interface_bits.png";
@@ -266,7 +345,24 @@
     justice:{normal:[32,28], active:[40,52]},
     build:{normal:[16,31]},
     stockpile:{normal:[16,34]},
-    zone:{normal:[16,37], active:[20,37]}
+    zone:{normal:[16,37], active:[20,37]},
+    // DF's own toolbar art for the two panels this build adds to the native row. Cells are
+    // interface_bits.png pixel coords / the 8x12 cell size (BUTTON_SQUADS cx192,cy192;
+    // BUTTON_WORLD cx224,cy192), the same derivation as every entry above.
+    squads:{normal:[24,16]},
+    worldmap:{normal:[28,16]},
+    burrow:{normal:[16,40], active:[20,40]},
+    hauling:{normal:[16,43], active:[20,43]},
+    traffic:{normal:[16,19]},
+    itemdesig:{normal:[24,49]},
+    claim:{normal:[16,46], active:[20,46]},
+    forbid:{normal:[24,46], active:[28,46]},
+    dump:{normal:[16,52], active:[20,52]},
+    undump:{normal:[24,52], active:[28,52]},
+    melt:{normal:[16,55], active:[20,55]},
+    unmelt:{normal:[24,55], active:[28,55]},
+    unhide:{normal:[16,58], active:[20,58]},
+    hide:{normal:[24,58], active:[28,58]}
   };
   function paintSprite(button, key, active = false) {
     const sprite = SPRITES[key];
@@ -291,16 +387,14 @@
   const TBICON = {
     citizens:"citizens", labor:"labor", locations:"locations", orders:"orders",
     workorders:"workorders", nobles:"nobles", objects:"objects", justice:"justice",
-    build:"build", stockpile:"stockpile", zone:"zone"
+    build:"build", stockpile:"stockpile", zone:"zone",
+    squads:"squads", worldmap:"worldmap", burrows:"burrow", hauling:"hauling"
   };
-  const TBGLYPH = { reset:"&#8634;" };
   function refreshToolbarSprites(activeName = "") {
     document.querySelectorAll("#bottomBar [data-panel], #bottomBar [data-action]").forEach(button => {
       const key = button.dataset.panel || button.dataset.action;
       if (TBICON[key]) {
         paintSprite(button, TBICON[key], key === activeName);
-      } else if (TBGLYPH[key]) {
-        button.innerHTML = TBGLYPH[key];
       }
     });
   }
@@ -309,6 +403,8 @@
   const digSubmenu = document.getElementById("digSubmenu");
   const plantSubmenu = document.getElementById("plantSubmenu");
   const smoothSubmenu = document.getElementById("smoothSubmenu");
+  const trafficSubmenu = document.getElementById("trafficSubmenu");
+  const itemDesigSubmenu = document.getElementById("itemDesigSubmenu");
   const digMenuButton = document.querySelector("[data-dig-menu]");
   const digTools = new Set(["dig", "stairs", "ramp", "channel", "remove"]);
   const plantTools = new Set(["chop", "gather"]);
@@ -316,8 +412,15 @@
   function backendToolFor(tool) {
     return ({ dig:"dig", stairs:"stairs", ramp:"ramp", channel:"channel", remove:"clear",
               erase:"clear", chop:"chop", gather:"gather", smooth:"smooth",
-              engrave:"engrave", track:"track", fortify:"fortify" })[tool] || null;
+              engrave:"engrave", track:"track", fortify:"fortify",
+              "traffic-normal":"traffic-normal", "traffic-low":"traffic-low",
+              "traffic-high":"traffic-high", "traffic-restricted":"traffic-restricted",
+              claim:"claim", forbid:"forbid", dump:"dump", undump:"undump",
+              melt:"melt", unmelt:"unmelt", hide:"hide", unhide:"unhide" })[tool] || null;
   }
+  const trafficTools = new Set(["traffic-normal", "traffic-low", "traffic-high", "traffic-restricted"]);
+  const itemDesigTools = new Set(["claim", "forbid", "dump", "undump", "melt", "unmelt", "unhide", "hide"]);
+  let trafficMenuOpen = false;
   function updateDesignationButtons() {
     digSubmenu.classList.toggle("visible", digMenuOpen);
     digSubmenu.setAttribute("aria-hidden", digMenuOpen ? "false" : "true");
@@ -325,6 +428,20 @@
     plantSubmenu.setAttribute("aria-hidden", plantMenuOpen ? "false" : "true");
     smoothSubmenu.classList.toggle("visible", smoothMenuOpen);
     smoothSubmenu.setAttribute("aria-hidden", smoothMenuOpen ? "false" : "true");
+    if (trafficSubmenu) {
+      trafficSubmenu.classList.toggle("visible", trafficMenuOpen);
+      trafficSubmenu.setAttribute("aria-hidden", trafficMenuOpen ? "false" : "true");
+      document.querySelectorAll("[data-traffic-tool]").forEach(b =>
+        b.classList.toggle("active", selectedDesignation === "traffic-" + b.dataset.trafficTool));
+    }
+    if (itemDesigSubmenu) {
+      itemDesigSubmenu.classList.toggle("visible", itemDesigMenuOpen);
+      itemDesigSubmenu.setAttribute("aria-hidden", itemDesigMenuOpen ? "false" : "true");
+      document.querySelectorAll("[data-itemdesig-tool]").forEach(button => {
+        const tool = button.dataset.itemdesigTool;
+        paintSprite(button, tool, selectedDesignation === tool);
+      });
+    }
     paintSprite(digMenuButton, digMenuOpen ? "lowerMenu" : "digMenu", digMenuOpen || digTools.has(selectedDesignation));
     document.querySelectorAll("[data-dig-tool]").forEach(button => {
       const tool = button.dataset.digTool;
@@ -349,6 +466,16 @@
       if (tool === "smooth") {
         paintSprite(button, smoothMenuOpen ? "lowerMenu" : "smooth",
                     smoothMenuOpen || smoothTools.has(selectedDesignation));
+        return;
+      }
+      if (tool === "traffic") {
+        paintSprite(button, trafficMenuOpen ? "lowerMenu" : "traffic",
+                    trafficMenuOpen || trafficTools.has(selectedDesignation));
+        return;
+      }
+      if (tool === "itemdesig") {
+        paintSprite(button, itemDesigMenuOpen ? "lowerMenu" : "itemdesig",
+                    itemDesigMenuOpen || itemDesigTools.has(selectedDesignation));
         return;
       }
       let active = selectedDesignation === tool;
@@ -391,6 +518,8 @@
     digMenuOpen = digMenuOpen && digTools.has(tool);
     plantMenuOpen = plantMenuOpen && plantTools.has(tool);
     smoothMenuOpen = smoothMenuOpen && smoothTools.has(tool);
+    trafficMenuOpen = trafficMenuOpen && trafficTools.has(tool);
+    itemDesigMenuOpen = itemDesigMenuOpen && itemDesigTools.has(tool);
     updateDesignationButtons();
   }
   digMenuButton.addEventListener("click", event => {
@@ -405,6 +534,8 @@
       digMenuOpen = true;
       plantMenuOpen = false;
       smoothMenuOpen = false;
+      trafficMenuOpen = false;
+      itemDesigMenuOpen = false;
       if (!digTools.has(selectedDesignation))
         selectedDesignation = "dig";
       currentTool = backendToolFor(selectedDesignation);
@@ -419,6 +550,8 @@
       digMenuOpen = true;
       plantMenuOpen = false;
       smoothMenuOpen = false;
+      trafficMenuOpen = false;
+      itemDesigMenuOpen = false;
       selectDesignation(button.dataset.digTool);
       focusPage();
     });
@@ -430,6 +563,8 @@
       digMenuOpen = false;
       plantMenuOpen = true;
       smoothMenuOpen = false;
+      trafficMenuOpen = false;
+      itemDesigMenuOpen = false;
       selectDesignation(button.dataset.plantTool);
       focusPage();
     });
@@ -441,7 +576,29 @@
       digMenuOpen = false;
       plantMenuOpen = false;
       smoothMenuOpen = true;
+      trafficMenuOpen = false;
+      itemDesigMenuOpen = false;
       selectDesignation(button.dataset.smoothTool);
+      focusPage();
+    });
+  });
+  document.querySelectorAll("[data-traffic-tool]").forEach(button => {
+    button.addEventListener("click", event => {
+      event.preventDefault(); event.stopPropagation();
+      digMenuOpen = false; plantMenuOpen = false; smoothMenuOpen = false; trafficMenuOpen = true;
+      itemDesigMenuOpen = false;
+      selectDesignation("traffic-" + button.dataset.trafficTool);
+      updateDesignationButtons();
+      focusPage();
+    });
+  });
+  document.querySelectorAll("[data-itemdesig-tool]").forEach(button => {
+    button.addEventListener("click", event => {
+      event.preventDefault(); event.stopPropagation();
+      digMenuOpen = false; plantMenuOpen = false; smoothMenuOpen = false;
+      trafficMenuOpen = false; itemDesigMenuOpen = true;
+      selectDesignation(button.dataset.itemdesigTool);
+      updateDesignationButtons();
       focusPage();
     });
   });
@@ -459,6 +616,8 @@
           digMenuOpen = false;
           plantMenuOpen = true;
           smoothMenuOpen = false;
+          trafficMenuOpen = false;
+          itemDesigMenuOpen = false;
           selectDesignation(tool);
         }
       } else if (tool === "smooth") {
@@ -470,12 +629,32 @@
           digMenuOpen = false;
           plantMenuOpen = false;
           smoothMenuOpen = true;
+          trafficMenuOpen = false;
+          itemDesigMenuOpen = false;
           selectDesignation("smooth");
+        }
+      } else if (tool === "traffic") {
+        if (trafficMenuOpen && trafficTools.has(selectedDesignation)) {
+          trafficMenuOpen = false; selectedDesignation = null; currentTool = null;
+        } else {
+          digMenuOpen = false; plantMenuOpen = false; smoothMenuOpen = false; trafficMenuOpen = true;
+          itemDesigMenuOpen = false;
+          selectDesignation("traffic-high");
+        }
+      } else if (tool === "itemdesig") {
+        if (itemDesigMenuOpen && itemDesigTools.has(selectedDesignation)) {
+          itemDesigMenuOpen = false; selectedDesignation = null; currentTool = null;
+        } else {
+          digMenuOpen = false; plantMenuOpen = false; smoothMenuOpen = false;
+          trafficMenuOpen = false; itemDesigMenuOpen = true;
+          selectDesignation("claim");
         }
       } else {
         digMenuOpen = false;
         plantMenuOpen = false;
         smoothMenuOpen = false;
+        trafficMenuOpen = false;
+        itemDesigMenuOpen = false;
         selectDesignation(tool);
       }
       updateDesignationButtons();
@@ -595,6 +774,7 @@
     if (key) { // leaving any dig/designation mode
       clearBuildPlacement(false);
       stockRepaintId = null;
+      zoneRepaintId = null;
       zonePreset = null;
       if (typeof zonePalette !== "undefined") zonePalette.style.display = "none";
       zoneOverlayEnabled = false;
@@ -614,6 +794,7 @@
   }
   function setStockRepaint(id) {
     stockRepaintId = id;
+    zoneRepaintId = null;
     stockPreset = null;
     stockPalette.style.display = "none";
     zonePreset = null;
@@ -718,6 +899,7 @@
     if (key) { // leaving every other placement mode
       clearBuildPlacement(false);
       stockRepaintId = null;
+      zoneRepaintId = null;
       stockPreset = null;
       if (typeof stockPalette !== "undefined") stockPalette.style.display = "none";
       currentTool = null;
@@ -734,6 +916,22 @@
     if (selBtn) selBtn.classList.toggle("active", !key);
     updateToolCursor();
     renderZoneOverlay();
+  }
+  function setZoneRepaint(id, mode = "add") {
+    zoneRepaintId = Number(id) > 0 ? Number(id) : null;
+    zoneRepaintMode = mode === "erase" ? "erase" : "add";
+    zonePreset = null;
+    stockPreset = null;
+    stockRepaintId = null;
+    clearBuildPlacement(false);
+    currentTool = null;
+    selectedDesignation = null;
+    digMenuOpen = false;
+    plantMenuOpen = false;
+    smoothMenuOpen = false;
+    zonePalette.style.display = "none";
+    updateDesignationButtons();
+    updateToolCursor();
   }
   function toggleZonePalette() {
     const show = zonePalette.style.display === "none";
@@ -796,6 +994,27 @@
       }
     } catch (_) {}
   }
+  async function repaintZoneDrag(x1, y1, x2, y2) {
+    if (!zoneRepaintId) return;
+    const id = zoneRepaintId;
+    const a = imagePixelClamped(x1, y1);
+    const b = imagePixelClamped(x2, y2);
+    if (!a || !b) return;
+    try {
+      const url = `/zone-repaint?player=${encodeURIComponent(player)}&id=${id}` +
+        `&mode=${encodeURIComponent(zoneRepaintMode)}&px=${a.x}&py=${a.y}` +
+        `&px2=${b.x}&py2=${b.y}&w=${a.w}&h=${a.h}`;
+      const response = await fetch(url, { method: "POST", cache: "no-store" });
+      const body = await response.text();
+      if (!response.ok) throw new Error(body.trim() || "Zone repaint failed");
+      setZoneRepaint(null);
+      await loadZones();
+      openZonePanel(id);
+    } catch (error) {
+      alert(String(error.message || error));
+      openZonePanel(id);
+    }
+  }
 
   addEventListener("keydown", event => {
     // Let text inputs (stockpile rename, search) receive keys without panning the map.
@@ -807,7 +1026,10 @@
     focusPage();
     if (event.key === "Escape") {
       let handledEscape = false;
-      if (stockRepaintId) {
+      if (zoneRepaintId) {
+        setZoneRepaint(null);
+        handledEscape = true;
+      } else if (stockRepaintId) {
         setStockRepaint(null);
         handledEscape = true;
       } else if (clientPanel.classList.contains("visible") && clientPanel.classList.contains("build-panel")) {
@@ -829,9 +1051,7 @@
         closeClientPanel();
         handledEscape = true;
       } else if (typeof zonePalette !== "undefined" && zonePalette.style.display !== "none") {
-        // Zone menu open -> Escape closes it. Checked on palette VISIBILITY (not zonePreset)
-        // because Select/Edit mode keeps the palette open with zonePreset === null, and that mode
-        // previously couldn't be dismissed with Escape at all.
+        // Check palette visibility because Select/Edit mode keeps it open with zonePreset === null.
         zonePalette.style.display = "none";
         zoneOverlayEnabled = false;
         setZonePreset(null);
@@ -912,10 +1132,15 @@
   view.addEventListener("pointerdown", event => {
     focusPage();
     if (event.button !== 0) return;
+    // Squad map-order targeting (move/attack) consumes the next left-click before drag/inspect.
+    if (typeof sqConsumeMapClick === "function" && sqConsumeMapClick(event)) { event.preventDefault(); return; }
+    // Hauling "add stop" consumes one click; burrow paint records the drag anchor.
+    if (typeof haulConsumeStopClick === "function" && haulConsumeStopClick(event)) { event.preventDefault(); return; }
+    if (typeof burrowPaintArmed === "function" && burrowPaintArmed()) { burrowPaintDown(event); event.preventDefault(); return; }
     pdown = true;
     downX = event.clientX;
     downY = event.clientY;
-    if (currentTool || stockPreset || stockRepaintId || selectedBuild || zonePreset) {
+    if (currentTool || stockPreset || stockRepaintId || selectedBuild || zonePreset || zoneRepaintId) {
       // The backend paints the real, tile-snapped DF selection rectangle into the frame; in
       // instant mode we draw it browser-side instead (no per-move round-trip) and skip the send.
       dragAnchor = imagePixelClamped(event.clientX, event.clientY);
@@ -932,7 +1157,8 @@
     view.setPointerCapture(event.pointerId);
   });
   view.addEventListener("pointermove", event => {
-    if (!pdown || (!currentTool && !stockPreset && !stockRepaintId && !selectedBuild && !zonePreset)) return;
+    if (!pdown || (!currentTool && !stockPreset && !stockRepaintId &&
+        !selectedBuild && !zonePreset && !zoneRepaintId)) return;
     if (dragAnchor) {
       const cur = imagePixelClamped(event.clientX, event.clientY);
       if (!cur) return;
@@ -945,6 +1171,8 @@
     }
   });
   view.addEventListener("pointerup", event => {
+    // Burrow paint owns its own down/up (it never sets pdown), so commit the rect here first.
+    if (typeof burrowPaintArmed === "function" && burrowPaintArmed()) { burrowPaintUp(event); return; }
     if (!pdown) return;
     pdown = false;
     digSelect.style.display = "none";
@@ -963,6 +1191,8 @@
       createStockpileDrag(downX, downY, event.clientX, event.clientY);
     } else if (stockRepaintId) {
       repaintStockpileDrag(downX, downY, event.clientX, event.clientY);
+    } else if (zoneRepaintId) {
+      repaintZoneDrag(downX, downY, event.clientX, event.clientY);
     } else if (currentTool) {
       designateDrag(downX, downY, event.clientX, event.clientY);
     } else if (clickDistance < 8) {
