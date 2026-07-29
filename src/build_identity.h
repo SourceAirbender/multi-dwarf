@@ -8,18 +8,17 @@
 
 namespace dfcapture {
 
-// The plugin<->browser compatibility contract. Bump kApiSchemaVersion on any BREAKING API change
-// (a route, param, or response field the shipped web assets depend on). tools/deploy.ps1 reads this
-// same constant and stamps it into the deployed web/build.json, so a DLL and a web tree built from
-// different schemas are detected at /version (see build_identity_json). kPluginVersion is
-// informational only. THIS FILE is the single source of the schema number -- do not duplicate it.
+// The plugin<->browser compatibility contract. Bump kApiSchemaVersion on any breaking API change
+// (a route, parameter, or response field required by the shipped web assets). Release packaging
+// stamps the same value into web/build.json so /version can detect mismatched plugin and web files.
+// kPluginVersion is informational only. This file is the single source of the schema number.
 constexpr int kApiSchemaVersion = 2;
 constexpr const char* kPluginVersion = "0.9.46";
 
 // The /version payload distinguishes API compatibility from an exact packaged build match.
 // - schemaCompatible: plugin and web speak the same API schema.
 // - exactBuildMatch: version + source revision match.
-// Development deployments only block schema incompatibility; release deployments require both.
+// Development builds block schema incompatibility; release packages require both.
 std::string build_identity_json();
 
 } // namespace dfcapture

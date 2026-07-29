@@ -23,8 +23,8 @@ namespace {
 constexpr const char* kBuildTime = __DATE__ " " __TIME__;
 constexpr const char* kSourceCommit = DFCAPTURE_GIT_REV;
 
-// Minimal field scans over the self-written build.json -- no general JSON parser needed. The file is
-// small and always produced by tools/deploy.ps1 in a known shape, so a targeted scan is safe.
+// Minimal field scans over the package-generated build.json. The file is small and has a fixed
+// shape, so a targeted scan is sufficient.
 struct WebBuild {
     int schema = -1;
     std::string version;
@@ -42,7 +42,7 @@ bool read_web_build(WebBuild& build) {
     path += "build.json";
     std::ifstream in(path, std::ios::binary);
     if (!in)
-        return false;   // no build.json -> unpackaged/dev web tree
+        return false;   // Unpackaged source tree.
     std::stringstream ss;
     ss << in.rdbuf();
     const std::string text = ss.str();
@@ -78,8 +78,7 @@ std::string build_identity_json() {
     WebBuild web;
     const bool web_present = read_web_build(web);
 
-    // A missing build.json is a source/dev checkout. It is permitted, but the response makes clear
-    // that neither schema nor release identity is being enforced.
+    // A missing build.json is permitted for source builds, but package identity is not enforced.
     const bool schema_compatible = !web_present || web.schema == kApiSchemaVersion;
     const bool version_matches = web_present && web.version == kPluginVersion;
     const bool commit_comparable = web_present && !web.source_commit.empty() &&

@@ -192,9 +192,8 @@
     });
   }
 
-  // Blocking mismatch screen: API-schema mismatches always block. Strict release deployments also
-  // block when plugin and web version/source receipts differ. Development deployments permit an
-  // exact-revision mismatch when the schemas remain compatible (web-only iteration).
+  // API-schema mismatches always block. Release packages also require matching plugin and web
+  // versions; source builds permit revision differences when their schemas remain compatible.
   function showCompatGate(info) {
     const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g,
       c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -210,7 +209,7 @@
         <div>Plugin source <b>${esc(info && info.sourceCommit)}</b></div>
         <div>Web source <b>${esc(web && web.sourceCommit)}</b></div>
       </div>
-      <p class="dfc-compat-fix">Redeploy both halves with tools/deploy.ps1. If the DLL is locked, close Dwarf Fortress first, reopen, then reload this page.</p>
+      <p class="dfc-compat-fix">Close Dwarf Fortress, reinstall the complete matching release package, restart the game, then reload this page.</p>
       <button id="dfcCompatReload">Reload</button></div>`;
     document.body.appendChild(el);
     const btn = document.getElementById("dfcCompatReload");
