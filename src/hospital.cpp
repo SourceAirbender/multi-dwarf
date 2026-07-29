@@ -76,9 +76,8 @@ namespace {
 
 std::recursive_mutex g_hospital_mutex;
 
-// Same lock discipline as trade_depot.cpp / fort_admin.cpp: panel mutex -> capture-state mutex ->
-// CoreSuspender. Reads and mutations share the guard so walking sites / units / jobs never races
-// the sim.
+// Lock order: panel mutex -> capture-state mutex -> CoreSuspender. Reads and mutations use the
+// same guard.
 template <typename Fn>
 bool run_hospital_locked(Fn&& fn) {
     std::lock_guard<std::recursive_mutex> hospital_lock(g_hospital_mutex);
@@ -227,7 +226,7 @@ std::string hospital_name(df::abstract_building_hospitalst* hosp) {
 
 // ---------------------------------------------------------------------------
 // Chief medical dwarf: the fort noble position carrying HEALTH_MANAGEMENT responsibility. Same
-// positions/assignments walk as trade_depot.cpp find_broker (the broker == TRADE responsibility).
+// position assignments; the broker is the holder of the TRADE responsibility.
 // ---------------------------------------------------------------------------
 struct ChiefMedical {
     bool found = false;         // a HEALTH_MANAGEMENT position exists in this fort
@@ -299,7 +298,7 @@ std::string chief_medical_json(const ChiefMedical& c) {
 
 // ---------------------------------------------------------------------------
 // Doctors: citizens with >=1 medical labor enabled. The medical labor set is exactly what
-// labor.cpp maps to work_detail_icon_type::ORDERLIES.
+// Orderlies use the corresponding work-detail icon type.
 // ---------------------------------------------------------------------------
 struct MedLabor { df::unit_labor labor; const char* key; };
 const MedLabor kMedLabors[] = {
@@ -544,8 +543,7 @@ std::string build_hospital_patients_json(int32_t zone_id, int32_t location_id, s
     return js.str();
 }
 
-// Mutation: set one supply's desired maximum. Mirrors DF's Locations-screen +/- and quickfort:
-// desired_<field> = level * scale, and need_more.<bit> = (level > 0). Level clamped 0..99.
+// Set one supply's desired maximum and its matching need_more flag. Level is clamped to 0..99.
 bool do_hospital_supply(int32_t zone_id, int32_t location_id, const std::string& key, int level,
                         std::string* err) {
     return run_hospital_locked([&]() -> bool {

@@ -4,3 +4,6 @@
 # tracked, un-ignore it explicitly, e.g.:   !CONTRIBUTING.md
 *.md
 !/README.md
+
+# Local build, deployment, diagnostics, and regression utilities.
+tools/

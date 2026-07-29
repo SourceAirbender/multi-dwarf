@@ -184,6 +184,18 @@ std::string build_materials_json_via_lua(const std::string& token, std::string* 
     return ok ? json : "";
 }
 
+std::string build_candidates_json_via_lua(const std::string& token, std::string* err) {
+    std::string json;
+    bool ok = run_lua_locked([&]() -> bool {
+        return call_lua("build_candidates", std::make_tuple(token), 1,
+            [&](lua_State* L) {
+                if (lua_isstring(L, -1))
+                    json = lua_tostring(L, -1);
+            }, err);
+    });
+    return ok ? json : "";
+}
+
 bool place_building_via_lua(const Camera& camera, int px, int py, int px2, int py2,
                             int frame_w, int frame_h, const std::string& token,
                             int direction, const std::string& options,
@@ -572,12 +584,13 @@ std::string location_detail_json_via_lua(int32_t location_id, std::string* err) 
 }
 
 bool location_action_via_lua(int32_t location_id, const std::string& action,
-                             const std::string& kind, int32_t unit_id, std::string* err) {
+                             const std::string& kind, int32_t unit_id, int32_t value,
+                             std::string* err) {
     bool result_ok = false;
     std::string result_err;
     bool ok = run_lua_locked([&]() -> bool {
         return call_lua("location_action",
-            std::make_tuple(location_id, action, kind, unit_id), 2,
+            std::make_tuple(location_id, action, kind, unit_id, value), 2,
             [&](lua_State* L) {
                 result_ok = lua_toboolean(L, -2) != 0;
                 if (lua_isstring(L, -1))
@@ -908,11 +921,7 @@ std::string console_catalog_json_via_lua(std::string* err) {
 
 bool console_run_via_lua(const std::string& command, int& out_status, std::string& out_text,
                          std::string* err) {
-    // *** THE GATE, RE-APPLIED AT THE BRIDGE. *** console_routes.cpp already refused a blocked
-    // command with a 403 before we got here; this second call to the SAME table
-    // (console::command_denied -- there is only one) makes it structurally impossible for any
-    // future C++ caller of this bridge to reach dfhack.run_command_silent without the gate. It
-    // takes no host/loopback parameter, so the host is bound by it exactly as a friend is.
+    // Reapply the shared command policy at the native execution boundary.
     console::Denial gate = console::command_denied(command);
     if (gate.denied) {
         if (err) *err = gate.reason;

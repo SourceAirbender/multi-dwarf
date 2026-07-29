@@ -78,6 +78,12 @@ struct StockItemActionResult {
     bool forbidden = false;
     bool dump = false;
     bool hidden = false;
+    int32_t art_id = -1;
+    int16_t art_sub_id = -1;
+    std::string art_name;
+    std::string artwork_prose;
+    std::vector<std::string> art_subjects;
+    std::vector<std::string> art_properties;
     std::vector<std::string> lines;
     std::vector<std::pair<int32_t, std::string>> contents;
     std::string err;

@@ -212,7 +212,7 @@ struct SquadAmmoSpec {
     bool use_training = false;
 };
 
-// Emblem: DF's per-squad badge (df.squad.xml:342-350 on the `squad` struct). symbol is a 0..22
+// Emblem: the per-squad badge. symbol is a 0..22
 // index into the graphics-mode symbol sheet; fg/bg are the RGB of the coloured glyph. Purely
 // cosmetic (graphics mode only) -- served READ on /squads + written via /squad-emblem.
 struct SquadEmblem {
@@ -591,10 +591,8 @@ bool position_is_possible_appointable(df::historical_entity* fort, int32_t posit
     return false;
 }
 
-// `possible_appointable` is the right source for the Nobles screen, but it is not the complete
-// source for native's Create Squad chooser. AS_NEEDED squad offices (vanilla MILITIA_CAPTAIN)
-// are synthesized by that chooser once their appointing office is held, even when DF has not put
-// another vacant assignment in possible_appointable yet.
+// AS_NEEDED squad offices become appointable once an appointing office is held, even if no vacant
+// assignment has been materialized yet.
 bool position_is_as_needed_squad_appointable(df::historical_entity* fort,
                                              df::entity_position* position) {
     if (!fort || !position || position->squad_size <= 0 || position->number >= 0 ||
@@ -685,7 +683,7 @@ bool build_squad_state(SquadState& state, std::string* err) {
         row.routine_idx = squad->cur_routine_idx;
         if (row.routine_idx >= 0 && row.routine_idx < static_cast<int>(state.routines.size()))
             row.routine_name = state.routines[row.routine_idx].second;
-        // Emblem (df.squad.xml:342-350): graphics-mode badge symbol + fg/bg RGB.
+        // Graphics-mode badge symbol and foreground/background colors.
         row.emblem.symbol = squad->symbol;
         row.emblem.fg_r = squad->foreground_r;
         row.emblem.fg_g = squad->foreground_g;
@@ -696,10 +694,7 @@ bool build_squad_state(SquadState& state, std::string* err) {
         // Supplies (native 5.4): squad->supplies carry_food (0..3) + carry_water enum.
         row.carry_food = squad->supplies.carry_food;
         row.carry_water = squad_water_level_name(squad->supplies.carry_water);
-        // schedule.routine is parallel to alerts.routines (makeSquad allocates one
-        // routine entry per fort-wide named routine, same index) -- read the ACTIVE one's 12
-        // months for the quick schedule editor, AND every routine's 12 months for the monthly
-        // monthly grid and training editor.
+        // schedule.routine is index-parallel to the fort-wide named routines.
         for (int ri = 0; ri < static_cast<int>(squad->schedule.routine.size()); ++ri) {
             auto* routine = squad->schedule.routine[ri];
             if (!routine) continue;
@@ -847,7 +842,7 @@ bool build_squad_state(SquadState& state, std::string* err) {
     // Create-position half of native's chooser. A squad-capable position whose
     // raws allow another holder can have a brand-new seat made for it, which is how native keeps
     // offering "a new militia captain" after every existing captain already leads a squad. Bound:
-    // entity_position.number (df.entity.xml:977; -1 = AS_NEEDED = unlimited) -- the SAME bound
+    // entity_position.number (-1 = AS_NEEDED = unlimited) -- the same bound
     // /position-create enforces, so a chooser row here can never be rejected by the write.
     for (auto pos : fort->positions.own) {
         if (!pos || pos->squad_size <= 0 ||
@@ -1300,8 +1295,7 @@ std::string uniform_catalog_json(const std::string& player, const UniformCatalog
 // Mutations (all run under run_squad_locked -> CoreSuspender)
 // ---------------------------------------------------------------------------
 
-// Leader-seat helpers, forward-declared so do_squad_create
-// can seat the commander at position 0 the moment the squad is made).
+// Leader-seat helpers.
 df::entity_position_assignment* squad_leader_assignment(df::squad* squad);
 df::unit* squad_leader_unit(df::squad* squad);
 bool seat_leader_at_pos0(df::squad* squad, df::unit* unit, std::string* err);
@@ -1346,11 +1340,8 @@ int do_squad_create(int32_t requested_assignment_id, int32_t requested_uniform_i
                     }
                 }
             }
-            // Native DF seats the commanding militia captain or commander at position zero when
-            // moment the squad is created ("they immediately are the leader / position 0").
-            // makeSquad only records leader_position/leader_assignment; it leaves positions[0]
-            // unoccupied, which is why position 0 then looked empty and rejected assignment.
-            // Seat the assignment holder now. A vacant command position is a no-op.
+            // Seat the command-position holder at position zero. A vacant command position is a
+            // no-op.
             if (auto leader = squad_leader_unit(squad)) {
                 if (leader->military.squad_id == -1)
                     seat_leader_at_pos0(squad, leader, nullptr);
@@ -1377,29 +1368,9 @@ bool do_squad_rename(int32_t squad_id, const std::string& name, std::string* err
     });
 }
 
-// Position zero is the squad leader. Filling it appoints its occupant as the squad's militia
-// commander or captain; an empty squad's position zero must remain assignable. The relevant
-// DFHack behavior is:
-//
-//  * `Military::removeFromSquad` (library/modules/Military.cpp:478) is explicitly "based on
-//    unitst::remove_squad_info" -- DF's OWN routine -- and at :528 it branches
-//    `if (squad_pos == 0) remove_officer_entity_link(hf, squad); else remove_soldier_entity_link(...)`.
-//    `remove_officer_entity_link` (:345) finds the noble assignment whose `squad_id == squad->id`
-//    and sets `assignment->histfig = -1; assignment->histfig2 = -1;`, drops the hf's
-//    histfig_entity_link_positionst and files a former-position link + history event.
-//    So: removing the dwarf at squad position 0 VACATES the squad's militia commander/captain seat.
-//    The occupant of position 0 therefore HOLDS that seat -- the appointment follows the slot.
-//  * `Military::addToSquad` (:426) refuses `squad_pos == 0` for exactly one stated reason:
-//    "this function cannot (currently) change the squad commander". A DFHack TODO, not a DF rule.
-//  * The noble seat (df::entity_position_assignment, original name entity_position_profilest) and
-//    the squad slot (df::squad_position.occupant, original name hfid) are different objects; DF's
-//    own fill-position UI is the generic unit selector
-//    (df::unit_selector_interfacest{squad_id, squad_position}, context SQUAD_FILL_POSITION) with no
-//    slot-0 special case in its candidate set.
-//
-// Hence: pos 0 accepts any assignable citizen; seating them also performs the appointment (histfig
-// + POSITION entity link, displacing any previous holder), which is the exact inverse of what DF's
-// remove path undoes. Positions 1..9 are unchanged and still go through addToSquad.
+// Position zero is the squad leader. Filling it appoints the occupant as militia commander or
+// captain and updates the corresponding historical-figure position link. Other positions use
+// the regular squad membership path.
 
 // The fort entity's assignment (noble seat) that commands this squad, or nullptr.
 df::entity_position_assignment* squad_leader_assignment(df::squad* squad) {
@@ -1424,9 +1395,7 @@ df::unit* squad_leader_unit(df::squad* squad) {
     return df::unit::find(hf->unit_id);
 }
 
-// Drop the noble POSITION link for <fort entity, assignment> from a histfig. Same shape as
-// fort_admin.cpp's unlink_position_holder (the make-monarch.lua unlink-before-relink recipe) and
-// as the link Military.cpp's remove_officer_entity_link removes.
+// Drop the noble position link for a fort assignment from a historical figure.
 void unlink_leader_position(int32_t hf_id, int32_t entity_id, int32_t assignment_id) {
     auto hf = df::historical_figure::find(hf_id);
     if (!hf) return;
@@ -1476,12 +1445,8 @@ bool appoint_squad_leader_position(df::squad* squad, df::historical_figure* hf, 
     return true;
 }
 
-// Seat `unit` at squad position 0 (the leader/commander slot) and appoint them to the squad's
-// commanding noble seat. Mirrors the bookkeeping Military::addToSquad performs for a normal member
-// (occupant, unit->military, equipment-update flags) -- the pieces its pos-0 early-return skips --
-// but files the OFFICER (histfig_entity_link_positionst) link rather than the soldier squad link,
-// because that is the one DF's remove path takes back off a pos-0 occupant (Military.cpp:528).
-// Idempotent: a no-op success if `unit` already leads this squad. Caller holds the squad lock.
+// Seat `unit` in the leader slot, update the corresponding military state, and appoint the
+// commanding noble position. This is idempotent when the unit already leads the squad.
 bool seat_leader_at_pos0(df::squad* squad, df::unit* unit, std::string* err) {
     if (!squad || squad->positions.empty()) { if (err) *err = "squad has no positions"; return false; }
     auto pos0 = squad->positions[0];
@@ -1591,11 +1556,8 @@ bool do_squad_remove(int32_t unit_id, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// Squad orders (move, kill, train, and cancel). Uses the allocation recipe Military.cpp uses
-// for the squad-creation default train order (df::allocate<T>(), push onto a live order
-// vector, stamp year/year_tick from the world clock) applied to squad->orders -- the
-// *immediate* order queue the in-game squad screen's Move/Kill/Train buttons push onto
-// This is distinct from squad->schedule, the per-month routine template.
+// Squad orders (move, kill, train, and cancel) use the immediate order queue, distinct from the
+// per-month routine schedule.
 // Patrol and defend-burrow use the same queue. Patrol additionally creates a persistent route in
 // plotinfo->waypoints (point_infost.points/routes), which is the canonical store referenced by
 // squad_order_patrol_routest.route_id.
@@ -1803,7 +1765,7 @@ bool do_squad_order_defend_burrow(int32_t squad_id, const std::vector<int32_t>& 
 }
 
 // Squad emblem write. The six colour bytes and symbol index are graphics-mode
-// cosmetics (df.squad.xml:342-350) with no sim invariant, so a clamped in-place write is safe.
+// cosmetics with no simulation invariant, so a clamped in-place write is safe.
 // -1 sentinels mean "leave unchanged" (partial update): the caller passes -1 for any field the
 // client is not editing so toggling one never clobbers the others.
 bool do_squad_emblem(int32_t squad_id, int symbol, int fg_r, int fg_g, int fg_b,
@@ -1847,16 +1809,11 @@ bool do_squad_supplies(int32_t squad_id, int food, const std::string& water_str,
 }
 
 // ---------------------------------------------------------------------------
-// Routine authoring. Routines are fort-global
-// (plotinfo->alerts.routines) but every squad carries a PARALLEL schedule.routine entry at the
-// same index (Military.cpp's makeSquad allocates one squad_routine_schedulest per fort routine).
-// So create/delete must keep BOTH sides in lockstep across every squad, exactly as DF's own
-// add/remove-routine does -- otherwise cur_routine_idx or a monthly read would index out of range.
+// Routines are fort-global, while every squad carries an index-parallel schedule entry. Create and
+// delete operations must keep both sides in lockstep.
 // ---------------------------------------------------------------------------
 
-// Build one squad's schedule entry for a NEW routine, replicating makeSquad's per-name defaults
-// (Off duty / Staggered training / Constant training / Ready / generic). squad_size = number of
-// positions. Caller already holds run_squad_locked.
+// Build one squad schedule entry with the standard named-routine defaults.
 df::squad_routine_schedulest* make_routine_schedule_for_squad(df::squad* squad,
                                                               const std::string& name) {
     int squad_size = static_cast<int>(squad->positions.size());
@@ -1911,8 +1868,7 @@ df::squad_routine_schedulest* make_routine_schedule_for_squad(df::squad* squad,
     return schedule;
 }
 
-// Deep-delete one squad_routine_schedulest (every month's scheduled orders + per-position markers),
-// mirroring do_squad_delete's schedule-tree teardown.
+// Deep-delete a routine schedule and all owned monthly state.
 void free_routine_schedule(df::squad_routine_schedulest* routine) {
     if (!routine) return;
     for (int m = 0; m < 12; ++m) {
@@ -1998,12 +1954,8 @@ bool do_routine_delete(int routine_idx, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// Schedule (squad.schedule months x routines). schedule.routine is parallel to
-// plotinfo->alerts.routines (Military.cpp's makeSquad allocates one routine entry per
-// fort-wide named routine, at the same index) -- switching cur_routine_idx picks which named
-// routine is active (matches DF's own schedule-screen routine-name selector); set-month writes
-// the Sleep/Uniform fields of one month of the CURRENTLY active routine (matches the sleep/
-// uniform grid under it). Per-month scheduled orders remain read-only through order_count.
+// schedule.routine is index-parallel to the fort-wide routines. cur_routine_idx selects the active
+// routine; set-month updates sleep and uniform fields for one month. Order counts remain read-only.
 // ---------------------------------------------------------------------------
 
 bool do_squad_set_routine(int32_t squad_id, int routine_idx, std::string* err) {
@@ -2101,13 +2053,8 @@ bool do_squad_schedule_set_month_order(int32_t squad_id, int routine_idx, int mo
 }
 
 // ---------------------------------------------------------------------------
-// Uniform assignment applies an existing fort uniform template (fort->uniforms,
-// authored via DF's own military Uniforms page) onto one squad position's per-category
-// equipment spec vectors. This applies existing templates and does not author new ones. It mirrors
-// the template's item_type/subtype/
-// material fields into fresh squad_uniform_spec allocations (item id left unset, same as a
-// freshly-applied uniform in-game: specific items get matched in by the sim afterward), and
-// copies the template's replace-clothing/exact-match flags (same bitfield type on both sides).
+// Uniform assignment copies an existing fort template into one squad position's equipment specs.
+// Item ids remain unset so DF can match specific equipment afterward.
 // ---------------------------------------------------------------------------
 
 bool apply_uniform_to_position_locked(df::squad* squad, int32_t pos_idx,
@@ -2274,13 +2221,8 @@ bool do_squad_equipment_change(int32_t squad_id, int32_t pos_idx, const std::str
 }
 
 // ---------------------------------------------------------------------------
-// Squad deletion. DFHack::Military exposes no single disband call, so this tears the squad down
-// way DF's own disband would: release every occupied position (Military::removeFromSquad --
-// no position-0 restriction there, unlike addToSquad), free the leader position's assignment
-// slot for reuse, deep-delete every heap object the squad exclusively owns (current orders,
-// per-position orders + uniform specs, the whole schedule.routine tree, barracks room links
-// incl. the building-side backref -- mirrors Military::updateRoomAssignments's own removal
-// branch), then unlink the id from fort->squads / world->squads.all and free the squad object.
+// Squad deletion releases occupied positions and the leader assignment, deep-deletes owned
+// schedules, orders, equipment, and room links, then unlinks and frees the squad.
 // ---------------------------------------------------------------------------
 
 // Null the dying squad out of a single raw-pointer cache slot.
@@ -2306,31 +2248,8 @@ inline bool contains_squad(const std::vector<df::squad*>& vec, const df::squad* 
 // A df::squad is not a df::building, so squad pointer caches require a parallel purge helper.
 // This must run under the caller's CoreSuspender.
 //
-// Freeing a df::squad while any native squad screen still holds a RAW POINTER to it is a
-// use-after-free when a freed object remains
-// live in a game.main_interface UI cache, walked on the next frame. df-structures enumerates every
-// fort-mode screen that caches a squad*; this nulls the dying squad out of each BEFORE the free.
-// Conservative: a slot is touched only when it points at THIS squad; ids are never rewritten
-// (main_interface.squad_selector caches squad_id[] -- integers, safe by construction).
-//
-// Cache sites (df.d_interface.xml / df.plotinfo.xml / df.squad.xml, DFHack 53.15-r1):
-//   game.main_interface.view.squad_list_sq   (d_interface:520)  unit view-sheet "assign to squad"
-//   game.main_interface.view.name_squad      (d_interface:533)  squad being renamed
-//   game.main_interface.barracks_squad       (d_interface:5528) barracks assignment screen
-//   game.main_interface.ap_squad             (d_interface:5534) assign-position (single)
-//   game.main_interface.ap_squad_list        (d_interface:5538) assign-position-squad list
-//   plotinfo.squads.list                     (plotinfo:517)     the 's' military squad-mode list
-//   plotinfo.squads.nearest_squad            (plotinfo:531)     hover cache
-//   viewscreen_worldst.squad                 (d_interface:7029) world/mission screen's send-on-a-
-//     mission squad picker (sibling of squad_flag / civlist / army_controller / messenger_epp).
-//     This is a live viewscreen, NOT a main_interface field: it holds pointers to FORT squads
-//     (missions.cpp opens it from fort mode to dispatch raids), so a squad freed while it is
-//     on the stack would dangle. Walk the whole gview stack and null it there too.
-//   world.squads.order_load                  (squad:356)        DF-marked has-bad-pointers; a
-//     load-time reconstruction buffer DF does not walk during play (sibling of world.squads.all,
-//     which do_squad_delete already erases from). Documented-safe, but nulled here too as cheap,
-//     in-scope defense-in-depth so no freed pointer survives anywhere.
-// NOT purged: main_interface.squad_selector caches squad_id[] -- integers, safe by construction.
+// Purge every raw squad pointer held by native UI state before freeing a squad. Integer squad-id
+// caches do not require mutation.
 //
 // Main-interface squad caches are consumed through widget state. Dismiss each dependent surface
 // before clearing its subject. Parallel vectors are cleared together and their selection index is
@@ -2358,16 +2277,13 @@ void purge_ui_caches_for_squad(df::squad* squad) {
             vu.name_squad = nullptr;
             vu.naming_squad = false;
         }
-        // Barracks assignment list: barracks_squad / barracks_squad_flag are a parallel pair;
-        // clear both + reset the index, byte-for-byte what DF's own FUN_1407c49c0 reset does.
+        // Barracks squad and flag vectors are parallel; clear both and reset the index.
         if (contains_squad(mi.barracks_squad, squad)) {
             mi.barracks_squad.clear();
             mi.barracks_squad_flag.clear();
             mi.barracks_selected_squad_ind = 0;
         }
-        // Assign-position pickers: if the dying squad is the single-picker subject OR any entry of
-        // the squad-list picker, dismiss BOTH pickers -- FUN_1408bd4e0 clears the two flags as a
-        // pair, so we do too (conservative; reopening re-derives everything).
+        // Dismiss both assign-position pickers if either references the dying squad.
         const bool ap_hit = (mi.ap_squad == squad);
         const bool apl_hit = contains_squad(mi.ap_squad_list, squad);
         if (ap_hit)
@@ -2381,9 +2297,7 @@ void purge_ui_caches_for_squad(df::squad* squad) {
             mi.assigning_position_squad = false;
         }
     }
-    // plotinfo.squads: DF annotates list has-bad-pointers, and DF's own squads-mode reset
-    // (FUN_140e5c1c0) nulls list/nearest_squad wholesale -- null-tolerant by DF's own contract, so
-    // null-in-place suffices here (list is parallel to squad_id/sel_squads: never erase).
+    // Null in place because the pointer list is parallel to integer selection vectors.
     if (auto* plotinfo = df::global::plotinfo) {
         null_squad_in(plotinfo->squads.list, squad);
         null_if_squad(plotinfo->squads.nearest_squad, squad);
@@ -2417,8 +2331,7 @@ bool do_squad_delete(int32_t squad_id, std::string* err) {
             pos->occupant = -1; // in case removeFromSquad found no live unit to unlink
         }
 
-        // Free the position assignment this squad was tied to (mirrors makeSquad's forward
-        // edge: found_assignment->squad_id = result->id).
+        // Free the position assignment associated with this squad.
         for (auto asn : fort->positions.assignments) {
             if (asn && asn->squad_id == squad_id) asn->squad_id = -1;
         }
@@ -2438,9 +2351,7 @@ bool do_squad_delete(int32_t squad_id, std::string* err) {
         for (auto order : squad->orders) delete order;
         squad->orders.clear();
 
-        // Deep-delete the full schedule tree (N routines x 12 months), incl. each month's
-        // scheduled orders (own squad_order alloc, per Military.cpp's insert_training_order
-        // recipe) and per-position order-assignment markers.
+        // Deep-delete the full schedule tree, including monthly orders and position markers.
         for (auto routine : squad->schedule.routine) {
             if (!routine) continue;
             for (int m = 0; m < 12; ++m) {
@@ -2455,8 +2366,7 @@ bool do_squad_delete(int32_t squad_id, std::string* err) {
         }
         squad->schedule.routine.clear();
 
-        // Barracks rooms: drop this squad's backref from the building side too (mirrors
-        // Military::updateRoomAssignments's own removal branch) before deleting our copy.
+        // Drop barracks backreferences from both the building and squad sides.
         for (auto room : squad->rooms) {
             if (!room) continue;
             auto bld = df::building::find(room->building_id);
@@ -2828,10 +2738,7 @@ void register_squad_routes(httplib::Server& server) {
             json_error(res, 400, "missing squad");
             return;
         }
-        // Disbanding is available to every authenticated player. do_squad_delete first nulls the
-        // squad out of every fort-mode squad-UI cache (df.d_interface.xml view.squad_list_sq/
-        // name_squad/barracks_squad/ap_squad/ap_squad_list + plotinfo.squads.list/nearest_squad)
-        // before freeing it, all under CoreSuspender. Join-auth refuses unauthenticated callers.
+        // Null the squad from every fort-mode UI cache before freeing it.
         std::string err;
         if (!do_squad_delete(squad_id, &err)) {
             json_error(res, 400, err);

@@ -26,15 +26,8 @@
 //                            core lock).
 //   POST /console/run?cmd=   run one command, return {status, output}.
 //
-// Authentication, not loopback identity: both routes are
-// available to ANY player holding a valid join-auth cookie. Neither handler calls
-// peer_ip_is_loopback -- there is deliberately NO host gate. Anonymous/unauthed callers are already
-// refused upstream by the auth pre-routing handler (http_server.cpp), because neither path carries a
-// static-asset extension and neither is in join_public_path -- so with a join passphrase set, an
-// unauthed request never reaches these handlers at all.
-//
-// CONTAINMENT is therefore entirely the server-side blocklist in src/console_policy.h, which takes
-// no caller identity and so binds the host exactly as it binds a friend. See that header.
+// Both routes are available to connected players. The host setting and the server-side command
+// policy in console_policy.h constrain execution uniformly for every caller.
 
 #pragma once
 

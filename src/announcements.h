@@ -32,7 +32,7 @@ namespace dfcapture {
 
 // One entry from world->status.reports (the full combat/civilian/production event
 // log DF keeps -- distinct from world->status.announcements, which only holds what
-// scrolled through the top-of-screen banner). Field set mirrors NotificationReport
+// scrolled through the top-of-screen banner). The field set matches NotificationReport
 // in notifications.h so the client can reuse the same render helpers (dfTextColor,
 // reportText, alertIconStyle) across both /notifications and /reports payloads.
 struct ReportEntry {

@@ -25,7 +25,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DFCapture</title>
-<link rel="stylesheet" href="/css/dfcapture.css?v=0.9.43-coop-parity">
+<link rel="stylesheet" href="/css/dfcapture.css?v=0.9.46-native-trade">
 </head>
 <body tabindex="0">
 <!-- Crisp-text filter: 1-bits the glyph-mask alpha to undo Chrome/DirectWrite ClearType smear so
@@ -38,6 +38,7 @@
   </filter>
 </svg>
 <img id="view" tabindex="0" alt="">
+<canvas id="frameView" aria-hidden="true"></canvas>
 <canvas id="zoneOverlay" aria-hidden="true"></canvas>
 <div id="hud">
   <div id="leftBadges">
@@ -75,8 +76,15 @@
       </div>
     </div>
     <button class="top-button" data-panel="stocks">Stocks</button>
-    <div class="status-group hide-small"><span class="label">Food</span><span id="food" class="gold">~0</span></div>
-    <div class="status-group hide-small"><span class="label gold">Drink</span><span id="drink">~0</span></div>
+    <div id="stockSummary" class="status-group hide-small" aria-label="Fortress food stocks">
+      <span class="stock-cell"><span class="label stock-food">Food</span><span id="food" class="stock-value gold">None</span></span>
+      <span class="stock-cell"><span class="label stock-drink">Drink</span><span id="drink" class="stock-value">None</span></span>
+      <span class="stock-cell"><span class="label stock-seeds">Seeds</span><span id="seeds" class="stock-value">None</span></span>
+      <span class="stock-cell"><span class="label stock-meat">Meat</span><span id="meat" class="stock-value">None</span></span>
+      <span class="stock-cell"><span class="label stock-fish">Fish</span><span id="fish" class="stock-value">None</span></span>
+      <span class="stock-cell"><span class="label stock-plant">Plant</span><span id="plant" class="stock-value">None</span></span>
+      <span class="stock-cell"><span class="label stock-other">Other</span><span id="other" class="stock-value">None</span></span>
+    </div>
     <div class="moon" id="moon"></div>
     <div class="fort-lines">
       <div><span id="dateDay">1st</span> <span id="dateMonth">Granite</span></div>
@@ -85,6 +93,7 @@
     </div>
   </div>
   <div id="pauseRow">
+    <button class="top-button ownership-top-button" id="ownershipTopBtn" type="button">Player-owned dwarves</button>
     <button class="square-button native-top-art pause-art" data-action="pause" title="Pause"></button>
     <button class="square-button native-top-art play-art" data-action="play" title="Play"></button>
     <button class="square-button native-top-art settings-art" id="settingsBtn" title="Settings"></button>
@@ -293,19 +302,19 @@
 <div id="hoverInfo"></div>
 <div id="alertStack" aria-live="polite"></div>
 <div id="alertPopup"></div>
-<script src="/js/dfcapture-session.js?v=0.9.41-audio-stream"></script>
+<script src="/js/dfcapture-session.js?v=0.9.45-release-core"></script>
 <script src="/js/dfcapture-audio.js?v=0.9.41-audio-stream"></script>
-<script src="/js/dfcapture-core.js?v=0.9.43-coop-parity"></script>
+<script src="/js/dfcapture-core.js?v=0.9.45"></script>
 <script src="/js/dfcapture-building-zone-stockpile-panels.js?v=0.9.38-building-controls"></script>
-<script src="/js/dfcapture-unit-hud-notifications.js?v=0.9.43-coop-parity"></script>
-<script src="/js/dfcapture-build-info-panels.js?v=0.9.38-building-controls"></script>
-<script src="/js/dfcapture-location-panel.js?v=0.9.36-location-depth"></script>
+<script src="/js/dfcapture-unit-hud-notifications.js?v=0.9.45"></script>
+<script src="/js/dfcapture-build-info-panels.js?v=0.9.44-exact-item-picker"></script>
+<script src="/js/dfcapture-location-panel.js?v=0.9.45-release-core"></script>
 <script src="/js/dfcapture-labor-work-orders.js?v=0.9.39-production-editors"></script>
 <script src="/js/dfcapture-squads.js?v=0.9.22-traffic-minimap"></script>
-<script src="/js/dfcapture-worldmap.js?v=0.9.43-coop-parity"></script>
+<script src="/js/dfcapture-worldmap.js?v=0.9.45"></script>
 <script src="/js/dfcapture-hospital.js?v=0.9.22-traffic-minimap"></script>
 <script src="/js/dfcapture-kitchen.js?v=0.9.22-traffic-minimap"></script>
-<script src="/js/dfcapture-tradedepot.js?v=0.9.22-traffic-minimap"></script>
+<script src="/js/dfcapture-tradedepot.js?v=0.9.46-native-trade"></script>
 <script src="/js/dfcapture-console.js?v=0.9.22-traffic-minimap"></script>
 <script src="/js/dfcapture-help-corpus.js?v=0.9.22-traffic-minimap"></script>
 <script src="/js/dfcapture-help-curated.js?v=0.9.22-traffic-minimap"></script>
@@ -318,11 +327,18 @@
 <script src="/js/dfcapture-burrows.js?v=0.9.22-traffic-minimap"></script>
 <script src="/js/dfcapture-hauling.js?v=0.9.39-production-editors"></script>
 <script src="/js/dfcapture-minimap.js?v=0.9.31-elevation-meter"></script>
-<script src="/js/dfcapture-controls-placement.js?v=0.9.35-zone-management"></script>
+<script src="/js/dfcapture-controls-placement.js?v=0.9.45-release-core"></script>
 <script src="/js/dfcapture-chat.js?v=0.9.27-chat-pings"></script>
-<script src="/js/dfcapture-coop-parity.js?v=0.9.44-hotkey-mode"></script>
-<script src="/js/dfcapture-panel-frame.js?v=0.9.43-coop-parity"></script>
-<script src="/js/dfcapture-touch.js?v=0.9.43-coop-parity"></script>
+<script src="/js/dfcapture-domain-ui.js?v=0.9.45"></script>
+<script src="/js/dfcapture-player-ownership.js?v=0.9.46-ownership"></script>
+<script src="/js/dfcapture-native-popup.js?v=0.9.45"></script>
+<script src="/js/dfcapture-camera-hotkeys.js?v=0.9.45"></script>
+<script src="/js/dfcapture-player-activity.js?v=0.9.45"></script>
+<script src="/js/dfcapture-since-you-left.js?v=0.9.45"></script>
+<script src="/js/dfcapture-fortress-overview.js?v=0.9.45"></script>
+<script src="/js/dfcapture-tile-details.js?v=0.9.45"></script>
+<script src="/js/dfcapture-panel-frame.js?v=0.9.45"></script>
+<script src="/js/dfcapture-touch.js?v=0.9.45"></script>
 <script>startDfcapture();</script>
 </body>
 </html>

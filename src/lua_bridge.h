@@ -32,6 +32,7 @@ bool lua_ping(int value, int& out_value, std::string* err = nullptr);
 
 std::string building_catalog_json_via_lua(std::string* err = nullptr);
 std::string build_materials_json_via_lua(const std::string& token, std::string* err = nullptr);
+std::string build_candidates_json_via_lua(const std::string& token, std::string* err = nullptr);
 bool place_building_via_lua(const Camera& camera, int px, int py, int px2, int py2,
                             int frame_w, int frame_h, const std::string& token,
                             int direction, const std::string& options,
@@ -87,7 +88,7 @@ bool zone_location_action_via_lua(int32_t zone_id, const std::string& action,
                                   std::string* err = nullptr);
 std::string location_detail_json_via_lua(int32_t location_id, std::string* err = nullptr);
 bool location_action_via_lua(int32_t location_id, const std::string& action,
-                             const std::string& kind, int32_t unit_id,
+                             const std::string& kind, int32_t unit_id, int32_t value,
                              std::string* err = nullptr);
 std::string burial_coffin_info_json_via_lua(int32_t id, std::string* err = nullptr);
 bool burial_coffin_action_via_lua(int32_t id, const std::string& action,
@@ -126,9 +127,8 @@ bool reorder_order_via_lua(int32_t id, int32_t direction, std::string* err = nul
 bool mission_rescue_stuck_via_lua(int& out_rescued, std::string& out_text,
                                    std::string* err = nullptr);
 
-// Browser DFHack command console. The catalog is helpdb's command list (static per session);
-// run executes ONE blocklist-cleared command via dfhack.run_command_silent (the deny table in
-// console_policy.h is re-checked here as a backstop -- see console_routes.cpp for the model).
+// Browser DFHack command console. The catalog is static per session, and execution rechecks the
+// shared command policy at the bridge.
 std::string console_catalog_json_via_lua(std::string* err = nullptr);
 bool console_run_via_lua(const std::string& command, int& out_status, std::string& out_text,
                          std::string* err = nullptr);

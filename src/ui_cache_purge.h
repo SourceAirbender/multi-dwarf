@@ -31,8 +31,7 @@
 // CoreSuspender that guards the free, BEFORE Buildings::deconstruct. It is CONSERVATIVE: it only
 // nulls/closes a cache that points AT the dying building; unrelated buildings and id-based caches
 // (view_sheets viewing_*, stockpile_link/stockpile_tools bld_id, create_work_order forced_bld_id,
-// squads_interfacest ids) are left untouched. See src/ui_cache_purge.cpp for the full audit of
-// main_interface.h's building-pointer fields.
+// squads_interfacest ids) are left untouched.
 
 #pragma once
 

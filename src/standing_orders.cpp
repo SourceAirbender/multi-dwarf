@@ -61,7 +61,7 @@ bool run_standing_orders_locked(Fn&& fn) {
 }
 
 // Every df::global::standing_orders_* field is a `uint8_t*` (DFHack's usual "address of a
-// singleton bool byte" pattern, same shape as df::global::pause_state -- see hud.cpp). The
+// singleton bool-byte pattern. The
 // table stores the ADDRESS OF that pointer variable (uint8_t**) so read/write is generic:
 // *addr is the uint8_t* (null if this DF build doesn't expose it), **addr is the live value.
 struct StandingOrderDef {
@@ -218,12 +218,12 @@ bool set_standing_order(const std::string& key, int raw, std::string* err) {
 }
 
 // ---- Children roster and chore-type flags ---------------------------------------------------
-// Backed by plotinfo.labor_info (df.plotinfo.xml:1025 -> labor_infost, :617-627):
+// Backed by plotinfo.labor_info:
 //   flags.children_do_chores  -- the global "Children do/don't do chores" toggle
 //   chores[unit_labor]        -- per chore-type enable (the 14 native chore labors below)
 //   chores_exempted_children  -- unit ids of children opted OUT (so enabled == NOT exempt)
 // The 14 chore types use DF's native captions and order (the captions match
-// df.d_basics.xml unit_labor item-attr caption values exactly).
+// live unit-labor captions).
 struct ChoreType {
     const char* key;
     const char* label;

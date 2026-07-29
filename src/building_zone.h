@@ -43,6 +43,7 @@ struct BuildingPanelInfo {
     bool passage_closed = false;
     bool is_farm_plot = false;
     bool is_cage = false;
+    bool is_trade_depot = false;
     int cage_assigned_units = 0;
     int cage_assigned_items = 0;
 };

@@ -13,6 +13,8 @@ enum class AttribKind { Building, Order, Stockpile, Zone };
 
 void attrib_note_world(const std::string& save_dir);
 void attrib_stamp(AttribKind kind, int32_t id, const std::string& player);
+void attrib_record(AttribKind kind, int32_t id, const std::string& player,
+                   const std::string& action);
 bool attrib_lookup(AttribKind kind, int32_t id, std::string& player);
 std::string attrib_json();
 

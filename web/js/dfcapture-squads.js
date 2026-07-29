@@ -23,7 +23,7 @@
   // Read: GET /squads (list + free/creatable command positions), GET /squad?id= (one squad's
   // members, candidate dwarves, and orders). Write: /squad-create, /squad-rename, /squad-delete,
   // /squad-assign, /squad-remove, /squad-order. The backend does the DF work under CoreSuspender;
-  // this panel is pure fetch + DOM, mirroring the Work Orders panel's open -> refresh -> render
+  // This panel uses the shared open -> refresh -> render lifecycle.
   // loop and reusing the shared info-window chrome.
   let sqSquads = [];             // squads from /squads
   let sqFreePositions = [];      // command seats a squad can be created under (assignmentId-based)

@@ -137,11 +137,8 @@ ReportEntry copy_report_entry(df::world* world, df::report* report) {
     return out;
 }
 
-// Classification costs two array indexes and, only for a Misc
-// row) a walk of a 16-entry rescue table. No allocation, no string work, no DF call -- which is the
-// entire reason the taxonomy is BAKED (announce_taxonomy.gen.h) rather than parsed at runtime.
-// The EXPENSIVE part of a page is copy_report_entry (translateName + std::string), and that is
-// bounded by max_reports, never by the size of the fort's log.
+// Classification uses two array indexes and, for Misc rows, a 16-entry fallback table. The
+// generated taxonomy avoids allocation and DF calls. Entry copying remains bounded by max_reports.
 inline bool report_matches(df::report* report, const ReportsQuery& query) {
     const int type = static_cast<int>(report->type);
     const int alert = alert_type_for_report(report);

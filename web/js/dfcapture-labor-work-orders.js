@@ -851,7 +851,9 @@
       meta.push(`<span class="wo-freq">${escapeHtml(o.frequency === "OneTime" ? "One time" : o.frequency)}</span>`);
       meta.push(escapeHtml(o.workshopName || "Any workshop"));
       const amtTxt = Number(o.amountTotal) > 0 ? `${o.amountLeft}/${o.amountTotal}` : "repeating";
-      return `<div class="wo-order" data-wo-row="${o.id}">
+      return `<div class="wo-order" data-wo-row="${o.id}" data-attrib-kind="order"
+        data-attrib-id="${o.id}">
+        <span data-attrib-slot></span>
         <div class="wo-pos">${Number(o.pos) + 1}</div>
         <div class="wo-order-main">
           <div class="wo-job">${escapeHtml(o.job)} <span class="wo-amt-tag">${escapeHtml(amtTxt)}</span></div>
@@ -1034,6 +1036,7 @@
         <div class="info-body" style="grid-template-columns:1fr;">${body}</div>
         <div class="info-footer"><div>Orders are filled by your fort's manager. Changes apply to the host fort immediately.</div></div>
       </div>`;
+    window.dfAttribution?.decorate(clientPanel);
 
     // ---- handlers (guarded by element/mode existence; absent ones simply no-op) ----
     clientPanel.querySelectorAll("[data-wo-goto]").forEach(b => b.addEventListener("click", e => {

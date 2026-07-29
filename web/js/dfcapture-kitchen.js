@@ -21,7 +21,7 @@
   // ---- Kitchen panel: GET /kitchen (cookable stock + seed plants) + POST /kitchen-toggle -------
   // DF's kitchen screen in the browser: per-item Cook/Brew permission cells. Item rows address
   // the exclusion by type/mat/matIndex; plant rows by plant id (their cook cell is the SEED
-  // toggle, mirroring native DF).
+  // toggle, matching the game).
   let kitData = null;
   let kitView = "items";   // items | plants
   let kitFilter = "";

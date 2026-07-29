@@ -136,9 +136,7 @@ int squad_member_count(df::squad* squad) {
     return n;
 }
 
-// scripts/fix/stuck-squad.lua get_squad_army(): a squad's army is whichever army any of its
-// still-living members' historical figures says it is with. Members die, so every position is
-// checked, not just the first.
+// Resolve a squad's army through every living member because the first position may be vacant.
 df::army* squad_army(df::squad* squad) {
     if (!squad) return nullptr;
     for (auto* pos : squad->positions) {
@@ -151,22 +149,19 @@ df::army* squad_army(df::squad* squad) {
     return nullptr;
 }
 
-// scripts/fix/stuck-squad.lua is_army_stuck(): "from observing bugged saves, this condition
-// appears to be unique to stuck armies". Copied verbatim, including the 0 (not -1) comparison.
+// A nonzero controller id with no controller identifies a stranded army.
 bool army_is_stuck(df::army* army) {
     return army && army->controller_id != 0 && !army->controller;
 }
 
-// scripts/fix/stuck-squad.lua get_top_controller(): a camping army hangs off a sub-controller;
-// the real order is the one whose master_id points at itself.
+// Camping armies can hang from sub-controllers; the top controller points its master_id at itself.
 df::army_controller* top_controller(df::army_controller* controller) {
     if (!controller) return nullptr;
     if (controller->master_id == controller->id) return controller;
     return df::army_controller::find(controller->master_id);
 }
 
-// scripts/fix/stuck-squad.lua is_army_valid_and_returning(). Only these two goals expose a
-// homeward flag the script trusts; anything else is "not a rescue vehicle".
+// Only these controller goals expose a usable homeward flag.
 void army_valid_returning(df::army* army, bool& valid, bool& returning) {
     valid = false;
     returning = false;
@@ -182,7 +177,7 @@ void army_valid_returning(df::army* army, bool& valid, bool& returning) {
 }
 
 // Read the union member that `goal` selects -- and ONLY that one. df::army_controller::data is a
-// true union (df.army_controller.xml), so reading goal_recover_artifact on a SITE_INVASION
+// true union, so reading goal_recover_artifact on a SITE_INVASION
 // controller is reading an unrelated struct through a live pointer. `returning` is emitted as a
 // tri-state (-1 = this goal has no homeward flag) rather than defaulting to false, so the client
 // never claims "outbound" about a goal that does not track it.
@@ -280,7 +275,7 @@ std::vector<df::squad*> fort_squads(const FortView& v) {
     return out;
 }
 
-// Which army_controllers are OURS. Same test worldmap_panel.cpp already ships (a controller is a
+// Determine which army controllers belong to the fort (a controller is a
 // fortress mission if any of its assigned squads is one of ours, or it belongs to our government /
 // civ) -- kept identical on purpose so the world-map overlay and this screen can never disagree
 // about what counts as an active mission.
@@ -296,7 +291,7 @@ bool is_fort_controller(df::army_controller* c, const FortView& v) {
     return c->entity_id == plotinfo->group_id || c->entity_id == plotinfo->civ_id;
 }
 
-// Candidate targets = every site the fort KNOWS about. historical_entity.h:235 warns that a fresh
+// Candidate targets are every site the fort knows about. A fresh
 // player site government's known_sites is EMPTY -- the civ carries them -- so both entities are
 // unioned. Our own site is excluded (world_new_mission_type::OWN_SITE is DF's own refusal for it).
 std::vector<df::world_site*> candidate_targets(const FortView& v) {
@@ -328,7 +323,7 @@ std::string build_missions_json(const std::string& player, std::string* err) {
              << ",\"ownSite\":" << json_string(site_name_of(own_site))
              << ",\"civ\":" << json_string(entity_name_of(v.civ));
 
-        // --- squads: ours, with DF's own "already committed" bit (squad.h:36) -------------------
+        // --- squads belonging to the fort and not already committed -----------------------------
         auto squads = fort_squads(v);
         body << ",\"squads\":[";
         bool first = true;
@@ -418,7 +413,7 @@ std::string build_missions_json(const std::string& player, std::string* err) {
         }
 
         // --- stranded squads + whether DFHack's repair can actually run right now -----------------
-        // scan_fort_armies() in fix/stuck-squad.lua: the rescue only works when SOME army or
+        // Rescue only works when some army or
         // messenger is on its way HOME to carry the stranded members back. Mirrored here so the
         // button is only offered when the script would succeed.
         body << "],\"stuckSquads\":[";
@@ -520,7 +515,7 @@ bool do_mission_create(const std::string& goal, int32_t site_id, const std::vect
             return false;
         }
 
-        // Squads: ours, non-empty, and not already committed (squad.h:36 -- DF's own bit).
+        // Squads: belonging to the fort, non-empty, and not already committed.
         if (squad_ids.empty()) {
             if (err) *err = "pick at least one squad";
             return false;
@@ -626,10 +621,8 @@ void register_mission_routes(httplib::Server& server) {
         set_no_store_json(res, json);
     });
 
-    // POST /mission-rescue -> the one real mission-domain write: run DFHack's OWN
-    // scripts/fix/stuck-squad.lua. We do not reimplement it; the lua bridge runs the upstream
-    // script and hands back its console text. Pre-checked against the same scan the script does,
-    // so a click that DFHack would reject never reaches it.
+    // POST /mission-rescue runs the supported squad-recovery command through the Lua bridge and
+    // returns its console result after validating the request.
     auto rescue_handler = [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
         std::string err;

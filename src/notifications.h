@@ -74,6 +74,11 @@ struct NotificationAlert {
 struct NotificationState {
     int32_t next_report_id = 0;
     int32_t report_count = 0;
+    int32_t petitions_pending = 0;
+    int32_t diplomacy_meetings_queued = 0;
+    bool diplomacy_open = false;
+    bool alert_button_active = false;
+    std::vector<std::string> alert_button_dismiss_keys;
     std::vector<NotificationAlert> alerts;
     std::vector<NotificationReport> recent;
 };

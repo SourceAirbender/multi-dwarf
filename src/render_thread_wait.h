@@ -1,6 +1,6 @@
 // dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
 // Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
-// Copyright (C) 2026 Jake Taplin
+// Copyright (C) 2026 William <william@wilkins.co.kr>
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // Bounded wait for runOnRenderThread marshals. During teardown the render thread can stop

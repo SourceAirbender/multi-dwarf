@@ -80,9 +80,8 @@ namespace {
 
 std::recursive_mutex g_admin_mutex;
 
-// Same lock discipline as squads.cpp: panel mutex -> capture-state mutex ->
-// CoreSuspender. Reads run under the same guard as mutations so iterating the
-// crime/agreement/entity vectors never races the sim.
+// Lock order: panel mutex -> capture-state mutex -> CoreSuspender. Reads and mutations use the
+// same guard.
 template <typename Fn>
 bool run_admin_locked(Fn&& fn) {
     std::lock_guard<std::recursive_mutex> admin_lock(g_admin_mutex);
@@ -170,8 +169,7 @@ std::string squad_name_for(int32_t squad_id) {
     return DFHack::Translation::translateName(&squad->name, true);
 }
 
-// Room-requirement levels come straight from entity_position; values above zero mean required.
-// means the position requires that room). df.entity.xml:530-538.
+// Room-requirement values above zero mean the position requires that room type.
 struct RoomReqs { int32_t office, bedroom, dining, tomb, box; };
 RoomReqs position_room_reqs(df::entity_position* p) {
     return { p->required_office, p->required_bedroom, p->required_dining, p->required_tomb,
@@ -180,16 +178,8 @@ RoomReqs position_room_reqs(df::entity_position* p) {
 
 // Determine which room kinds the holder actually owns.
 //
-// In v50 a noble's assigned rooms are
-// CIVZONES, not furniture buildings: df::unit::owned_buildings is a vector<building_civzonest*>
-// (df.unit.xml `owned_buildings` / original `zone_assigned`), and the room KIND is the civzone's
-// own `type` (df::civzone_type), NOT the underlying furniture's building_type. DFHack's own
-// noble-room plugin classifies this exact same list the same way -- `owned_zone->type ==
-// civzone_type::{Bedroom,Office,DiningHall,Tomb}` (dfhack plugins/preserve-rooms.cpp:520-523,562).
-// Presence-only: a too-cheap room DF would still flag red reads as satisfied here. DF's real
-// GOOD-vs-red split is a room-VALUE threshold (entity_position.required_office is a value, and
-// DFHack's getRoomValue()/getRoomDescription() are disabled-for-v50 TODOs -- Buildings.cpp:1557),
-// so the value threshold is deliberately not modeled. This reports ownership of the required kind.
+// Noble rooms are civzones, and their civzone type determines the room kind. This reports ownership
+// of the required kind; value thresholds are not independently modeled.
 struct RoomOwned { bool office = false, bedroom = false, dining = false, tomb = false; };
 RoomOwned holder_owned_rooms(df::unit* holder) {
     RoomOwned owned;
@@ -211,21 +201,8 @@ RoomOwned holder_owned_rooms(df::unit* holder) {
 
 // Create an additional position seat.
 //
-// What "create a position" means in DF: you cannot invent a new entity_position -- those come from
-// the entity raws (df.entity.xml:938 entity_position, loaded from ENTITY_POSITION tokens). What
-// DF's own create-squad flow does is create a new ASSIGNMENT (a new SEAT) for an existing position
-// whose raw allows more holders:
-//   entity_position.number  (df.entity.xml:977, init 1) -- the raws' [NUMBER:n]; DF stores
-//   [NUMBER:AS_NEEDED] as -1 = unlimited. MILITIA_CAPTAIN uses that form
-//   (vanilla_entities/objects/entity_default.txt:543-547: NUMBER:AS_NEEDED, SQUAD:10).
-// So: a "created position" is one new df::entity_position_assignment on the fort entity. That is
-// the same object do_noble_assign creates on demand. This route also applies the raws' NUMBER bound
-// and initializes holder and squad ids to -1 so a new seat is genuinely vacant.
-//
-// FIELD-INIT NOTE: df-structures' generated constructor zero-initializes
-// int32 fields that have no init-value -- including `histfig` and `squad_id` (df.entity.xml:1025,
-// :1032). A raw `new df::entity_position_assignment()` therefore claims histfig 0 and squad 0.
-// Every new seat sets histfig, histfig2, and squad_id to -1 explicitly.
+// Creating a position adds a vacant assignment for an existing entity position while respecting
+// its holder limit. Explicitly initialize holder and squad ids to -1.
 
 int32_t next_assignment_id(df::historical_entity* fort) {
     int32_t next_id = 0;
@@ -448,16 +425,8 @@ std::string build_nobles_json(const std::string& player, std::string* err) {
 // ---------------------------------------------------------------------------
 // Noble assignment: /noble-assign and /noble-candidates.
 // ---------------------------------------------------------------------------
-// Recipe: direct histfig assignment on the fort entity's position-assignment slot, the same
-// shape dfhack's make-monarch.lua script uses to reassign the civ-level Monarch position
-// (scripts/make-monarch.lua): find/create the df::entity_position_assignment for the position,
-// set its histfig, and add/remove a histfig_entity_link_positionst on the historical figure so
-// the link is discoverable from either side (same as DF's own assignment path). Deliberately
-// does NOT touch entity_vector_idx (make-monarch.lua doesn't either -- unused for a live,
-// already-loaded world; only matters for save/load reconstruction) and does NOT create the
-// squad object DF auto-creates for squad-bearing positions (militia commander/captain,
-// squadSize>0 in /nobles). Squad creation is handled by the squad domain;
-// the position assignment itself (who HOLDS the title) still works correctly for those rows.
+// Noble assignment updates the fort's position-assignment slot and the historical figure's
+// reciprocal position link. Squad creation for military positions remains in the squad domain.
 
 df::entity_position* find_position(df::historical_entity* fort, int32_t position_id) {
     for (auto p : fort->positions.own)
@@ -480,8 +449,7 @@ int32_t assignment_index(df::historical_entity* fort, df::entity_position_assign
     return -1;
 }
 
-// Drop the histfig_entity_link_positionst matching this fort+assignment from a historical
-// figure's own link list (mirrors make-monarch.lua's unlink-before-relink step).
+// Drop the matching reciprocal position link from the historical figure.
 void unlink_position_holder(int32_t old_hf_id, int32_t fort_id, int32_t assignment_id) {
     auto hf = df::historical_figure::find(old_hf_id);
     if (!hf)
@@ -496,17 +464,8 @@ void unlink_position_holder(int32_t old_hf_id, int32_t fort_id, int32_t assignme
     }
 }
 
-// The noble-assignment candidate list must exclude world->units.active's retained
-// corpses and real ghosts (isCitizen alone passes both). Mirrors labor.cpp's is_assignable_citizen
-// and hud.cpp's is_counted_citizen: isActive() covers flags1.inactive, isDead() covers killed +
-// ghostly (flags3.ghostly), and the explicit isGhost() keeps the intent legible. Positions are
-// citizen-only in native DF, so long-term residents are intentionally not candidates here.
-// DFHack 53.15-r1's Units::{isBaby,isChild} classify the two juvenile professions native excludes.
-// Exclude insane citizens from assignment candidates.
-// were noble candidates while the squad side (squads.cpp, isCitizen default) excluded them: an
-// asymmetry with no native citation either way. Aligned to EXCLUDE insane on both sides (an insane
-// dwarf cannot perform duties); if a native capture ever shows insane citizens offered for
-// positions, flip both sides together.
+// Noble candidates must be active, living, sane adult citizens. This excludes retained corpses,
+// ghosts, long-term residents, children, and units unable to perform the office's duties.
 bool is_assignable_citizen(df::unit* unit) {
     return unit && DFHack::Units::isCitizen(unit) && DFHack::Units::isActive(unit) &&
            !DFHack::Units::isDead(unit) && !DFHack::Units::isGhost(unit) &&
@@ -738,7 +697,7 @@ void append_guard_json(std::ostringstream& body, df::historical_entity* fort) {
     }
     auto squad = squad_id >= 0 ? df::squad::find(squad_id) : nullptr;
     // "Desired metal cages and chains in dungeons: N of M" is a derived UI metric
-    // (available dungeon-zone restraints vs prisoners) with no clean backing field in df.plotinfo.xml
+    // (available dungeon-zone restraints vs prisoners) with no clean backing field
     // (only total_death_cage_number / cage_spring_* -- unrelated). Ship null so the web renders
     // nothing rather than fabricating a value.
     body << "\"guard\":{\"squadId\":" << (squad ? squad->id : -1)
@@ -784,11 +743,10 @@ void append_convicts_json(std::ostringstream& body, df::world* world) {
         // Native's convict row is a unit row: portrait tile, then a
         // semantically-coloured `name, profession` second line. All fields are plain reads from the
         // unit already resolved above.
-        //   * `portraitTexpos` -- df::unit::portrait_texpos, the same field labor.cpp:369 and
-        //     info_panel.cpp:299 already ship, so it flows through the client's existing portrait
+        //   * `portraitTexpos` -- df::unit::portrait_texpos, used by the existing portrait
         //     chain unchanged.
         //   * `profession` / `professionColor` -- DFHack Units::getProfessionName /
-        //     Units::getProfessionColor (modules/Units.h:329,334), DF's own name + 4-bit colour.
+        //     the live profession name and color.
         body << "{\"crimeId\":" << crime->id
              << ",\"unitId\":" << (unit ? unit->id : -1)
              << ",\"name\":" << json_string(unit ? DFHack::Units::getReadableName(unit) : unit_name_or_blank(unit_id))
@@ -1068,12 +1026,7 @@ bool validate_pending_petition(int32_t agreement_id, std::string* err) {
 // ---------------------------------------------------------------------------
 // Justice write actions.
 // ---------------------------------------------------------------------------
-// PARDON is the one justice mutation that is safe to reconstruct from the plugin: it mirrors
-// DFHack's own scripts/justice.lua `pardon` exactly -- commute a serving sentence by zeroing
-// the punishment entry for that criminal. It touches ONLY plotinfo->punishments counters
-// (prison_counter + the still-pending beating/hammer counters), writes no history events, and
-// leaves the crime record intact (justice.lua only zeros prison_counter; we also clear the
-// pending physical-punishment counters so a full pardon stops an unserved hammering too).
+// Pardon commutes active punishment counters without altering the crime record or history.
 // Returns the number of punishment rows commuted, or -1 on a hard failure.
 int do_justice_pardon(int32_t unit_id, std::string* err) {
     int commuted = 0;
@@ -1243,8 +1196,8 @@ void register_fort_admin_routes(httplib::Server& server) {
         set_no_store_json(res, json);
     });
 
-    // POST /justice-pardon?unit= -> commute that unit's active sentence (DFHack justice.lua
-    // parity). 400 when the unit isn't serving one, 503 when the world is unavailable.
+    // POST /justice-pardon?unit= commutes that unit's active sentence. Returns 400 when the unit
+    // is not serving one and 503 when the world is unavailable.
     auto pardon_handler = [](const httplib::Request& req, httplib::Response& res) {
         int unit = -1;
         if (!query_int(req, "unit", unit) || unit < 0) { json_error(res, 400, "missing unit"); return; }

@@ -21,7 +21,7 @@
   // ---- Help panel: searchable reference over the baked help corpus ---------------------------
   // Data lives in dfcapture-help-corpus.js and dfcapture-help-curated.js. The "hotkeys" surface is
   // replaced with this UI's actual keybindings, and unavailable feature surfaces are hidden.
-  const HELP_HIDDEN_SURFACES = new Set(["world3d", "audio", "chat", "analytics", "vote", "lobby", "obligations"]);
+  const HELP_HIDDEN_SURFACES = new Set(["audio", "chat", "analytics", "vote", "lobby", "obligations"]);
   const HELP_LOCAL_HOTKEYS = {
     id: "hotkeys", label: "Keyboard & mouse", kind: "hotkeys",
     entries: [

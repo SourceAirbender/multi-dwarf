@@ -28,7 +28,7 @@ namespace dfcapture {
 // Hospital and health-management domain. A hospital is not a civzone_type; it is an
 // abstract_building_hospitalst LOCATION (abstract_building_type::HOSPITAL) attached to a
 // MeetingHall/DiningHall/Bedroom civzone via zone.location_id, exactly like tavern/temple/library.
-// See scripts/internal/quickfort/zone.lua valid_locations.hospital.
+// Hospital zone validation is exposed through the route implementation.
 // Its supply maxima live on location->getContents() (abstract_building_contents): desired_* /
 // count_* / need_more for splints/thread/cloth/crutches/powder(plaster)/buckets/soap. This module
 // exposes the READ surface (supplies, hospital furniture counts, patient list from unit->health,

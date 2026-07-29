@@ -29,13 +29,26 @@
 
 namespace dfcapture {
 
+struct FramePipelineTiming {
+    double render_wait_ms = 0.0;
+    double capture_ms = 0.0;
+    double encode_ms = 0.0;
+    double total_ms = 0.0;
+    int width = 0;
+    int height = 0;
+};
+
 bool read_host_camera(Camera& camera, std::string* err = nullptr);
 bool clamp_camera(Camera& camera, std::string* err = nullptr);
 bool effective_capture_viewport_dims(const Camera& camera, int& width_tiles,
                                      int& height_tiles, std::string* err = nullptr);
 bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::string* err = nullptr);
+bool capture_camera_frame_timed(const Camera& camera, CapturedFrame& frame,
+                                std::string* err = nullptr,
+                                FramePipelineTiming* timing = nullptr);
 bool capture_camera_jpeg(const Camera& camera, std::vector<uint8_t>& jpeg,
-                         CaptureGeometry* geometry = nullptr, std::string* err = nullptr);
+                         CaptureGeometry* geometry = nullptr, std::string* err = nullptr,
+                         FramePipelineTiming* timing = nullptr);
 std::recursive_mutex& capture_state_mutex();
 
 } // namespace dfcapture

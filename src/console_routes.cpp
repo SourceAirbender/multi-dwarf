@@ -21,8 +21,7 @@
 
 // Browser DFHack command console.
 //
-// READ src/console_policy.h FIRST. It carries the security model and the deny table; this file is
-// just the two HTTP handlers that consume it.
+// The command policy owns the security model and deny table; this file handles HTTP plumbing.
 //
 // The entire console is gated by a host setting,
 // DEFAULT OFF -- flag `dfhack_console` in dfcapture-hostwrites.json ("just put it in the host
@@ -32,11 +31,7 @@
 // with a guarded reason when the flag is off or the file is absent (fail closed). The host flips
 // it from the host panel (POST /console-config, host-tab-only) or by editing the file.
 //
-// When the setting is enabled, the command containment model remains unchanged:
-// holds: `POST /console/run` calls console::command_denied() BEFORE it calls the bridge, and
-// there is STILL no peer_ip_is_loopback host-identity gate in this file -- the console is for any
-// authed player once the host opted in, and the blocklist is the containment. If you ever remove
-// the deny check, you have handed every friend `capture-join-password`.
+// When enabled, every command is checked against the shared containment policy before execution.
 
 #include "console_routes.h"
 
@@ -100,11 +95,8 @@ void register_console_routes(httplib::Server& server) {
     // deny table. Read-only and static for a play session, so the client fetches it once at panel
     // open and does search-as-you-type entirely offline -- no per-keystroke round trip and no
     // per-keystroke CoreSuspender.
-    //
-    // AUTH-GATED, NOT HOST-GATED: no static-asset extension and not in join_public_path, so the
-    // pre-routing auth handler (http_server.cpp) already refused any unauthed caller. Every AUTHED
-    // player -- host or friend -- gets the catalog. That is deliberate: the palette must not be
-    // blank for friends.
+    // All connected players receive the same catalog; command execution remains constrained by
+    // the host setting and server-side command policy.
     server.Get("/console/commands", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Cache-Control", "no-store");
         // Gate before listing commands. When the
@@ -135,15 +127,10 @@ void register_console_routes(httplib::Server& server) {
     // Runs ONE DFHack command and returns {ok, status, output}.
     //
     // Security checks run in this order:
-    //   1. auth        -- already enforced upstream by the pre-routing handler. NOT loopback: any
-    //                     authed player may be here. There is no host-identity check here.
-    // 2. Host setting: dfhack_console must be explicitly true, or return 403.
-    //                     NOTHING below even parses. Fail closed: absent file/key = off.
-    //   3. length      -- 400 on a missing/oversized cmd.
-    //   4. BLOCKLIST   -- console::command_denied(cmd). 403 + the reason, and NOTHING executes.
-    //                     Applies to every caller INCLUDING THE HOST: the function takes no caller
-    //                     identity, so there is no "host" branch to escape through.
-    //   5. execute     -- console_run_via_lua, which re-checks the SAME table as a backstop.
+    //   1. host setting -- dfhack_console must be explicitly enabled.
+    //   2. length       -- reject a missing or oversized command.
+    //   3. blocklist    -- reject unsafe commands for every caller, including the host.
+    //   4. execute      -- the Lua bridge rechecks the same policy before execution.
     //
     // A denied command is logged with the reason so the host can audit attempted commands.
     auto run_handler = [](const httplib::Request& req, httplib::Response& res) {

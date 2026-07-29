@@ -21,6 +21,7 @@
 #include "unit_sheet.h"
 
 #include "json_util.h"
+#include "player_ownership.h"
 #include "render_thread_wait.h"
 #include "save_barrier.h"
 #include "sdl_capture.h"
@@ -191,7 +192,19 @@ void append_unit_json(std::ostringstream& body, const UnitSheet& unit) {
              << "\"available\":" << (action.available ? "true" : "false")
              << "}";
     }
-    body << "]}";
+    body << "]";
+    UnitOwnership ownership;
+    if (ownership_lookup_unit(unit.id, ownership)) {
+        body << ",\"ownership\":{\"playerId\":" << json_string(ownership.player_id)
+             << ",\"playerName\":" << json_string(ownership.player_name)
+             << ",\"online\":" << (ownership.online ? "true" : "false")
+             << ",\"assignedBy\":" << json_string(ownership.assigned_by)
+             << ",\"assignedAt\":" << ownership.assigned_at_ms
+             << ",\"notes\":" << json_string(ownership.notes) << "}";
+    } else {
+        body << ",\"ownership\":null";
+    }
+    body << "}";
 }
 
 struct RenderThreadUnitRequest {

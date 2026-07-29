@@ -251,6 +251,11 @@ bool build_hud_state(const Camera& camera, HudState& hud, std::string* err) {
 
     hud.food = plotinfo->tasks.food.total;
     hud.drink = plotinfo->tasks.food.drink;
+    hud.seeds = plotinfo->tasks.food.seeds;
+    hud.meat = plotinfo->tasks.food.meat;
+    hud.fish = plotinfo->tasks.food.fish;
+    hud.plant = plotinfo->tasks.food.plant;
+    hud.other = plotinfo->tasks.food.other;
     hud.elevation = world->map.region_z + camera.z - 100;
 
     hud.year = df::global::cur_year ? *df::global::cur_year : 0;
@@ -350,7 +355,12 @@ std::string hud_json(const std::string& player, const HudState& hud) {
          << ",\"site\":" << json_string(hud.site_name)
          << ",\"rank\":" << json_string(hud.rank) << "},"
          << "\"stocks\":{\"food\":" << hud.food
-         << ",\"drink\":" << hud.drink << "},"
+         << ",\"drink\":" << hud.drink
+         << ",\"seeds\":" << hud.seeds
+         << ",\"meat\":" << hud.meat
+         << ",\"fish\":" << hud.fish
+         << ",\"plant\":" << hud.plant
+         << ",\"other\":" << hud.other << "},"
          << "\"population\":{\"total\":" << hud.population << "},"
          << "\"happiness\":[" << hud.happiness[0] << "," << hud.happiness[1] << ","
                               << hud.happiness[2] << "," << hud.happiness[3] << ","

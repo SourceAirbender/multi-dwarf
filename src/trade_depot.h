@@ -25,15 +25,13 @@
 
 namespace dfcapture {
 
-// Trade / depot domain (W-F skeleton). A trade depot (df::building_tradedepotst) is a stateful
+// A trade depot (df::building_tradedepotst) is a stateful
 // building: it carries trade_flags (trader_requested / anyone_can_trade), an accessible bit, and
 // hosts BringItemToDepot / TradeAtDepot jobs. This module exposes the READ surface (depot state,
 // caravan roster from plotinfo->caravans, broker presence, tradeable-goods list, native
 // trade-screen status) and the safe MUTATIONS (mark/unmark goods for trade via
-// Items::markForTrade, request/recall trader, anyone-can-trade toggle) -- every mechanism copied
-// from DFHack's own scripts/caravan.lua + internal/caravan/{movegoods,trade}.lua, not guessed.
-// The actual barter confirm is host-native (see /depot-trade in the .cpp). Additive JSON only;
-// no binary wire changes.
+// Items::markForTrade, request/recall trader, and anyone-can-trade toggle). Barter commits through
+// the version-gated native transaction in the implementation.
 void register_trade_depot_routes(httplib::Server& server);
 
 } // namespace dfcapture

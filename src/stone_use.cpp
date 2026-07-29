@@ -137,7 +137,7 @@ std::string build_stone_use_json() {
             auto* raw = inorganics[idx];
             if (!raw || raw->id.empty())
                 continue;
-            // DF's Stone-use screen lists STONES only (ground truth 16d: Alabaster,
+            // DF's Stone-use screen lists STONES only (for example Alabaster,
             // Bismuthinite, ... -- ores and flux, never smelted metals). Without the
             // IS_STONE gate on the economic branch, metals like IRON leak in via their
             // reaction economic_uses.

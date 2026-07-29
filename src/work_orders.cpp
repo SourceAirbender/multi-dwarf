@@ -40,6 +40,10 @@ void text_error(httplib::Response& res, int status, const std::string& message) 
     res.set_content(message + "\n", "text/plain; charset=utf-8");
 }
 
+void record_order_action(const httplib::Request& req, int32_t id, const char* action) {
+    attrib_record(AttribKind::Order, id, query_player(req), action);
+}
+
 void register_json_route(httplib::Server& server, const char* path, const char* lua_fn,
                          const char* failure_prefix) {
     server.Get(path, [lua_fn, failure_prefix](const httplib::Request&, httplib::Response& res) {
@@ -122,6 +126,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "cancel failed: " + err);
             return;
         }
+        record_order_action(req, id, "removed");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-cancel", order_cancel_handler);
@@ -141,6 +146,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "adjust failed: " + err);
             return;
         }
+        record_order_action(req, id, "adjusted");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-adjust", order_adjust_handler);
@@ -164,6 +170,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "add condition failed: " + err);
             return;
         }
+        record_order_action(req, id, "condition added");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-condition-item-add", order_cond_item_handler);
@@ -193,6 +200,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "edit condition failed: " + err);
             return;
         }
+        record_order_action(req, id, "condition edited");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-condition-item-edit", order_cond_item_edit_handler);
@@ -234,6 +242,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "add dependency failed: " + err);
             return;
         }
+        record_order_action(req, id, "dependency added");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-condition-order-add", order_cond_order_handler);
@@ -252,6 +261,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "remove condition failed: " + err);
             return;
         }
+        record_order_action(req, id, "condition removed");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-condition-remove", order_cond_remove_handler);
@@ -269,6 +279,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "update failed: " + err);
             return;
         }
+        record_order_action(req, id, "workshop limit changed");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-max-workshops", order_maxshops_handler);
@@ -287,6 +298,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "update failed: " + err);
             return;
         }
+        record_order_action(req, id, "workshop changed");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-workshop", order_workshop_handler);
@@ -304,6 +316,7 @@ void register_work_order_routes(httplib::Server& server) {
             text_error(res, 400, "reorder failed: " + err);
             return;
         }
+        record_order_action(req, id, "reordered");
         set_no_store_json(res, "{\"ok\":true}\n");
     };
     server.Get("/order-reorder", order_reorder_handler);

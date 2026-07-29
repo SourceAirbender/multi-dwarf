@@ -39,7 +39,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <ctime>
+#include <deque>
 #include <fstream>
 #include <future>
 #include <iomanip>
@@ -48,12 +50,95 @@
 #include <mutex>
 #include <sstream>
 #include <vector>
+#include <unordered_map>
 
 namespace dfcapture {
 namespace {
 
 std::mutex g_diag_mutex;
 CaptureDiagnostics g_diag;
+
+struct ServerFrameMetric {
+    double render_wait_ms = 0;
+    double capture_ms = 0;
+    double encode_ms = 0;
+    double total_ms = 0;
+    uint64_t bytes = 0;
+    int width = 0;
+    int height = 0;
+    std::string transport = "jpeg";
+    bool keyframe = true;
+    std::string keyframe_reason;
+    bool motion_compensated = false;
+    int rectangles = 1;
+    double changed_ratio = 1.0;
+    long long at_ms = 0;
+};
+
+struct ClientFrameMetric {
+    double fetch_ms = 0;
+    double blob_ms = 0;
+    double decode_ms = 0;
+    double paint_ms = 0;
+    double total_ms = 0;
+    double input_visible_ms = -1;
+    uint64_t bytes = 0;
+    long long at_ms = 0;
+};
+
+template <typename T>
+struct PlayerMetricWindow {
+    std::deque<T> samples;
+    long long last_ms = 0;
+};
+
+std::unordered_map<std::string, PlayerMetricWindow<ServerFrameMetric>> g_server_frames;
+std::unordered_map<std::string, PlayerMetricWindow<ClientFrameMetric>> g_client_frames;
+constexpr size_t kMaxFrameMetricSamples = 120;
+constexpr size_t kMaxMetricPlayers = 32;
+
+long long wall_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+template <typename Map>
+void prune_metric_players(Map& values) {
+    while (values.size() > kMaxMetricPlayers) {
+        auto oldest = std::min_element(values.begin(), values.end(),
+            [](const auto& a, const auto& b) { return a.second.last_ms < b.second.last_ms; });
+        if (oldest == values.end()) break;
+        values.erase(oldest);
+    }
+}
+
+struct MetricSummary {
+    double avg = 0;
+    double p50 = 0;
+    double p95 = 0;
+};
+
+MetricSummary summarize(std::vector<double> values) {
+    MetricSummary out;
+    if (values.empty()) return out;
+    double total = 0;
+    for (double value : values) total += value;
+    out.avg = total / values.size();
+    std::sort(values.begin(), values.end());
+    const auto percentile = [&](double p) {
+        const size_t index = static_cast<size_t>(
+            std::min<double>(values.size() - 1, std::ceil(p * values.size()) - 1));
+        return values[index];
+    };
+    out.p50 = percentile(.50);
+    out.p95 = percentile(.95);
+    return out;
+}
+
+void append_summary(std::ostringstream& out, const char* name, const MetricSummary& value) {
+    out << "\"" << name << "\":{\"avg\":" << value.avg
+        << ",\"p50\":" << value.p50 << ",\"p95\":" << value.p95 << "}";
+}
 
 std::string utc_now() {
     auto now = std::chrono::system_clock::now();
@@ -334,6 +419,8 @@ void diagnostics_capture_failure(const Camera& camera, const std::string& err,
 void diagnostics_reset() {
     std::lock_guard<std::mutex> lock(g_diag_mutex);
     g_diag = CaptureDiagnostics{};
+    g_server_frames.clear();
+    g_client_frames.clear();
     apply_event_time(g_diag);
 }
 
@@ -368,6 +455,201 @@ std::string diagnostics_json(const std::string& player, const Camera& camera,
          << ",\"lastEventUtc\":" << json_string(stats.last_event_utc)
          << "}}\n";
     return body.str();
+}
+
+void diagnostics_frame_pipeline(const std::string& player,
+                                double render_wait_ms, double capture_ms,
+                                double encode_ms, double total_ms,
+                                uint64_t payload_bytes, int width, int height,
+                                const std::string& transport, bool keyframe,
+                                int rectangles, double changed_ratio,
+                                const std::string& keyframe_reason,
+                                bool motion_compensated) {
+    if (player.empty()) return;
+    ServerFrameMetric sample;
+    sample.render_wait_ms = std::max(0.0, render_wait_ms);
+    sample.capture_ms = std::max(0.0, capture_ms);
+    sample.encode_ms = std::max(0.0, encode_ms);
+    sample.total_ms = std::max(0.0, total_ms);
+    sample.bytes = payload_bytes;
+    sample.width = width;
+    sample.height = height;
+    sample.transport = transport == "delta" ? "delta" : "jpeg";
+    sample.keyframe = keyframe;
+    sample.keyframe_reason = keyframe_reason.substr(0, 24);
+    sample.motion_compensated = motion_compensated;
+    sample.rectangles = std::max(0, rectangles);
+    sample.changed_ratio = std::max(0.0, std::min(1.0, changed_ratio));
+    sample.at_ms = wall_now_ms();
+    std::lock_guard<std::mutex> lock(g_diag_mutex);
+    auto& window = g_server_frames[player.substr(0, 64)];
+    window.samples.push_back(sample);
+    window.last_ms = sample.at_ms;
+    while (window.samples.size() > kMaxFrameMetricSamples) window.samples.pop_front();
+    prune_metric_players(g_server_frames);
+}
+
+void diagnostics_frame_client(const std::string& player,
+                              double fetch_ms, double blob_ms, double decode_ms,
+                              double paint_ms, double total_ms, double input_visible_ms,
+                              uint64_t payload_bytes) {
+    if (player.empty()) return;
+    ClientFrameMetric sample;
+    sample.fetch_ms = std::max(0.0, fetch_ms);
+    sample.blob_ms = std::max(0.0, blob_ms);
+    sample.decode_ms = std::max(0.0, decode_ms);
+    sample.paint_ms = std::max(0.0, paint_ms);
+    sample.total_ms = std::max(0.0, total_ms);
+    sample.input_visible_ms = input_visible_ms >= 0 ? input_visible_ms : -1;
+    sample.bytes = payload_bytes;
+    sample.at_ms = wall_now_ms();
+    std::lock_guard<std::mutex> lock(g_diag_mutex);
+    auto& window = g_client_frames[player.substr(0, 64)];
+    window.samples.push_back(sample);
+    window.last_ms = sample.at_ms;
+    while (window.samples.size() > kMaxFrameMetricSamples) window.samples.pop_front();
+    prune_metric_players(g_client_frames);
+}
+
+std::string frame_pipeline_diagnostics_json(const std::string& player) {
+    std::deque<ServerFrameMetric> server;
+    std::deque<ClientFrameMetric> client;
+    {
+        std::lock_guard<std::mutex> lock(g_diag_mutex);
+        if (auto it = g_server_frames.find(player); it != g_server_frames.end())
+            server = it->second.samples;
+        if (auto it = g_client_frames.find(player); it != g_client_frames.end())
+            client = it->second.samples;
+    }
+    const auto server_values = [&](auto member) {
+        std::vector<double> values;
+        values.reserve(server.size());
+        for (const auto& sample : server) values.push_back(sample.*member);
+        return summarize(std::move(values));
+    };
+    const auto client_values = [&](auto member, bool skip_negative = false) {
+        std::vector<double> values;
+        values.reserve(client.size());
+        for (const auto& sample : client) {
+            const double value = sample.*member;
+            if (!skip_negative || value >= 0) values.push_back(value);
+        }
+        return summarize(std::move(values));
+    };
+    uint64_t server_bytes = 0;
+    uint64_t client_bytes = 0;
+    uint64_t jpeg_bytes = 0;
+    uint64_t delta_bytes = 0;
+    size_t jpeg_samples = 0;
+    size_t delta_samples = 0;
+    size_t keyframes = 0;
+    size_t empty_deltas = 0;
+    size_t motion_frames = 0;
+    size_t forced_keyframes = 0;
+    size_t periodic_keyframes = 0;
+    size_t resync_keyframes = 0;
+    size_t change_fallback_keyframes = 0;
+    for (const auto& sample : server) server_bytes += sample.bytes;
+    for (const auto& sample : server) {
+        if (sample.transport == "delta") {
+            ++delta_samples;
+            delta_bytes += sample.bytes;
+            if (!sample.keyframe && sample.rectangles == 0) ++empty_deltas;
+        } else {
+            ++jpeg_samples;
+            jpeg_bytes += sample.bytes;
+        }
+        if (sample.keyframe) ++keyframes;
+        if (sample.motion_compensated) ++motion_frames;
+        if (sample.keyframe_reason == "forced") ++forced_keyframes;
+        if (sample.keyframe_reason == "periodic") ++periodic_keyframes;
+        if (sample.keyframe_reason == "resync") ++resync_keyframes;
+        if (sample.keyframe_reason == "change-fallback") ++change_fallback_keyframes;
+    }
+    for (const auto& sample : client) client_bytes += sample.bytes;
+    const auto elapsed_seconds = [](const auto& samples) {
+        if (samples.size() < 2 || samples.back().at_ms <= samples.front().at_ms)
+            return 0.0;
+        return static_cast<double>(samples.back().at_ms - samples.front().at_ms) / 1000.0;
+    };
+    const double server_seconds = elapsed_seconds(server);
+    const double client_seconds = elapsed_seconds(client);
+    const double server_fps =
+        server_seconds > 0 ? static_cast<double>(server.size() - 1) / server_seconds : 0.0;
+    const double client_fps =
+        client_seconds > 0 ? static_cast<double>(client.size() - 1) / client_seconds : 0.0;
+    const auto average_bytes = [](uint64_t bytes, size_t samples) {
+        return samples ? static_cast<double>(bytes) / samples : 0.0;
+    };
+
+    std::ostringstream out;
+    out << "{\"ok\":true,\"player\":" << json_string(player)
+        << ",\"windowLimit\":" << kMaxFrameMetricSamples
+        << ",\"server\":{\"samples\":" << server.size()
+        << ",\"payloadBytes\":" << server_bytes << ",";
+    append_summary(out, "renderWaitMs", server_values(&ServerFrameMetric::render_wait_ms));
+    out << ",";
+    append_summary(out, "captureMs", server_values(&ServerFrameMetric::capture_ms));
+    out << ",";
+    append_summary(out, "encodeMs", server_values(&ServerFrameMetric::encode_ms));
+    out << ",";
+    append_summary(out, "totalMs", server_values(&ServerFrameMetric::total_ms));
+    out << ",";
+    append_summary(out, "rectangles", server_values(&ServerFrameMetric::rectangles));
+    out << ",";
+    append_summary(out, "changedRatio", server_values(&ServerFrameMetric::changed_ratio));
+    out << ",\"cadence\":{\"observedFps\":" << server_fps
+        << ",\"bytesPerSecond\":"
+        << (server_seconds > 0 ? server_bytes / server_seconds : 0.0)
+        << ",\"averageBytes\":" << average_bytes(server_bytes, server.size()) << "}";
+    out << ",\"transport\":{\"jpegSamples\":" << jpeg_samples
+        << ",\"jpegBytes\":" << jpeg_bytes
+        << ",\"deltaSamples\":" << delta_samples
+        << ",\"deltaBytes\":" << delta_bytes
+        << ",\"keyframes\":" << keyframes
+        << ",\"keyframeRate\":"
+        << (server.empty() ? 0.0 : static_cast<double>(keyframes) / server.size())
+        << ",\"emptyDeltas\":" << empty_deltas
+        << ",\"motionFrames\":" << motion_frames
+        << ",\"keyframeReasons\":{\"forced\":" << forced_keyframes
+        << ",\"periodic\":" << periodic_keyframes
+        << ",\"resync\":" << resync_keyframes
+        << ",\"changeFallback\":" << change_fallback_keyframes << "}}";
+    if (!server.empty()) {
+        out << ",\"last\":{\"width\":" << server.back().width
+            << ",\"height\":" << server.back().height
+            << ",\"bytes\":" << server.back().bytes
+            << ",\"transport\":" << json_string(server.back().transport)
+            << ",\"keyframe\":" << (server.back().keyframe ? "true" : "false")
+            << ",\"keyframeReason\":" << json_string(server.back().keyframe_reason)
+            << ",\"motionCompensated\":"
+            << (server.back().motion_compensated ? "true" : "false")
+            << ",\"rectangles\":" << server.back().rectangles
+            << ",\"changedRatio\":" << server.back().changed_ratio
+            << ",\"at\":" << server.back().at_ms << "}";
+    } else {
+        out << ",\"last\":null";
+    }
+    out << "},\"client\":{\"samples\":" << client.size()
+        << ",\"payloadBytes\":" << client_bytes << ",";
+    append_summary(out, "fetchMs", client_values(&ClientFrameMetric::fetch_ms));
+    out << ",";
+    append_summary(out, "blobMs", client_values(&ClientFrameMetric::blob_ms));
+    out << ",";
+    append_summary(out, "decodeMs", client_values(&ClientFrameMetric::decode_ms));
+    out << ",";
+    append_summary(out, "paintMs", client_values(&ClientFrameMetric::paint_ms));
+    out << ",";
+    append_summary(out, "totalMs", client_values(&ClientFrameMetric::total_ms));
+    out << ",";
+    append_summary(out, "inputVisibleMs",
+                   client_values(&ClientFrameMetric::input_visible_ms, true));
+    out << ",\"cadence\":{\"observedFps\":" << client_fps
+        << ",\"bytesPerSecond\":"
+        << (client_seconds > 0 ? client_bytes / client_seconds : 0.0)
+        << ",\"averageBytes\":" << average_bytes(client_bytes, client.size()) << "}";
+    out << "}}\n";
+    return out.str();
 }
 
 bool host_state_on_render_thread(HostState& state, std::string* err) {

@@ -38,6 +38,7 @@
 #include "notifications.h"
 #include "native_popup.h"
 #include "placement.h"
+#include "player_ownership.h"
 #include "save_barrier.h"
 #include "session_policy.h"
 #include "unit_sheet.h"
@@ -55,6 +56,7 @@
 #include "diplo.h"
 #include "fort_admin.h"
 #include "fortress_utilities.h"
+#include "frame_delta.h"
 #include "hauling.h"
 #include "hospital.h"
 #include "kitchen_panel.h"
@@ -68,6 +70,8 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -75,6 +79,10 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 
 namespace dfcapture {
 namespace {
@@ -85,6 +93,22 @@ std::thread g_server_thread;
 std::atomic<bool> g_running(false);
 int g_port = DEFAULT_STREAM_PORT;
 std::string g_bind_address = DEFAULT_BIND_ADDRESS;
+std::mutex g_frame_wake_mutex;
+std::condition_variable g_frame_wake_condition;
+uint64_t g_frame_wake_generation = 1;
+
+uint64_t wait_for_frame_wake(uint64_t known_generation, int hold_ms) {
+    std::unique_lock<std::mutex> lock(g_frame_wake_mutex);
+    if (hold_ms > 0 && known_generation == g_frame_wake_generation) {
+        g_frame_wake_condition.wait_for(
+            lock, std::chrono::milliseconds(hold_ms),
+            [known_generation] {
+                return !g_running.load() ||
+                       g_frame_wake_generation != known_generation;
+            });
+    }
+    return g_frame_wake_generation;
+}
 
 // --- Player presence (cursors + camera) -----------------------------------------------------
 // A pure browser-to-browser relay: each client POSTs its cursor world-tile + camera, and every
@@ -233,6 +257,14 @@ std::string build_options_from_request(const httplib::Request& req) {
         if (clean)
             out << key << "=" << value << ";";
     }
+    // item0..item3 carry a specific item id per requirement. The Lua side
+    // revalidates the item at commit; here we only forward a plausible non-negative integer.
+    for (int i = 0; i < 4; ++i) {
+        std::string key = "item" + std::to_string(i);
+        int value = 0;
+        if (query_int(req, key.c_str(), value) && value >= 0)
+            out << key << "=" << value << ";";
+    }
     return out.str();
 }
 
@@ -258,7 +290,19 @@ void register_routes(httplib::Server& server) {
     // Stop every newly routed browser operation before static dispatch or a route can queue work
     // against those structures. Existing clients treat the temporary 503 like any missed poll.
     server.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
-        if (save_barrier_active()) {
+        const auto starts_with = [&](const char* prefix) {
+            return req.path.rfind(prefix, 0) == 0;
+        };
+        // Keep the page shell and read-only session status reachable during a save. This lets a
+        // refreshed/new tab render the blocking save notice and automatically recover, while all
+        // DF-world routes remain behind the barrier.
+        const bool barrier_safe_get = req.method == "GET" && (
+            req.path == "/" || req.path == "/view" || req.path == "/health" ||
+            req.path == "/version" || req.path == "/session" ||
+            starts_with("/js/") || starts_with("/css/") || starts_with("/fonts/") ||
+            starts_with("/asset/") ||
+            (req.path.size() >= 5 && req.path.ends_with(".json")));
+        if (save_barrier_active() && !barrier_safe_get) {
             res.status = 503;
             res.set_header("Cache-Control", "no-store");
             res.set_header("Retry-After", "1");
@@ -266,13 +310,6 @@ void register_routes(httplib::Server& server) {
                 "{\"ok\":false,\"busy\":true,\"error\":\"Dwarf Fortress is saving, loading, or "
                 "shutting down; retry shortly\"}\n",
                 "application/json; charset=utf-8");
-            return true;
-        }
-        if (!session_request_is_public(req) && !session_request_authorized(req)) {
-            res.status = 401;
-            res.set_header("Cache-Control", "no-store");
-            res.set_content("{\"ok\":false,\"authRequired\":true,\"error\":\"join required\"}\n",
-                            "application/json; charset=utf-8");
             return true;
         }
         return false;
@@ -297,6 +334,7 @@ void register_routes(httplib::Server& server) {
     });
 
     register_session_policy_routes(server);
+    register_player_ownership_routes(server);
     register_audio_stream_routes(server);
     register_native_popup_routes(server);
 
@@ -319,6 +357,34 @@ void register_routes(httplib::Server& server) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(diagnostics_json(player, camera, diagnostics_snapshot()),
                         "application/json; charset=utf-8");
+    });
+
+    server.Get("/frame-diagnostics", [](const httplib::Request& req, httplib::Response& res) {
+        const std::string player = query_player(req);
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(frame_pipeline_diagnostics_json(player),
+                        "application/json; charset=utf-8");
+    });
+
+    server.Post("/frame-client-metrics", [](const httplib::Request& req,
+                                             httplib::Response& res) {
+        const auto metric = [&](const char* name, double fallback = 0.0) {
+            if (!req.has_param(name)) return fallback;
+            try {
+                const double value = std::stod(req.get_param_value(name));
+                return std::isfinite(value) ? std::max(-1.0, std::min(60000.0, value)) : fallback;
+            } catch (...) {
+                return fallback;
+            }
+        };
+        int bytes = 0;
+        query_int(req, "bytes", bytes);
+        diagnostics_frame_client(
+            query_player(req), metric("fetch"), metric("blob"), metric("decode"),
+            metric("paint"), metric("total"), metric("inputVisible", -1.0),
+            static_cast<uint64_t>(std::max(0, bytes)));
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
     });
 
     server.Get("/host-state", [](const httplib::Request&, httplib::Response& res) {
@@ -351,6 +417,7 @@ void register_routes(httplib::Server& server) {
 
         res.set_header("Cache-Control", "no-store");
         res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
+        notify_player_input();
     };
     server.Get("/reset", reset_handler);
     server.Post("/reset", reset_handler);
@@ -408,6 +475,7 @@ void register_routes(httplib::Server& server) {
         set_player_camera(player, camera);
         res.set_header("Cache-Control", "no-store");
         res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
+        notify_player_input();
     });
 
     // Presence relay (see PresenceEntry above). No DF access; safe to serve at high frequency.
@@ -492,6 +560,7 @@ void register_routes(httplib::Server& server) {
         }
         res.set_header("Cache-Control", "no-store");
         res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
+        notify_player_input();
     };
     server.Get("/zoom", zoom_handler);
     server.Post("/zoom", zoom_handler);
@@ -692,6 +761,26 @@ void register_routes(httplib::Server& server) {
         res.set_content(json, "application/json; charset=utf-8");
     });
 
+    // Return the specific items, not just materials, that satisfy each building requirement,
+    // so the browser can offer exact finished-item selection. Read-only; the pick is passed back as
+    // item0..item3 on /build-place and revalidated at commit.
+    server.Get("/place-candidates", [](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_param("token")) {
+            res.status = 400;
+            res.set_content("missing token\n", "text/plain; charset=utf-8");
+            return;
+        }
+        std::string err;
+        std::string json = build_candidates_json_via_lua(req.get_param_value("token"), &err);
+        if (json.empty()) {
+            res.status = 500;
+            res.set_content("candidates failed: " + err + "\n", "text/plain; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(json, "application/json; charset=utf-8");
+    });
+
     auto build_place_handler = [](const httplib::Request& req, httplib::Response& res) {
         std::string player = query_player(req);
         int px = 0, py = 0, frame_w = 0, frame_h = 0;
@@ -855,11 +944,15 @@ void register_routes(httplib::Server& server) {
 
         std::vector<uint8_t> jpeg;
         CaptureGeometry geometry;
-        if (!capture_camera_jpeg(camera, jpeg, &geometry, &err)) {
+        FramePipelineTiming timing;
+        if (!capture_camera_jpeg(camera, jpeg, &geometry, &err, &timing)) {
             res.status = 503;
             res.set_content("capture failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
+        diagnostics_frame_pipeline(player, timing.render_wait_ms, timing.capture_ms,
+                                   timing.encode_ms, timing.total_ms, jpeg.size(),
+                                   timing.width, timing.height);
 
         res.set_header("Cache-Control", "no-store");
         res.set_header("X-DFCapture-Camera",
@@ -874,6 +967,107 @@ void register_routes(httplib::Server& server) {
                                std::to_string(geometry.viewport_height));
         }
         res.set_content(reinterpret_cast<const char*>(jpeg.data()), jpeg.size(), "image/jpeg");
+    });
+
+    auto delta_handler = [](const httplib::Request& req, httplib::Response& res,
+                            bool long_poll) {
+        const std::string player = query_player(req);
+        uint64_t base_sequence = 0;
+        if (req.has_param("base")) {
+            try {
+                const std::string value = req.get_param_value("base");
+                size_t consumed = 0;
+                base_sequence = std::stoull(value, &consumed);
+                if (consumed != value.size()) throw std::invalid_argument("trailing data");
+            } catch (...) {
+                res.status = 400;
+                res.set_content("invalid base sequence\n", "text/plain; charset=utf-8");
+                return;
+            }
+        }
+        uint64_t wake_generation = 0;
+        if (req.has_param("wake")) {
+            try {
+                const std::string value = req.get_param_value("wake");
+                size_t consumed = 0;
+                wake_generation = std::stoull(value, &consumed);
+                if (consumed != value.size()) throw std::invalid_argument("trailing data");
+            } catch (...) {
+                res.status = 400;
+                res.set_content("invalid wake generation\n",
+                                "text/plain; charset=utf-8");
+                return;
+            }
+        }
+        int hold_ms = 0;
+        if (long_poll && req.has_param("hold") &&
+                !query_int(req, "hold", hold_ms)) {
+            res.status = 400;
+            res.set_content("invalid hold duration\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+        hold_ms = std::clamp(hold_ms, 0, 250);
+        const uint64_t acknowledged_wake =
+            long_poll ? wait_for_frame_wake(wake_generation, hold_ms) : 0;
+
+        Camera camera;
+        std::string err;
+        if (!camera_for_player(player, camera, &err)) {
+            res.status = 503;
+            res.set_content("camera unavailable: " + err + "\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+        const bool force_keyframe =
+            req.has_param("force") && req.get_param_value("force") != "0";
+
+        FrameDeltaResult delta;
+        if (!capture_camera_delta(player, camera, base_sequence, force_keyframe,
+                                  delta, &err)) {
+            res.status = 503;
+            res.set_content("capture failed: " + err + "\n",
+                            "text/plain; charset=utf-8");
+            return;
+        }
+        diagnostics_frame_pipeline(
+            player, delta.timing.render_wait_ms, delta.timing.capture_ms,
+            delta.timing.encode_ms, delta.timing.total_ms, delta.packet.size(),
+            delta.timing.width, delta.timing.height, "delta", delta.keyframe,
+            delta.rectangle_count, delta.changed_ratio, delta.keyframe_reason,
+            delta.has_scroll);
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_header("X-DFCapture-Transport",
+                       "delta-v" + std::to_string(kFrameDeltaProtocol));
+        res.set_header("X-DFCapture-Sequence", std::to_string(delta.sequence));
+        res.set_header("X-DFCapture-Base", std::to_string(delta.base_sequence));
+        res.set_header("X-DFCapture-Keyframe", delta.keyframe ? "1" : "0");
+        res.set_header("X-DFCapture-Rects", std::to_string(delta.rectangle_count));
+        res.set_header("X-DFCapture-Changed", std::to_string(delta.changed_ratio));
+        if (long_poll)
+            res.set_header("X-DFCapture-Wake", std::to_string(acknowledged_wake));
+        res.set_header("X-DFCapture-Camera",
+                       std::to_string(camera.x) + "," + std::to_string(camera.y) + "," +
+                           std::to_string(camera.z));
+        if (delta.geometry.valid) {
+            res.set_header("X-DFCapture-Grid",
+                           std::to_string(delta.geometry.origin_x) + "," +
+                               std::to_string(delta.geometry.origin_y) + "," +
+                               std::to_string(delta.geometry.zoom_factor) + "," +
+                               std::to_string(delta.geometry.viewport_width) + "," +
+                               std::to_string(delta.geometry.viewport_height));
+        }
+        res.set_content(reinterpret_cast<const char*>(delta.packet.data()),
+                        delta.packet.size(), "application/x-dfcapture-delta");
+    };
+    server.Get("/frame.delta",
+        [delta_handler](const httplib::Request& req, httplib::Response& res) {
+            delta_handler(req, res, false);
+        });
+    server.Get("/frame.next",
+        [delta_handler](const httplib::Request& req, httplib::Response& res) {
+            delta_handler(req, res, true);
     });
 
     auto stream_handler = [](const httplib::Request& req, httplib::Response& res) {
@@ -906,10 +1100,14 @@ void register_routes(httplib::Server& server) {
 
                 std::vector<uint8_t> jpeg;
                 CaptureGeometry geometry;
-                if (!capture_camera_jpeg(camera, jpeg, &geometry, &err)) {
+                FramePipelineTiming timing;
+                if (!capture_camera_jpeg(camera, jpeg, &geometry, &err, &timing)) {
                     sink.done();
                     return;
                 }
+                diagnostics_frame_pipeline(player, timing.render_wait_ms, timing.capture_ms,
+                                           timing.encode_ms, timing.total_ms, jpeg.size(),
+                                           timing.width, timing.height);
 
                 std::ostringstream header;
                 header << "--dfcapture\r\n"
@@ -1164,14 +1362,31 @@ void register_routes(httplib::Server& server) {
             return;
         }
 
-        std::string err;
-        if (!session_action_allowed(req, req.get_param_value("action"), &err)) {
-            res.status = 403;
-            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+        const std::string action = req.get_param_value("action");
+        const bool is_pause = action == "pause" || action == "play" || action == "resume" ||
+                              action == "unpause" || action == "toggle-pause";
+        if (is_pause) {
+            const std::string key = req.has_param("key") ? req.get_param_value("key") : "";
+            PauseActionResult result;
+            if (!session_apply_pause_request(query_player(req), session_request_is_host(req),
+                                             action, key, result)) {
+                res.status = result.forbidden ? 403 : 400;
+                res.set_content("{\"ok\":false,\"error\":" + json_string(result.error) + "}\n",
+                                "application/json; charset=utf-8");
+                return;
+            }
+            res.set_header("Cache-Control", "no-store");
+            res.set_content("{\"ok\":true,\"applied\":" +
+                                std::string(result.applied ? "true" : "false") +
+                                ",\"paused\":" + (result.paused ? "true" : "false") +
+                                ",\"duplicate\":" + (result.duplicate ? "true" : "false") +
+                                ",\"superseded\":" + (result.superseded ? "true" : "false") +
+                                "}\n",
                             "application/json; charset=utf-8");
             return;
         }
-        if (!action_on_core_thread(req.get_param_value("action"), &err)) {
+        std::string err;
+        if (!action_on_core_thread(action, &err)) {
             res.status = 400;
             res.set_content("action failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
@@ -1529,6 +1744,8 @@ void register_routes(httplib::Server& server) {
                             "application/json; charset=utf-8");
             return;
         }
+        attrib_record(AttribKind::Building, id, query_player(req),
+                      action.empty() ? "changed" : action);
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
     };
@@ -1890,6 +2107,8 @@ void register_routes(httplib::Server& server) {
                             "application/json; charset=utf-8");
             return;
         }
+        attrib_record(AttribKind::Zone, id, query_player(req),
+                      action.empty() ? "changed" : action);
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
     };
@@ -1911,6 +2130,7 @@ void register_routes(httplib::Server& server) {
                             "application/json; charset=utf-8");
             return;
         }
+        attrib_record(AttribKind::Zone, id, query_player(req), "renamed");
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
     };
@@ -1976,6 +2196,8 @@ void register_routes(httplib::Server& server) {
             res.set_content("zone repaint failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
+        if (plan.changed)
+            attrib_record(AttribKind::Zone, id, player, "repainted");
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true,\"id\":" + std::to_string(id) +
                             (plan.changed ? "}\n" : ",\"unchanged\":true}\n"),
@@ -2179,10 +2401,12 @@ void register_routes(httplib::Server& server) {
             return;
         }
         query_int(req, "unit", unit);
+        int value = 0;
+        query_int(req, "value", value);
         const std::string kind = req.has_param("kind") ? req.get_param_value("kind") : "";
         std::string err;
         if (!location_action_via_lua(
-                id, req.get_param_value("action"), kind, unit, &err)) {
+                id, req.get_param_value("action"), kind, unit, value, &err)) {
             res.status = 400;
             res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
                             "application/json; charset=utf-8");
@@ -2218,6 +2442,8 @@ void register_routes(httplib::Server& server) {
             return;
         }
         bool ok = rename_stockpile_on_core_thread(id, req.get_param_value("name"));
+        if (ok)
+            attrib_record(AttribKind::Stockpile, id, query_player(req), "renamed");
         res.set_header("Cache-Control", "no-store");
         res.set_content(ok ? "{\"ok\":true}\n" : "{\"ok\":false}\n",
                         "application/json; charset=utf-8");
@@ -2233,6 +2459,8 @@ void register_routes(httplib::Server& server) {
             return;
         }
         bool ok = remove_stockpile_on_core_thread(id);
+        if (ok)
+            attrib_record(AttribKind::Stockpile, id, query_player(req), "removed");
         res.set_header("Cache-Control", "no-store");
         res.set_content(ok ? "{\"ok\":true}\n" : "{\"ok\":false}\n",
                         "application/json; charset=utf-8");
@@ -2249,6 +2477,8 @@ void register_routes(httplib::Server& server) {
             return;
         }
         bool ok = set_stockpile_links_only_on_core_thread(id, on != 0);
+        if (ok)
+            attrib_record(AttribKind::Stockpile, id, query_player(req), "link policy changed");
         res.set_header("Cache-Control", "no-store");
         res.set_content(ok ? "{\"ok\":true}\n" : "{\"ok\":false}\n",
                         "application/json; charset=utf-8");
@@ -2270,6 +2500,8 @@ void register_routes(httplib::Server& server) {
         query_int(req, "bins", bins);
         query_int(req, "wheelbarrows", wheelbarrows);
         bool ok = set_stockpile_storage_on_core_thread(id, barrels, bins, wheelbarrows);
+        if (ok)
+            attrib_record(AttribKind::Stockpile, id, query_player(req), "storage changed");
         res.set_header("Cache-Control", "no-store");
         res.set_content(ok ? "{\"ok\":true}\n" : "{\"ok\":false}\n",
                         "application/json; charset=utf-8");
@@ -2295,6 +2527,7 @@ void register_routes(httplib::Server& server) {
             res.set_content("link failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
+        attrib_record(AttribKind::Stockpile, id, query_player(req), "links changed");
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
     };
@@ -2315,6 +2548,7 @@ void register_routes(httplib::Server& server) {
             res.set_content("set failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
+        attrib_record(AttribKind::Stockpile, id, query_player(req), "contents changed");
         res.set_header("Cache-Control", "no-store");
         res.set_content("{\"ok\":true}\n", "application/json; charset=utf-8");
     };
@@ -2470,8 +2704,16 @@ void register_routes(httplib::Server& server) {
 
 } // namespace
 
-// Timed frame capture and HTTP panel refreshes require no explicit action wakeup.
-void notify_player_input() {}
+// Wake any pending delta long-polls immediately after an input or world mutation. A monotonically
+// increasing generation closes the race where input lands just before the browser opens its next
+// request: the stale generation in that request still causes an immediate capture.
+void notify_player_input() {
+    {
+        std::lock_guard<std::mutex> lock(g_frame_wake_mutex);
+        ++g_frame_wake_generation;
+    }
+    g_frame_wake_condition.notify_all();
+}
 
 std::string server_url(const std::string& bind_address, int port) {
     std::string host = bind_address == "0.0.0.0" ? "127.0.0.1" : bind_address;
@@ -2496,14 +2738,31 @@ bool start_server(int port, const std::string& bind_address, std::string* err) {
 
     session_policy_start();
     auto server = std::make_unique<httplib::Server>();
+    diagnostics_log("server startup: registering routes");
     register_routes(*server);
+    diagnostics_log("server startup: binding " + bind_address + ":" +
+                    std::to_string(port));
 
     if (!server->bind_to_port(bind_address.c_str(), port)) {
+#ifdef _WIN32
+        const int socket_error = WSAGetLastError();
+#else
+        const int socket_error = 0;
+#endif
         session_policy_stop();
-        if (err) *err = "failed to bind " + bind_address + ":" + std::to_string(port);
+        std::string message =
+            "failed to bind " + bind_address + ":" + std::to_string(port);
+        if (socket_error != 0)
+            message += " (Windows socket error " + std::to_string(socket_error) + ")";
+        message +=
+            "; the port is already in use or reserved. Close the conflicting "
+            "application, or choose another port in the DFCapture launcher";
+        diagnostics_log("server startup failed: " + message);
+        if (err) *err = message;
         return false;
     }
 
+    diagnostics_log("server startup: port bound; starting listener");
     g_port = port;
     g_bind_address = bind_address;
     g_running = true;
@@ -2524,6 +2783,8 @@ void stop_server() {
             session_policy_stop();
             return;
         }
+        g_running = false;
+        notify_player_input();
         g_server->stop();
         server = std::move(g_server);
         thread = std::move(g_server_thread);
@@ -2531,6 +2792,7 @@ void stop_server() {
 
     if (thread.joinable())
         thread.join();
+    reset_frame_delta_states();
     session_policy_stop();
     g_running = false;
 }

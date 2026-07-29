@@ -1453,10 +1453,15 @@ socket_t create_socket(const char *host, int port, Fn fn,
     if (fcntl(sock, F_SETFD, FD_CLOEXEC) == -1) { continue; }
 #endif
 
-    // Make 'reuse address' option available
+    // Make 'reuse address' option available. On Windows, SO_REUSEADDR permits
+    // unrelated processes to bind the same address and can let an ephemeral
+    // client connection capture a fixed server port. Server sockets opt into
+    // SO_EXCLUSIVEADDRUSE below instead.
     int yes = 1;
+#ifndef _WIN32
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char *>(&yes),
                sizeof(yes));
+#endif
 #ifdef SO_REUSEPORT
     setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<char *>(&yes),
                sizeof(yes));
@@ -3443,6 +3448,13 @@ inline socket_t Server::create_server_socket(const char *host, int port,
   return detail::create_socket(
       host, port,
       [](socket_t sock, struct addrinfo &ai) -> bool {
+#ifdef _WIN32
+        int yes = 1;
+        if (setsockopt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                       reinterpret_cast<char *>(&yes), sizeof(yes))) {
+          return false;
+        }
+#endif
         if (::bind(sock, ai.ai_addr, static_cast<socklen_t>(ai.ai_addrlen))) {
           return false;
         }

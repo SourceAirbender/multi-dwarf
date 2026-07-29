@@ -67,7 +67,7 @@ inline bool holder_is_caged(df::unit* holder) {
     auto world = df::global::world;
     if (!world)
         return false;
-    // DFHack stocks.cpp's second captive path: an installed cage can name its occupants in
+    // An installed cage can name its occupants in
     // assigned_units even when Units::getContainer() has no cage-item ref yet.
     for (auto building : world->buildings.all) {
         if (!building || building->getType() != df::building_type::Cage)
@@ -88,9 +88,8 @@ inline bool base_rejected(df::item* item) {
            flags.bits.removed;
 }
 
-// DFHack plugins/stocks.cpp:1185-1194. These are the native-Stock-list exclusions, not a
-// generic "available for a job" list. In particular, foreign/owned/forbid/dump/spider_web/
-// encased/artifact/on_fire are deliberately absent.
+// These are Stocks-list exclusions, not generic job-availability rules. Foreign, owned,
+// forbidden, dumped, webbed, encased, artifact, and burning items remain visible.
 inline bool stocks_rejected(df::item* item) {
     if (base_rejected(item))
         return true;
@@ -149,7 +148,7 @@ inline bool stocks_position_is_visible(df::item* outer) {
 } // namespace fort_stock_detail
 
 // Shared fort-property predicate. The holder rule is load-bearing:
-// DFHack stocks.cpp:1042-1063 admits citizen inventory and rejects a non-citizen holder, except
+// Admit citizen inventory and reject a non-citizen holder, except
 // for its explicit captive-in-a-cage path. Therefore squad-issued citizen gear counts, while a
 // visitor, long-term resident, diplomat, mercenary, caravan guard, or invader's gear does not.
 inline bool is_fort_stock_item(df::item* item, FortItemPurpose purpose) {

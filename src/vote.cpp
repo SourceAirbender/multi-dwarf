@@ -236,7 +236,7 @@ void open_vote_locked(const std::string& topic, const std::string& kind,
 
 // ---- detection ----------------------------------------------------------------------------------
 
-// The tier label. entity_position.land_holder: 1=baron, 2=count, 3=duke (df.entity.xml). The
+// The tier label. entity_position.land_holder: 1=baron, 2=count, 3=duke. The
 // mountainhome promotion is a monarch decision delivered by letter -- NOT a diplomacy popup --
 // so it is not detectable here; the manual /vote-start covers it (stated in the module header).
 std::string elevation_topic(int max_rank) {

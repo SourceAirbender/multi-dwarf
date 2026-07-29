@@ -77,14 +77,14 @@ bool run_burrows_locked(Fn&& fn) {
 // Burrow revision and change broadcast.
 //
 // Use the sticky change-only broadcast that pause, vote, and popup updates use
-// (native_popup.cpp popup_push_tick): a monotonic seq bumped by every write path, a <=1 Hz tick
+// A monotonic sequence is bumped by every write path; a <=1 Hz tick
 // that broadcasts ONLY when the seq moved, and a late-join sync so a reconnecting tab is told the
 // current seq once. The frame is deliberately a POKE ({"type":"burrows","seq":N}), not the state:
 // each player's rects are built for THEIR camera's z, so there is no one payload to push, and the
 // client already knows how to fetch its own.
 //
 // Unlike vote/popup this tick samples NOTHING from DF -- it compares two integers in plugin memory,
-// so it takes no CoreSuspender (AGENTS.md rule 5) and costs nothing on an idle fort. The tradeoff
+// so it takes no CoreSuspender and costs nothing on an idle fort. The tradeoff
 // that buys: burrow edits made in the NATIVE client (the host's Steam window) do not bump the seq,
 // because detecting them would mean walking every burrow's tile masks under a suspender every
 // second. Those still land on the next panel open / z-change refetch; every browser-side edit --
@@ -134,15 +134,9 @@ int burrow_pixel_to_tile(int pixel, int frame) {
     return std::max(0, std::min(frame - 1, pixel));
 }
 
-// "Civilian alert" (the burrow-row toggle that marks a burrow as a place citizens flee to when
-// the alarm is sounded) is not a per-burrow bitflag in df::burrow -- df::burrow_flag only has
-// limit_workshops/suspended. scripts/gui/civ-alert.lua stores the association in
-// df::global::plotinfo->alerts.list. It has a "civ-alert" alert_statest lazily created at index 0
-// (get_civ_alert() there pads
-// the list to size>=2 the first time it's touched); a burrow is a civilian-alert destination iff
-// its id is in that alert_statest's `burrows` vector (kept sorted, mirroring
-// utils.insert_sorted/erase_sorted in the lua). civ_alert_idx is a separate on/off latch for
-// whether the alarm is currently sounding, not per-burrow -- untouched here.
+// A civilian-alert destination is stored in plotinfo->alerts.list rather than in df::burrow flags.
+// The first alert record owns a sorted vector of destination burrow ids. civ_alert_idx is the
+// separate on/off latch for the alarm itself and is intentionally untouched here.
 df::alert_statest* get_civ_alert_state() {
     auto plotinfo = df::global::plotinfo;
     if (!plotinfo)
@@ -183,39 +177,29 @@ bool set_burrow_civalert(int32_t burrow_id, bool on, std::string* err) {
 // ---------------------------------------------------------------------------------------------
 // SYMBOL/COLOUR (the native burrow symbol picker).
 //
-// Storage model (df.burrow.xml, interface raws, and DFHack's burrow writer):
-//   df::burrow has TWO parallel appearance representations, and DF v50 renders from the SECOND:
+// df::burrow has two parallel appearance representations, and DF v50 renders from the second:
 //     (a) LEGACY ASCII:   `tile` (original-name 'symbol', init 43 = '+'),
 //                         `fg_color` ('f', init 11 = LCYAN), `bg_color` ('b', init 3 = CYAN).
 //     (b) GRAPHICS MODE:  `symbol_index` + `texture_r/g/b` (fg RGB) + `texture_br/bg/bb` (bg RGB),
 //                         plus `solid_texpos`/`blended_texpos` -- DF-OWNED render caches.
 //
-//   `symbol_index` indexes DF's CUSTOM_SYMBOLS tile page:
-//     data/vanilla/vanilla_interface/graphics/tile_page_interface.txt
-//       [TILE_PAGE:CUSTOM_SYMBOLS][FILE:images/custom_symbols.png][TILE_DIM:32:32][PAGE_DIM_PIXELS:384:64]
-//     graphics_interface.txt binds EXACTLY 23 CUSTOM_SYMBOL cells (12 across row 0, 11 across
-//     row 1) -- so the valid range is 0..22, which is precisely the range DFHack's own burrow
-//     writer rolls: scripts/internal/quickfort/burrow.lua create_burrow():
-//       b.symbol_index = math.random(0, 22)
-//       b.texture_r/g/b = random 0..255 ; b.texture_br/bg/bb = 255 - the fg component
+// `symbol_index` selects one of 23 CUSTOM_SYMBOLS cells, so valid values are 0..22.
 //
 // WHAT WE WRITE, AND WHAT WE DELIBERATELY DO NOT:
 //   WRITE: symbol_index, fg_color, bg_color, texture_r/g/b, texture_br/bg/bb.
 //   DO NOT WRITE: `tile`, `solid_texpos`, `blended_texpos`.
-//     quickfort leaves these three untouched. DF derives the texpos caches, and `tile` is used for
-//     ASCII mode. Writing a guessed
+//     DF derives the texpos caches, and `tile` is used for ASCII mode. Writing a guessed
 //     texpos would be poking a render cache with a made-up value; writing `tile` would require an
 //     index-to-CP437 table that DF does not expose. Neither
 //     is simulation state, so leaving them alone cannot desync a save -- inventing them might.
 //
 // The fg/bg RGB is NOT hardcoded: DF's live curses palette is df::global::gps->uccolor[16][3]
-// (df.g_src.graphics.xml: "The curses-RGB mapping used for non-curses display modes"), which
-// already reflects the player's data/init/colors.txt. So a colour index picked in the browser
-// lands on exactly the RGB DF itself would use.
+// and already reflects the player's data/init/colors.txt. A browser colour choice therefore uses
+// the same live palette as the game.
 constexpr int kBurrowSymbolCount = 23;  // CUSTOM_SYMBOL cells in graphics_interface.txt
 constexpr int kCursesColors = dfcapture::curses::kColors;
 
-// Burrow swatches share the curses-palette reader in curses_palette.h.
+// Burrow swatches share the live curses-palette reader.
 // The reader returns false when gps is
 // unavailable (headless/early boot), in which case callers leave the texture_* bytes ALONE rather
 // than substituting invented colours.
@@ -448,7 +432,7 @@ ApiResult<int32_t> create_burrow(const std::string& name) {
         // Initialize fields needed for a valid, visible default burrow through the same helper
         // used by the symbol picker.
         //
-        // The colours are df.burrow.xml's own declared init-values (fg_color init 11 = LCYAN,
+        // Use the burrow type's declared default colors (fg 11 = light cyan,
         // bg_color init 3 = CYAN) rather than invented ones -- passed explicitly instead of relying
         // on the allocator having applied them. The symbol cycles over the 23 CUSTOM_SYMBOL cells by
         // id so successive burrows are visually distinct; unlike quickfort's math.random this is
@@ -525,7 +509,7 @@ ApiResult<bool> apply_burrow_action(int32_t id, const std::string& action) {
             return true;
         }
         // burrow_flag has exactly two bits:
-        // (df.burrow.xml): limit_workshops (original-name WORKSHOPS_RESTRICTED) and suspended.
+        // The available burrow flags are workshop restriction and suspension.
         // DF ships real art for both states of this one -- BURROW_WORKSHOPS_BURROW_ONLY /
         // BURROW_WORKSHOPS_EVERYWHERE in interface_map.json -- and nothing was driving it.
         if (action == "workshops-limit") { burrow->flags.bits.limit_workshops = 1; bump_burrow_seq(); return true; }
@@ -538,12 +522,8 @@ ApiResult<bool> apply_burrow_action(int32_t id, const std::string& action) {
     return ApiResult<bool>::success(true);
 }
 
-// POST /burrow-delete?id=. DFHack exposes no single delete-burrow helper; the
-// in-game screen handles it internally); mirrors what deletion actually needs to leave clean:
-// drop its tile masks + unit assignments (Burrows::clearTiles/clearUnits -- same calls the
-// `burrow` plugin's own tile/unit-remove commands use), drop it from any civilian-alert burrow
-// list (mirrors gui/civ-alert.lua's remove_civalert_burrow, including clearing the alarm if that
-// was the last burrow in it), then erase it from plotinfo->burrows.list and free it.
+// Deletion clears tile masks, unit assignments, and civilian-alert references before removing
+// the burrow from plotinfo and freeing it.
 ApiResult<bool> delete_burrow(int32_t id) {
     ApiError failure;
     const bool ok = run_burrows_locked([&]() -> bool {

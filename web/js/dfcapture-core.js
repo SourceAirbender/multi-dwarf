@@ -19,13 +19,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
   const params = new URLSearchParams(location.search);
-  const stored = localStorage.getItem("dfcapture.player");
-  const fresh = (crypto.randomUUID ? crypto.randomUUID() :
-    `p-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`);
-  const player = params.get("player") || stored || fresh;
-  localStorage.setItem("dfcapture.player", player);
+  const legacyPlayer = params.get("player") || localStorage.getItem("dfcapture.player") || "";
+  if (legacyPlayer && !localStorage.getItem("dfcapture.displayName") &&
+      !/^[0-9a-f]{32}$/i.test(legacyPlayer))
+    localStorage.setItem("dfcapture.displayName", legacyPlayer.slice(0, 32));
+  const stored = localStorage.getItem("dfcapture.playerId");
+  const fresh = (crypto.randomUUID ? crypto.randomUUID().replaceAll("-", "") :
+    Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      value => value.toString(16).padStart(2, "0")).join(""));
+  let player = /^[0-9a-f]{32}$/i.test(stored || "") ? stored.toLowerCase() : fresh;
+  localStorage.setItem("dfcapture.playerId", player);
+  window.player = player;
+  window.dfStablePlayerId = player;
 
   const view = document.getElementById("view");
+  const frameView = document.getElementById("frameView");
+  const frameViewContext = frameView?.getContext("2d", { alpha: false });
+  const authoritativeFrame = document.createElement("canvas");
+  const authoritativeContext = authoritativeFrame.getContext("2d", { alpha: false });
+  const motionFrame = document.createElement("canvas");
+  const motionContext = motionFrame.getContext("2d", { alpha: false });
+  if (frameViewContext) frameViewContext.imageSmoothingEnabled = false;
+  if (authoritativeContext) authoritativeContext.imageSmoothingEnabled = false;
   const zoneOverlay = document.getElementById("zoneOverlay");
   const selection = document.getElementById("selection");
   const clientPanel = document.getElementById("clientPanel");
@@ -37,6 +52,11 @@
     population: document.getElementById("population"),
     food: document.getElementById("food"),
     drink: document.getElementById("drink"),
+    seeds: document.getElementById("seeds"),
+    meat: document.getElementById("meat"),
+    fish: document.getElementById("fish"),
+    plant: document.getElementById("plant"),
+    other: document.getElementById("other"),
     moon: document.getElementById("moon"),
     dateDay: document.getElementById("dateDay"),
     dateMonth: document.getElementById("dateMonth"),
@@ -96,7 +116,17 @@
   function setPanOffset(x, y) {
     if (x === panOffset.x && y === panOffset.y) return;
     panOffset.x = x; panOffset.y = y;
-    view.style.transform = (x || y) ? `translate3d(${x}px, ${y}px, 0)` : "";
+    const transform = (x || y) ? `translate3d(${x}px, ${y}px, 0)` : "";
+    view.style.transform = transform;
+    if (frameView) frameView.style.transform = transform;
+  }
+  function frameNaturalWidth() {
+    return document.body.classList.contains("dfc-delta-active")
+      ? frameView.width : view.naturalWidth;
+  }
+  function frameNaturalHeight() {
+    return document.body.classList.contains("dfc-delta-active")
+      ? frameView.height : view.naturalHeight;
   }
   function clearPanPrediction() { setPanOffset(0, 0); }
   function resetPanPrediction() { predictedCam = null; prevFrameCam = null; panStalled = 0; clearPanPrediction(); }
@@ -111,7 +141,7 @@
   function applyPanPrediction() {
     if (!predictivePan || !predictedCam || !frameCam || frameCam.z !== predictedCam.z) { clearPanPrediction(); return; }
     const vp = currentHud && currentHud.viewport;
-    const nw = view.naturalWidth, nh = view.naturalHeight;
+    const nw = frameNaturalWidth(), nh = frameNaturalHeight();
     if (!vp || !nw || !nh) { clearPanPrediction(); return; }
     const grid = captureTileGrid();
     if (!grid) { clearPanPrediction(); return; }
@@ -188,9 +218,30 @@
   }
   setTimeout(focusPage, 0);
 
-  const frameIntervalMs = 125;
+  // Target start-to-start cadence. The old loop waited 125 ms *after* every completed
+  // capture/decode/paint, so a 36 ms frame actually started about every 161 ms. Deadline-based
+  // pacing removes that dead time without allowing overlapping captures. After camera input, a
+  // short bounded burst improves input-to-authoritative-pixel latency.
+  const idleFramePeriodMs = 125;
+  const activeFramePeriodMs = 80;
+  const activeFrameWindowMs = 750;
+  const failedFrameRetryMs = 500;
   let currentFrameUrl = "";
   let frameSeq = 0;
+  let frameMetricSeq = 0;
+  let lastFrameInputAt = -1;
+  let lastFrameActivityAt = -1;
+  let frameTimer = 0;
+  let frameInFlight = false;
+  let immediateFrameQueued = false;
+  let pendingFrameMutations = 0;
+  let deltaAvailable = false;
+  let deltaLongPollAvailable = false;
+  let deltaWakeGeneration = 0;
+  let nextDeltaHoldMs = 0;
+  let deltaSequence = 0;
+  let deltaForceKeyframe = true;
+  let deltaCooldownUntil = 0;
   const ZONE_SHEET_URL = "/asset/activity_zones.png";
   const zoneSheet = new Image();
   zoneSheet.onload = () => renderZoneOverlay();
@@ -200,29 +251,307 @@
   cursorSheet.src = "/asset/cursors.png";
   view.addEventListener("load", () => renderZoneOverlay());
 
-  function scheduleFrame(delay = frameIntervalMs) {
-    setTimeout(loadFrame, delay);
+  function scheduleFrame(delay = idleFramePeriodMs) {
+    if (frameTimer) clearTimeout(frameTimer);
+    frameTimer = setTimeout(() => {
+      frameTimer = 0;
+      loadFrame();
+    }, Math.max(0, delay));
+  }
+
+  function markFrameInput() {
+    const now = performance.now();
+    lastFrameInputAt = now;
+    lastFrameActivityAt = now;
+    // A sleeping poll would otherwise be allowed to start before the camera mutation finishes.
+    // The mutation completion path below requests the fresh authoritative frame.
+    if (frameTimer) {
+      clearTimeout(frameTimer);
+      frameTimer = 0;
+    }
+    // A failed or hung camera request must not stop the stream forever. Its normal completion
+    // replaces this safety timer with an immediate authoritative refresh.
+    scheduleFrame(failedFrameRetryMs);
+  }
+
+  function requestFreshFrame() {
+    if (frameInFlight) {
+      immediateFrameQueued = true;
+      return;
+    }
+    scheduleFrame(0);
+  }
+
+  function parseDeltaPacket(buffer) {
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 10 ||
+        buffer.byteLength > 64 * 1024 * 1024)
+      throw new Error("invalid delta packet size");
+    const bytes = new Uint8Array(buffer);
+    if (bytes[0] !== 68 || bytes[1] !== 70 || bytes[2] !== 68 || bytes[3] !== 49)
+      throw new Error("bad delta magic");
+    const data = new DataView(buffer);
+    const headerLength = data.getUint32(4, true);
+    if (headerLength < 2 || headerLength > 65536 || 8 + headerLength > buffer.byteLength)
+      throw new Error("bad delta header length");
+    const header = JSON.parse(new TextDecoder().decode(bytes.subarray(8, 8 + headerLength)));
+    const payloadOffset = 8 + headerLength;
+    if (![1, 2].includes(header.protocol) || !Number.isSafeInteger(header.sequence) ||
+        header.sequence <= 0 || !Number.isInteger(header.width) ||
+        !Number.isInteger(header.height) || header.width <= 0 || header.height <= 0 ||
+        header.width > 8192 || header.height > 8192 ||
+        !Array.isArray(header.rectangles) || header.rectangles.length > 48 ||
+        !Number.isSafeInteger(header.baseSequence) || header.baseSequence < 0 ||
+        !Number.isInteger(header.payloadLength) || header.payloadLength < 0 ||
+        header.payloadLength !== buffer.byteLength - payloadOffset)
+      throw new Error("invalid delta header");
+    if (header.scroll != null) {
+      const scroll = header.scroll;
+      const values = [
+        scroll.x, scroll.y, scroll.width, scroll.height, scroll.dx, scroll.dy
+      ];
+      if (header.protocol < 2 || header.keyframe ||
+          values.some(v => !Number.isInteger(v)) ||
+          scroll.x < 0 || scroll.y < 0 ||
+          scroll.width <= 0 || scroll.height <= 0 ||
+          scroll.x + scroll.width > header.width ||
+          scroll.y + scroll.height > header.height ||
+          Math.abs(scroll.dx) >= scroll.width ||
+          Math.abs(scroll.dy) >= scroll.height)
+        throw new Error("invalid delta scroll");
+    }
+    for (const rect of header.rectangles) {
+      const values = [rect.x, rect.y, rect.width, rect.height, rect.offset, rect.length];
+      if (values.some(v => !Number.isInteger(v) || v < 0) ||
+          rect.width <= 0 || rect.height <= 0 ||
+          rect.x + rect.width > header.width || rect.y + rect.height > header.height ||
+          rect.offset + rect.length > header.payloadLength ||
+          !["jpeg", "png"].includes(rect.encoding))
+        throw new Error("invalid delta rectangle");
+    }
+    return { header, buffer, payloadOffset };
+  }
+
+  async function paintDeltaPacket(packet) {
+    const { header, buffer, payloadOffset } = packet;
+    if (!header.keyframe &&
+        (header.baseSequence !== deltaSequence ||
+         authoritativeFrame.width !== header.width ||
+         authoritativeFrame.height !== header.height))
+      throw new Error("delta sequence gap");
+    if (header.keyframe && (header.baseSequence !== 0 ||
+        header.rectangles.length !== 1 ||
+        header.rectangles[0].x !== 0 || header.rectangles[0].y !== 0 ||
+        header.rectangles[0].width !== header.width ||
+        header.rectangles[0].height !== header.height ||
+        header.rectangles[0].encoding !== "jpeg"))
+      throw new Error("invalid keyframe");
+
+    const bitmaps = await Promise.all(header.rectangles.map(async rect => {
+      const bytes = buffer.slice(payloadOffset + rect.offset,
+        payloadOffset + rect.offset + rect.length);
+      return createImageBitmap(new Blob([bytes], {
+        type: rect.encoding === "jpeg" ? "image/jpeg" : "image/png"
+      }));
+    }));
+    try {
+      if (header.keyframe) {
+        authoritativeFrame.width = header.width;
+        authoritativeFrame.height = header.height;
+        authoritativeContext.imageSmoothingEnabled = false;
+        authoritativeContext.clearRect(0, 0, header.width, header.height);
+      }
+      if (header.scroll) {
+        const scroll = header.scroll;
+        if (motionFrame.width !== scroll.width || motionFrame.height !== scroll.height) {
+          motionFrame.width = scroll.width;
+          motionFrame.height = scroll.height;
+          motionContext.imageSmoothingEnabled = false;
+        } else {
+          motionContext.clearRect(0, 0, scroll.width, scroll.height);
+        }
+        motionContext.drawImage(
+          authoritativeFrame,
+          scroll.x, scroll.y, scroll.width, scroll.height,
+          0, 0, scroll.width, scroll.height);
+        authoritativeContext.save();
+        authoritativeContext.beginPath();
+        authoritativeContext.rect(
+          scroll.x, scroll.y, scroll.width, scroll.height);
+        authoritativeContext.clip();
+        authoritativeContext.clearRect(
+          scroll.x, scroll.y, scroll.width, scroll.height);
+        authoritativeContext.drawImage(
+          motionFrame, scroll.x + scroll.dx, scroll.y + scroll.dy);
+        authoritativeContext.restore();
+      }
+      for (let i = 0; i < bitmaps.length; ++i) {
+        const rect = header.rectangles[i];
+        authoritativeContext.drawImage(bitmaps[i], rect.x, rect.y, rect.width, rect.height);
+      }
+      if (frameView.width !== header.width || frameView.height !== header.height) {
+        frameView.width = header.width;
+        frameView.height = header.height;
+        frameViewContext.imageSmoothingEnabled = false;
+      }
+      frameViewContext.drawImage(authoritativeFrame, 0, 0);
+      deltaSequence = header.sequence;
+      deltaForceKeyframe = false;
+      document.body.classList.add("dfc-delta-active");
+      renderZoneOverlay();
+    } finally {
+      for (const bitmap of bitmaps) bitmap.close?.();
+    }
+  }
+
+  async function fetchDeltaFrame(started) {
+    const endpoint = deltaLongPollAvailable ? "/frame.next" : "/frame.delta";
+    const longPoll = deltaLongPollAvailable
+      ? `&wake=${deltaWakeGeneration}&hold=${Math.round(nextDeltaHoldMs)}`
+      : "";
+    nextDeltaHoldMs = 0;
+    const url = `${endpoint}?player=${encodeURIComponent(player)}&base=${deltaSequence}` +
+      `&force=${deltaForceKeyframe ? 1 : 0}${longPoll}&t=${Date.now()}-${frameSeq++}`;
+    const controller = deltaLongPollAvailable ? new AbortController() : null;
+    const timeout = controller
+      ? setTimeout(() => controller.abort(), 2000)
+      : 0;
+    let response;
+    try {
+      response = await fetch(url, {
+        cache: "no-store",
+        signal: controller?.signal,
+      });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    const fetched = performance.now();
+    if (!response.ok) throw new Error(`delta frame failed: ${response.status}`);
+    if (deltaLongPollAvailable) {
+      const wake = Number(response.headers.get("X-DFCapture-Wake"));
+      if (Number.isSafeInteger(wake) && wake >= 0) deltaWakeGeneration = wake;
+    }
+    const fc = parseFrameCamera(response.headers.get("X-DFCapture-Camera"));
+    const fg = parseFrameGrid(response.headers.get("X-DFCapture-Grid"));
+    const blobStarted = performance.now();
+    const buffer = await response.arrayBuffer();
+    const blobFinished = performance.now();
+    const decodeStarted = performance.now();
+    await paintDeltaPacket(parseDeltaPacket(buffer));
+    const decoded = performance.now();
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    return {
+      started, fetched, blobStarted, blobFinished, decodeStarted, decoded,
+      painted: performance.now(), bytes: buffer.byteLength, fc, fg
+    };
+  }
+
+  async function fetchJpegFrame(started) {
+    const response = await fetch(
+      `/frame.jpg?player=${encodeURIComponent(player)}&ui=0&t=${Date.now()}-${frameSeq++}`,
+      { cache: "no-store" });
+    const fetched = performance.now();
+    if (!response.ok) throw new Error("frame failed");
+    const fc = parseFrameCamera(response.headers.get("X-DFCapture-Camera"));
+    const fg = parseFrameGrid(response.headers.get("X-DFCapture-Grid"));
+    const blobStarted = performance.now();
+    const blob = await response.blob();
+    const blobFinished = performance.now();
+    const nextUrl = URL.createObjectURL(blob);
+    const oldUrl = currentFrameUrl;
+    currentFrameUrl = nextUrl;
+    frameGrid = fg;
+    view.src = nextUrl;
+    const decodeStarted = performance.now();
+    try { await view.decode(); } catch (_) {}
+    const decoded = performance.now();
+    document.body.classList.remove("dfc-delta-active");
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    if (oldUrl) setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
+    return {
+      started, fetched, blobStarted, blobFinished, decodeStarted, decoded,
+      painted: performance.now(), bytes: blob.size, fc, fg
+    };
+  }
+
+  function reportFrameMetrics(metric) {
+    frameGrid = metric.fg;
+    if (metric.fc) {
+      frameCam = metric.fc;
+      reconcilePredicted(metric.fc);
+      applyPanPrediction();
+    }
+    // Do not let an older request that was already in flight consume the input marker. Only a
+    // frame whose request began after the input can represent the resulting authoritative state.
+    const inputVisible = lastFrameInputAt >= 0 && pendingFrameMutations === 0 &&
+      metric.started >= lastFrameInputAt
+      ? metric.painted - lastFrameInputAt : -1;
+    if (inputVisible >= 0) lastFrameInputAt = -1;
+    if ((frameMetricSeq++ % 8) !== 0 && inputVisible < 0) return;
+    const metrics = new URLSearchParams({
+      player,
+      fetch: (metric.fetched - metric.started).toFixed(3),
+      blob: (metric.blobFinished - metric.blobStarted).toFixed(3),
+      decode: (metric.decoded - metric.decodeStarted).toFixed(3),
+      paint: (metric.painted - metric.decoded).toFixed(3),
+      total: (metric.painted - metric.started).toFixed(3),
+      inputVisible: inputVisible.toFixed(3),
+      bytes: String(metric.bytes),
+    });
+    fetch(`/frame-client-metrics?${metrics}`, {
+      method: "POST", cache: "no-store", keepalive: true
+    }).catch(() => {});
   }
 
   async function loadFrame() {
+    if (frameInFlight) {
+      immediateFrameQueued = true;
+      return;
+    }
+    frameInFlight = true;
+    const started = performance.now();
+    let failed = false;
     try {
-      const response = await fetch(`/frame.jpg?player=${encodeURIComponent(player)}&ui=0&t=${Date.now()}-${frameSeq++}`, {
-        cache: "no-store"
-      });
-      if (!response.ok) throw new Error("frame failed");
-      const fc = parseFrameCamera(response.headers.get("X-DFCapture-Camera"));
-      const fg = parseFrameGrid(response.headers.get("X-DFCapture-Grid"));
-      const blob = await response.blob();
-      const nextUrl = URL.createObjectURL(blob);
-      const oldUrl = currentFrameUrl;
-      currentFrameUrl = nextUrl;
-      frameGrid = fg;
-      view.src = nextUrl;
-      if (oldUrl) setTimeout(() => URL.revokeObjectURL(oldUrl), 1000);
-      if (fc) { frameCam = fc; reconcilePredicted(fc); applyPanPrediction(); }
-      scheduleFrame();
+      let metric;
+      if (deltaAvailable && Date.now() >= deltaCooldownUntil) {
+        try {
+          metric = await fetchDeltaFrame(started);
+        } catch (error) {
+          console.warn("DFCapture delta frame fell back to JPEG:", error);
+          deltaSequence = 0;
+          deltaForceKeyframe = true;
+          deltaCooldownUntil = Date.now() + 3000;
+          metric = await fetchJpegFrame(started);
+        }
+      } else {
+        metric = await fetchJpegFrame(started);
+      }
+      reportFrameMetrics(metric);
     } catch (_) {
-      scheduleFrame(500);
+      failed = true;
+    } finally {
+      frameInFlight = false;
+      const queued = immediateFrameQueued;
+      immediateFrameQueued = false;
+      if (queued) {
+        nextDeltaHoldMs = 0;
+        scheduleFrame(0);
+      } else if (failed) {
+        scheduleFrame(failedFrameRetryMs);
+      } else {
+        const active = lastFrameActivityAt >= 0 &&
+          performance.now() - lastFrameActivityAt < activeFrameWindowMs;
+        const period = active ? activeFramePeriodMs : idleFramePeriodMs;
+        const remaining = Math.max(0, period - (performance.now() - started));
+        if (deltaAvailable && deltaLongPollAvailable &&
+            Date.now() >= deltaCooldownUntil) {
+          // Open the next request immediately. The server holds it only for the remaining
+          // start-to-start deadline and wakes it early when input changes the camera/world.
+          nextDeltaHoldMs = remaining;
+          scheduleFrame(0);
+        } else {
+          scheduleFrame(remaining);
+        }
+      }
     }
   }
   const step = 10;
@@ -231,6 +560,7 @@
   let sending = false;
 
   function queueMove(dx, dy, dz) {
+    markFrameInput();
     followTarget = null;        // any manual pan releases follow-camera
     if (typeof window.syncMinimapControls === "function") window.syncMinimapControls();
     notePanInput(dx, dy, dz);   // instant predictive shift before the server round-trip
@@ -239,6 +569,7 @@
     queued.dz += dz;
     if (sending) return;
     sending = true;
+    pendingFrameMutations++;
     requestAnimationFrame(flushMove);
   }
 
@@ -253,6 +584,9 @@
     if (queued.dx || queued.dy || queued.dz) {
       sending = true;
       requestAnimationFrame(flushMove);
+    } else {
+      pendingFrameMutations = Math.max(0, pendingFrameMutations - 1);
+      requestFreshFrame();
     }
   }
 
@@ -261,23 +595,31 @@
   let zoomBusy = false;
   function sendZoom(dir) {
     if (zoomBusy) return;             // coalesce rapid presses
+    markFrameInput();
     zoomBusy = true;
+    pendingFrameMutations++;
     fetch(`/zoom?player=${encodeURIComponent(player)}&dir=${dir}`, { method: "POST", cache: "no-store" })
       .catch(() => {})
       .finally(() => {
         zoomBusy = false;
+        pendingFrameMutations = Math.max(0, pendingFrameMutations - 1);
         loadHud();
         if (zoneOverlayEnabled) loadZones();
+        requestFreshFrame();
       });
   }
 
   async function resetToHost() {
+    markFrameInput();
+    pendingFrameMutations++;
     resetPanPrediction();
     try {
       await fetch(`/reset?player=${encodeURIComponent(player)}`, { method: "POST", cache: "no-store" });
     } catch (_) {}
+    pendingFrameMutations = Math.max(0, pendingFrameMutations - 1);
     loadHud();
     if (zoneOverlayEnabled) loadZones();
+    requestFreshFrame();
   }
 
   function isTextEditingTarget(target) {
@@ -399,11 +741,11 @@
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
     return `hsl(${h % 360} 78% 60%)`;
   }
-  const myColor = playerColor(player);
+  let myColor = playerColor(player);
 
   function worldTileFromEvent(event) {
     const cam = currentHud?.camera, vp = currentHud?.viewport;
-    const nw = view.naturalWidth, nh = view.naturalHeight;
+    const nw = frameNaturalWidth(), nh = frameNaturalHeight();
     if (!cam || !vp || !nw || !nh) return null;
     const px = imagePixelFromEvent(event);
     if (!px) return null;
@@ -686,7 +1028,26 @@
   function startDfcapture() {
     if (window.__dfcaptureStarted) return;
     window.__dfcaptureStarted = true;
-    loadFrame();
+    const identityReady = window.DFCaptureSession?.ensureIdentity
+      ? window.DFCaptureSession.ensureIdentity(player).then(identity => {
+          player = String(identity.playerId);
+          window.player = player;
+          window.dfStablePlayerId = player;
+          myColor = playerColor(player);
+        }).catch(() => {})
+      : Promise.resolve();
+    identityReady.then(() => fetch("/version", { cache: "no-store" }))
+      .then(response => response.ok ? response.json() : null)
+      .then(info => {
+        const deltaProtocol = Number(info?.capabilities?.frameDelta?.protocol);
+        deltaAvailable = [1, 2].includes(deltaProtocol) &&
+          !!frameViewContext && !!authoritativeContext &&
+          typeof createImageBitmap === "function";
+        deltaLongPollAvailable = deltaAvailable &&
+          Number(info?.capabilities?.frameLongPoll?.protocol) === 1;
+      })
+      .catch(() => {})
+      .finally(loadFrame);
     if (typeof loadHud === "function") {
       loadHud();
       setInterval(loadHud, 1000);
@@ -702,8 +1063,8 @@
   }
 
   function renderedImageRect() {
-    const nw = view.naturalWidth;
-    const nh = view.naturalHeight;
+    const nw = frameNaturalWidth();
+    const nh = frameNaturalHeight();
     if (!nw || !nh) return null;
     const rect = viewClientRect();
     // #view uses object-fit: cover. Use the same scale and centered crop here so hover, clicks,
@@ -726,8 +1087,8 @@
   // exact values while the per-player zoom guard is active, so every browser overlay and input
   // addresses the same pixels that DF rendered.
   function captureTileGrid() {
-    const nw = view.naturalWidth;
-    const nh = view.naturalHeight;
+    const nw = frameNaturalWidth();
+    const nh = frameNaturalHeight();
     const rendered = renderedImageRect();
     const fg = frameGrid;
     if (!nw || !nh || !fg || !rendered) return null;

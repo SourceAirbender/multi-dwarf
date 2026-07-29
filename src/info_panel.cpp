@@ -89,19 +89,8 @@ namespace {
 
 std::recursive_mutex g_info_panel_mutex;
 
-// Independent browser Info panels mirror DF's premium Info screen tab names.
-// Local source references:
-// - dfhack-src/library/modules/Gui.cpp: add_main_interface_focus_strings()
-//   exposes the active DF Info tabs/subtabs ("Pets/Livestock", "Dead/Missing",
-//   "Work Details", "Standing orders", etc.).
-// - dfhack-src/library/modules/Units.cpp provides the fort-control, citizen,
-//   tame animal, animal, and visitor predicates used for creature bucketing.
-// - dfhack-src/plugins/lua/sort/info.lua shows how DFHack tooling maps units
-//   into Info-panel subsets without relying on DF's singleton UI state.
-// - dfhack-src/plugins/lua/stocks.lua and df::stocks_interfacest document the
-//   native Stocks screen's type_list/storeamount/badamount model. We read those
-//   values when DF has populated them, then fall back to world->items.all so the
-//   browser screen remains independent of DF's singleton Stocks UI.
+// Independent browser Info panels use the game's familiar tabs and live classification helpers.
+// Stock counts prefer populated interface totals and fall back to world items when necessary.
 
 std::string json_escape(const std::string& raw) {
     std::ostringstream out;

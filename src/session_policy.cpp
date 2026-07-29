@@ -4,27 +4,37 @@
 
 #include "session_policy.h"
 
+#include "build_identity.h"
+#include "Core.h"
 #include "diagnostics.h"
 #include "httplib.h"
 #include "interaction.h"
 #include "json_util.h"
-#include "native_popup.h"
 #include "save_barrier.h"
+#include "sdl_capture.h"
 #include "write_guards.h"
+
+#include "DataDefs.h"
+#include "df/global_objects.h"
+#include "df/world.h"
+#include "modules/World.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <iomanip>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
 
+using namespace DFHack;
+
 namespace dfcapture {
 namespace {
 
-constexpr const char* kPasswordFile = "dfcapture_join_password.txt";
 constexpr const char* kPolicyFile = "dfhack-config/dfcapture-session.json";
 constexpr long long kPresenceStaleMs = 7000;
 
@@ -42,7 +52,6 @@ struct SessionPresence {
 };
 
 std::mutex g_mutex;
-std::string g_password;
 Policy g_policy;
 std::unordered_map<std::string, SessionPresence> g_presence;
 std::atomic<bool> g_stop{true};
@@ -50,6 +59,25 @@ std::thread g_watchdog;
 bool g_had_players = false;
 long long g_empty_since_ms = 0;
 bool g_disconnect_pause_applied = false;
+
+// Pause arbitration and busy-state metadata. Guarded by g_mutex.
+struct PauseMeta {
+    bool last_target_running = false;   // last target we applied (false = paused)
+    std::string actor;                  // player id that last drove the pause, or "" for host/native
+    std::string reason = "native";      // "player" | "host" | "disconnect" | "native"
+    long long changed_ms = 0;           // when the pause state last changed on our request
+    long long last_apply_ms = 0;        // timestamp of the last applied request (merge window)
+};
+PauseMeta g_pause;
+constexpr long long kPauseMergeMs = 250;   // opposing requests within this window: the host wins
+constexpr long long kPauseKeyTtlMs = 10000;
+constexpr size_t kMaxPauseKeys = 128;
+
+struct RecentPauseKey {
+    long long seen_ms = 0;
+    bool superseded = false;
+};
+std::unordered_map<std::string, RecentPauseKey> g_pause_keys;
 
 long long now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -62,18 +90,6 @@ std::string trim(const std::string& value) {
     while (begin < end && static_cast<unsigned char>(value[begin]) <= ' ') ++begin;
     while (end > begin && static_cast<unsigned char>(value[end - 1]) <= ' ') --end;
     return value.substr(begin, end - begin);
-}
-
-bool constant_time_equal(const std::string& left, const std::string& right) {
-    unsigned char diff = static_cast<unsigned char>((left.size() ^ right.size()) & 0xff);
-    diff |= static_cast<unsigned char>(((left.size() ^ right.size()) >> 8) != 0);
-    const size_t count = std::max(left.size(), right.size());
-    for (size_t i = 0; i < count; ++i) {
-        const unsigned char a = i < left.size() ? static_cast<unsigned char>(left[i]) : 0;
-        const unsigned char b = i < right.size() ? static_cast<unsigned char>(right[i]) : 0;
-        diff |= static_cast<unsigned char>(a ^ b);
-    }
-    return diff == 0;
 }
 
 bool scan_bool(const std::string& text, const std::string& key, bool fallback) {
@@ -105,10 +121,6 @@ int scan_int(const std::string& text, const std::string& key, int fallback) {
 }
 
 void load_policy() {
-    std::ifstream password_file(kPasswordFile);
-    std::string password;
-    std::getline(password_file, password);
-
     Policy policy;
     std::ifstream policy_file(kPolicyFile);
     std::ostringstream text;
@@ -122,24 +134,7 @@ void load_policy() {
         std::clamp(scan_int(body, "disconnectGraceMs", 5000), 1000, 60000);
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_password = trim(password);
     g_policy = policy;
-}
-
-bool persist_password(const std::string& password, std::string* err) {
-    std::ofstream file(kPasswordFile, std::ios::trunc);
-    if (!file) {
-        if (err) *err = std::string("cannot write ") + kPasswordFile;
-        return false;
-    }
-    const std::string value = trim(password);
-    if (!value.empty()) file << value << "\n";
-    file.flush();
-    if (!file.good()) {
-        if (err) *err = std::string("write failed: ") + kPasswordFile;
-        return false;
-    }
-    return true;
 }
 
 bool persist_policy(const Policy& policy, std::string* err) {
@@ -178,41 +173,6 @@ std::string cookie_value(const std::string& header, const std::string& name) {
     return {};
 }
 
-int hex_value(char value) {
-    if (value >= '0' && value <= '9') return value - '0';
-    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-    return -1;
-}
-
-std::string url_decode(const std::string& value) {
-    std::string out;
-    out.reserve(value.size());
-    for (size_t i = 0; i < value.size(); ++i) {
-        if (value[i] == '%' && i + 2 < value.size()) {
-            const int high = hex_value(value[i + 1]);
-            const int low = hex_value(value[i + 2]);
-            if (high >= 0 && low >= 0) {
-                out.push_back(static_cast<char>((high << 4) | low));
-                i += 2;
-                continue;
-            }
-        }
-        out.push_back(value[i] == '+' ? ' ' : value[i]);
-    }
-    return out;
-}
-
-bool password_enabled() {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    return !g_password.empty();
-}
-
-bool password_matches(const std::string& candidate) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    return !g_password.empty() && constant_time_equal(candidate, g_password);
-}
-
 void prune_presence_locked(long long now) {
     for (auto it = g_presence.begin(); it != g_presence.end();) {
         if (now - it->second.last_ms > kPresenceStaleMs) it = g_presence.erase(it);
@@ -220,19 +180,208 @@ void prune_presence_locked(long long now) {
     }
 }
 
+bool valid_stable_player_id(const std::string& value) {
+    if (value.size() != 32) return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isdigit(ch) || (ch >= 'a' && ch <= 'f');
+    });
+}
+
+std::string random_player_id() {
+    std::random_device source;
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (int i = 0; i < 4; ++i)
+        out << std::setw(8) << static_cast<uint32_t>(source());
+    return out.str();
+}
+
+void prune_pause_keys_locked(long long now) {
+    for (auto it = g_pause_keys.begin(); it != g_pause_keys.end();) {
+        if (now - it->second.seen_ms > kPauseKeyTtlMs) it = g_pause_keys.erase(it);
+        else ++it;
+    }
+    while (g_pause_keys.size() > kMaxPauseKeys) {
+        auto oldest = g_pause_keys.begin();
+        for (auto it = g_pause_keys.begin(); it != g_pause_keys.end(); ++it) {
+            if (it->second.seen_ms < oldest->second.seen_ms) oldest = it;
+        }
+        g_pause_keys.erase(oldest);
+    }
+}
+
+std::string pause_key(const std::string& player, const std::string& request_key) {
+    if (request_key.empty()) return {};
+    return player.substr(0, 64) + "\n" + request_key.substr(0, 128);
+}
+
+bool pause_state_snapshot(bool& paused) {
+    std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
+    CoreSuspender suspend;
+    if (!df::global::pause_state) return false;
+    paused = *df::global::pause_state;
+    return true;
+}
+
+bool apply_pause_transaction(const std::string& player, bool is_host,
+                             const std::string& action, const std::string& request_key,
+                             const std::string& reason, bool enforce_remote_policy,
+                             PauseActionResult& result) {
+    result = {};
+    const bool explicit_pause = action == "pause";
+    const bool explicit_play =
+        action == "play" || action == "resume" || action == "unpause";
+    if (!explicit_pause && !explicit_play && action != "toggle-pause") {
+        result.error = "unsupported pause action";
+        return false;
+    }
+
+    // The capture lock serializes this state transition with every other suspended world operation.
+    // Resolve toggle and verify the final flag while the core is suspended: no HTTP-thread
+    // pause_state read can race the mutation.
+    std::lock_guard<std::recursive_mutex> capture_lock(capture_state_mutex());
+    CoreSuspender suspend;
+    if (save_barrier_active()) {
+        result.error = "save in progress";
+        return false;
+    }
+    if (!df::global::pause_state) {
+        result.error = "pause state unavailable";
+        return false;
+    }
+
+    const bool was_paused = *df::global::pause_state;
+    const bool target_running =
+        explicit_play || (action == "toggle-pause" && was_paused);
+    const bool target_paused = !target_running;
+    const long long now = now_ms();
+    const std::string key = pause_key(player, request_key);
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        prune_pause_keys_locked(now);
+
+        // Reconcile metadata if DF/native UI changed the pause flag outside this endpoint.
+        if (g_pause.changed_ms == 0 || g_pause.last_target_running != !was_paused) {
+            g_pause.last_target_running = !was_paused;
+            g_pause.actor.clear();
+            g_pause.reason = "native";
+            g_pause.changed_ms = now;
+            g_pause.last_apply_ms = 0;
+        }
+
+        if (!key.empty()) {
+            auto found = g_pause_keys.find(key);
+            if (found != g_pause_keys.end()) {
+                result.ok = true;
+                result.applied = false;
+                result.paused = was_paused;
+                result.duplicate = true;
+                result.superseded = found->second.superseded;
+                return true;
+            }
+        }
+
+        if (enforce_remote_policy && target_running &&
+                g_policy.host_unpause_only && !is_host) {
+            result.error = "only the host may unpause under the current session policy";
+            result.forbidden = true;
+            return false;
+        }
+
+        // An explicit host target wins over an opposing remote request arriving in the merge window.
+        if (!is_host && g_pause.reason == "host" &&
+                now - g_pause.last_apply_ms < kPauseMergeMs &&
+                g_pause.last_target_running != target_running) {
+            if (!key.empty())
+                g_pause_keys[key] = {now, true};
+            result.ok = true;
+            result.applied = false;
+            result.paused = was_paused;
+            result.superseded = true;
+            return true;
+        }
+    }
+
+    // We already own the core suspension. Calling native_popup_blocked() here would attempt a
+    // nested ConditionalCoreSuspender and could report an empty snapshot, so inspect the same
+    // authoritative queue directly.
+    if (target_running && df::global::world &&
+            !df::global::world->status.popups.empty()) {
+        result.error = "dismiss the active fortress announcement before unpausing";
+        result.forbidden = true;
+        return false;
+    }
+
+    // Explicit pause/play requests that already match current state are successful no-ops. They do
+    // not steal attribution from the actor who performed the real transition.
+    if (was_paused == target_paused) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!key.empty()) g_pause_keys[key] = {now, false};
+        result.ok = true;
+        result.applied = false;
+        result.paused = was_paused;
+        return true;
+    }
+
+    World::SetPauseState(target_paused);
+    if (!df::global::pause_state || *df::global::pause_state != target_paused) {
+        result.error = "pause state change was not applied";
+        return false;
+    }
+
+    {
+        // Commit metadata only after DF confirms the mutation.
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_pause.last_target_running = target_running;
+        g_pause.actor = player.substr(0, 64);
+        g_pause.reason = reason;
+        g_pause.changed_ms = now;
+        g_pause.last_apply_ms = now;
+        if (!key.empty()) g_pause_keys[key] = {now, false};
+    }
+    result.ok = true;
+    result.applied = true;
+    result.paused = target_paused;
+    return true;
+}
+
 std::string session_json(bool host) {
     const long long now = now_ms();
+    const bool saving = save_barrier_active();
+    bool paused = false;
+    // This route stays available during the save/world barrier so a newly loaded browser can
+    // show the blocking notice. Avoid DF pause globals while their object graph is unsafe.
+    const bool pause_available = !saving && pause_state_snapshot(paused);
     std::lock_guard<std::mutex> lock(g_mutex);
     prune_presence_locked(now);
+    if (pause_available && (g_pause.changed_ms == 0 ||
+            g_pause.last_target_running != !paused)) {
+        g_pause.last_target_running = !paused;
+        g_pause.actor.clear();
+        g_pause.reason = "native";
+        g_pause.changed_ms = now;
+        g_pause.last_apply_ms = 0;
+    }
     std::ostringstream out;
     out << "{\"ok\":true,\"host\":" << (host ? "true" : "false")
-        << ",\"authRequired\":" << (!g_password.empty() ? "true" : "false")
         << ",\"remoteSave\":" << (g_policy.remote_save ? "true" : "false")
         << ",\"remoteAudio\":" << (g_policy.remote_audio ? "true" : "false")
         << ",\"disconnectPause\":" << (g_policy.disconnect_pause ? "true" : "false")
         << ",\"hostUnpauseOnly\":" << (g_policy.host_unpause_only ? "true" : "false")
-        << ",\"disconnectGraceMs\":" << g_policy.disconnect_grace_ms
-        << ",\"players\":[";
+        << ",\"disconnectGraceMs\":" << g_policy.disconnect_grace_ms;
+    // Report who paused, why, when, whether saving is active, and whether this client may unpause.
+    {
+        out << ",\"paused\":" << (pause_available && paused ? "true" : "false")
+            << ",\"pauseAvailable\":" << (pause_available ? "true" : "false")
+            << ",\"pauseReason\":" << json_string(g_pause.reason)
+            << ",\"pauseActor\":" << json_string(g_pause.actor)
+            << ",\"pauseChangedAt\":" << g_pause.changed_ms
+            << ",\"saving\":" << (saving ? "true" : "false")
+            << ",\"busyReason\":" << json_string(saving ? "saving" : "")
+            << ",\"canUnpause\":" << ((!g_policy.host_unpause_only || host) ? "true" : "false");
+    }
+    out << ",\"players\":[";
     bool first = true;
     for (const auto& entry : g_presence) {
         if (!first) out << ",";
@@ -266,11 +415,12 @@ void watchdog_loop() {
             }
         }
         if (should_pause && !save_barrier_active()) {
-            std::string err;
-            if (action_on_core_thread("pause", &err))
+            PauseActionResult result;
+            if (apply_pause_transaction("", true, "pause", "", "disconnect", false, result)) {
                 diagnostics_log("session-policy: paused after the last browser player disconnected");
-            else
-                diagnostics_log("session-policy: disconnect pause skipped: " + err);
+            } else {
+                diagnostics_log("session-policy: disconnect pause skipped: " + result.error);
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
@@ -293,11 +443,12 @@ void session_policy_start() {
         g_had_players = false;
         g_empty_since_ms = 0;
         g_disconnect_pause_applied = false;
+        g_pause = {};
+        g_pause.reason = "native";
+        g_pause_keys.clear();
     }
     g_stop = false;
     g_watchdog = std::thread(watchdog_loop);
-    diagnostics_log(std::string("session-policy: join password ") +
-                    (password_enabled() ? "enabled" : "disabled"));
 }
 
 void session_policy_stop() {
@@ -305,29 +456,43 @@ void session_policy_stop() {
     if (g_watchdog.joinable()) g_watchdog.join();
 }
 
-bool session_request_is_public(const httplib::Request& req) {
-    if (req.method == "OPTIONS") return true;
-    if (req.path == "/" || req.path == "/view" || req.path == "/health" ||
-        req.path == "/version" || req.path == "/join")
-        return true;
-    return req.path.rfind("/css/", 0) == 0 || req.path.rfind("/js/", 0) == 0 ||
-           req.path.rfind("/asset/", 0) == 0 || req.path == "/favicon.ico";
-}
-
-bool session_request_authorized(const httplib::Request& req) {
-    if (!password_enabled()) return true;
-    const std::string credential =
-        url_decode(cookie_value(req.get_header_value("Cookie"), "dfcap_auth"));
-    return !credential.empty() && password_matches(credential);
-}
-
 bool session_request_is_host(const httplib::Request& req) {
     return guards::request_is_host_tab(req);
+}
+
+std::string session_request_player_id(const httplib::Request& req) {
+    const std::string cookie =
+        cookie_value(req.get_header_value("Cookie"), "dfcap_player");
+    if (valid_stable_player_id(cookie)) return cookie;
+    if (req.has_param("player")) {
+        const std::string fallback = req.get_param_value("player");
+        if (is_safe_player_id(fallback)) return fallback;
+    }
+    return "default";
 }
 
 bool session_remote_audio_enabled() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_policy.remote_audio;
+}
+
+std::string session_display_name(const std::string& player) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto found = g_presence.find(player);
+    return found == g_presence.end() || found->second.name.empty()
+        ? player : found->second.name;
+}
+
+std::vector<SessionPlayer> session_players_snapshot() {
+    const long long now = now_ms();
+    std::lock_guard<std::mutex> lock(g_mutex);
+    prune_presence_locked(now);
+    std::vector<SessionPlayer> players;
+    players.reserve(g_presence.size());
+    for (const auto& entry : g_presence)
+        players.push_back({entry.first, entry.second.name,
+                           std::max<long long>(0, now - entry.second.last_ms)});
+    return players;
 }
 
 void session_presence_heartbeat(const std::string& player, const std::string& name) {
@@ -338,48 +503,39 @@ void session_presence_heartbeat(const std::string& player, const std::string& na
     entry.last_ms = now_ms();
 }
 
-bool session_action_allowed(const httplib::Request& req,
-                            const std::string& action,
-                            std::string* err) {
-    bool host_unpause_only = false;
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        host_unpause_only = g_policy.host_unpause_only;
-    }
-    const bool is_unpause =
-        action == "play" || action == "resume" || action == "unpause" ||
-        action == "toggle-pause";
-    if (is_unpause && native_popup_blocked()) {
-        if (err) *err = "dismiss the active fortress announcement before unpausing";
-        return false;
-    }
-    if (host_unpause_only && is_unpause && !session_request_is_host(req)) {
-        if (err) *err = "only the host may unpause under the current session policy";
-        return false;
-    }
-    return true;
+bool session_apply_pause_request(const std::string& player, bool is_host,
+                                 const std::string& action, const std::string& request_key,
+                                 PauseActionResult& result) {
+    return apply_pause_transaction(player, is_host, action, request_key,
+                                   is_host ? "host" : "player", true, result);
 }
 
 void register_session_policy_routes(httplib::Server& server) {
     server.Get("/version", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Cache-Control", "no-store");
-        res.set_content(std::string("{\"ok\":true,\"service\":\"dfcapture\",") +
-            "\"authRequired\":" + (password_enabled() ? "true" : "false") + "}\n",
-            "application/json; charset=utf-8");
+        res.set_content(build_identity_json(),
+                        "application/json; charset=utf-8");
     });
 
-    auto join = [](const httplib::Request& req, httplib::Response& res) {
-        const std::string password =
-            req.has_param("password") ? req.get_param_value("password") : std::string();
-        const bool ok = !password_enabled() || password_matches(password);
-        res.status = ok ? 200 : 401;
+    auto identity = [](const httplib::Request& req, httplib::Response& res) {
+        std::string id =
+            cookie_value(req.get_header_value("Cookie"), "dfcap_player");
+        if (!valid_stable_player_id(id) && req.has_param("candidate")) {
+            const std::string candidate = req.get_param_value("candidate");
+            if (valid_stable_player_id(candidate)) id = candidate;
+        }
+        if (!valid_stable_player_id(id)) id = random_player_id();
+        const std::string name = req.has_param("name")
+            ? trim(req.get_param_value("name")).substr(0, 32) : std::string();
         res.set_header("Cache-Control", "no-store");
-        res.set_content(std::string("{\"ok\":") + (ok ? "true" : "false") +
-            ",\"authRequired\":" + (password_enabled() ? "true" : "false") + "}\n",
+        res.set_header("Set-Cookie", "dfcap_player=" + id +
+            "; Path=/; Max-Age=31536000; SameSite=Strict; HttpOnly");
+        res.set_content("{\"ok\":true,\"playerId\":" + json_string(id) +
+            ",\"displayName\":" + json_string(name.empty() ? id : name) + "}\n",
             "application/json; charset=utf-8");
     };
-    server.Get("/join", join);
-    server.Post("/join", join);
+    server.Get("/identity", identity);
+    server.Post("/identity", identity);
 
     server.Get("/session", [](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Cache-Control", "no-store");
@@ -401,11 +557,9 @@ void register_session_policy_routes(httplib::Server& server) {
         }
 
         Policy next;
-        std::string old_password;
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             next = g_policy;
-            old_password = g_password;
         }
         next.remote_save = bool_param(req, "remoteSave", next.remote_save);
         next.remote_audio = bool_param(req, "remoteAudio", next.remote_audio);
@@ -423,12 +577,8 @@ void register_session_policy_routes(httplib::Server& server) {
             }
         }
 
-        std::string next_password = old_password;
-        if (req.has_param("password")) next_password = trim(req.get_param_value("password"));
-        if (bool_param(req, "passwordOff", false)) next_password.clear();
-
         std::string err;
-        if (!persist_policy(next, &err) || !persist_password(next_password, &err)) {
+        if (!persist_policy(next, &err)) {
             res.status = 500;
             res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
                             "application/json; charset=utf-8");
@@ -437,7 +587,6 @@ void register_session_policy_routes(httplib::Server& server) {
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             g_policy = next;
-            g_password = next_password;
             if (!g_policy.disconnect_pause) {
                 g_empty_since_ms = 0;
                 g_disconnect_pause_applied = false;

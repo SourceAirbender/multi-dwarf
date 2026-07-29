@@ -25,43 +25,23 @@
 
 namespace dfcapture {
 
-// Browser-side detector for petitions and diplomacy, plus the
-// diplomacy-meeting mirror.
-//
-// Native shows two left-rail attention plaques (vanilla_interface graphics_interface.txt:
-// PETITIONS_LIGHT and DIPLOMACY_LIGHT, both TILE_GRAPHICS_RECTANGLE 3x3 on INTERFACE_BITS)
-// when a petition awaits a decision or a diplomat meeting is pending/underway. The browser
-// Both pending petitions and host diplomacy meetings are surfaced in the browser.
-//
-// DETECTION (df-structures citations in the .cpp banner):
-//   * petitionsPending  -- df.global.plotinfo.petitions.size() (the unapproved-agreement
-//     list; the exact vector /petition-accept and /petition-deny mutate in fort_admin.cpp).
-//   * meetingsQueued    -- df.global.plotinfo.dipscript_popups.size() ("cause
-//     viewscreen_meetingst to pop up" per df-structures: a diplomat has reached the noble
-//     and the meeting dialog is available/queued on the host).
-//   * open + meeting {} -- df.global.game.main_interface.diplomacy (diplomacy_interfacest):
-//     the live meeting dialog. Sim-blocking per DFHack World::ReadPauseState()
-//     (library/modules/World.cpp: `game->main_interface.diplomacy.open`).
+// Browser-side detector for pending petitions and diplomacy meetings.
 //
 // diplo_push_tick() samples all of it at <=1 Hz under a ConditionalCoreSuspender (the
 // vote/popup posture) and broadcasts on change only:
 //
 //   {"type":"diplo","seq":N,"petitionsPending":N,"meetingsQueued":N,"open":<bool>
-//    [,"by":"<player>"],"meeting":null|{...}}   -- full shape in diplo.cpp's banner.
+//    [,"by":"<player>"],"meeting":null|{...}}
 //
-// Sticky for late joiners: once seq > 0, players who have not seen the current state get it
-// on join/reconnect (vote.cpp g_synced pattern), so a reconnecting tab never keeps a stale
-// plaque or meeting screen.
+// The latest state is sent after reconnect so the attention plaques cannot remain stale.
 //
-// CHOICES: DFHack's tradeagreement.lua overlay writes export-agreement priorities through
-// dipev.sell_requests.priority[cat][i] while the native Requests screen is open. They are writable
-// via POST /diplo-request-priority. Meeting advance, land-holder selection, and Requests commit run
-// through the dipscript VM and are reported as native-only.
+// Export-agreement priorities are writable while the Requests screen is open. Meeting advance,
+// land-holder selection, and final request commit remain native-only.
 //
 // The camera is never touched. No ESC injection, cur_step mutation, or mm->flags
 // writes -- a corrupted dipscript state could break agreements for the whole world.
 
-// Routes: GET /diplo (current mirrored state; mutex-only cache read) and
+// Routes: GET /diplo (current cached state) and
 // POST /diplo-request-priority?player=&cat=&index=&value=0..4.
 void register_diplo_routes(httplib::Server& server);
 

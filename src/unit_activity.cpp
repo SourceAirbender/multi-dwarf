@@ -57,19 +57,9 @@ void append_historical_figure_unit(std::vector<int32_t>& units, int32_t hfid) {
     }
 }
 
-// Participant linkage in DFHack 53.15-r1's df.activity.xml:
-//
-// * lines 7-17 define activity_event_participants.units; lines 185-240, 670-702, 734-792 and
-//   847-911 embed that common list in training, prayer/social, research, reading/writing, play and
-//   performance events. getParticipantInfo (lines 130-132) is DF's vmethod for that exact list.
-// * Conversation deliberately does NOT use it: lines 345-348 define conversation_participantst's
-//   unit_id and lines 594-596 define the pointer vector.
-// * Other unit-bearing shapes are FillServiceOrder.unit_id (211-216),
-//   Encounter.unit_target[].unit (291-302, 319-328), Reunion.reunion_unit (335-342),
-//   Conflict.sides[].unit_ids (651-662), and CopyWrittenContent.unit_id (805-816).
-// * Guard and Harassment only store historical-figure IDs (271-279, 640-643); those are resolved
-//   through historical_figure.unit_id (df.history_figure.xml:1062). StoreObject (917-923) has no
-//   unit or historical-figure participant linkage and therefore cannot be indexed honestly.
+// Activity subclasses store participants in several shapes. Normalize direct unit references and
+// historical-figure references into a single unit-id list; events without participant linkage are
+// intentionally omitted.
 std::vector<int32_t> participant_units(df::activity_event* event) {
     std::vector<int32_t> units;
     if (!event)
@@ -162,7 +152,7 @@ std::vector<int32_t> participant_units(df::activity_event* event) {
         }
         break;
 
-    // StoreObject has no participant linkage in df.activity.xml:917-923. NONE is not a live
+    // StoreObject has no participant linkage. NONE is not a live
     // subclass. Leaving both unindexed is safer than attaching an unrelated unit.
     case df::activity_event_type::StoreObject:
     case df::activity_event_type::NONE:
@@ -198,7 +188,7 @@ WorldActivityIndex::WorldActivityIndex() {
         return;
 
     // `world.activities.all` is the authoritative world-side activity vector
-    // (df.activity.xml:944-958). Build one local winner map per activity so a later activity can
+    // Build one local winner map per activity so a later activity can
     // replace an older one, matching the unit-side convention of taking the last activity ID.
     for (auto activity : world->activities.all) {
         if (!activity)

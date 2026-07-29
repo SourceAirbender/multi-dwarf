@@ -279,6 +279,7 @@
             ${unit.nickname ? `<div class="unit-nickname-line">"${escapeHtml(unit.nickname)}"</div>` : ""}
             <div class="unit-meta-line">${escapeHtml(unit.profession || "")}${unit.race ? `, ${escapeHtml(unit.race)}` : ""}</div>
             <div class="unit-job-line">${escapeHtml(unit.currentJob || "")}</div>
+            <div class="unit-ownership-line">${window.dfOwnership?.unitChip(unit) || ""}</div>
             ${flagHtml}
           </div>
           <div class="unit-header-actions">
@@ -540,9 +541,14 @@
   }
 
   const moodCounts = Array.from(document.querySelectorAll("#moods .mood-n"));
+  function formatStockEstimate(value) {
+    const count = Math.max(0, Number(value) || 0);
+    return count > 0 ? `~${count}` : "None";
+  }
+
   function renderHud(hud) {
     showHostBusyBanner(!!hud.hostInteracting);
-    // Shade whichever of pause (Ã¢ÂÅ¡Ã¢ÂÅ¡) / play (Ã¢â€“Â¶) matches the current game state, so it's obvious.
+    // Shade whichever pause/play control matches the current game state.
     const isPaused = !!hud.paused;
     const pauseBtn = document.querySelector('#pauseRow [data-action="pause"]');
     const playBtn = document.querySelector('#pauseRow [data-action="play"]');
@@ -558,8 +564,9 @@
       el.textContent = n;
       el.parentElement.style.opacity = n ? "1" : "0.3";
     });
-    hudEls.food.textContent = `~${hud.stocks?.food ?? 0}`;
-    hudEls.drink.textContent = `~${hud.stocks?.drink ?? 0}`;
+    for (const key of ["food", "drink", "seeds", "meat", "fish", "plant", "other"]) {
+      if (hudEls[key]) hudEls[key].textContent = formatStockEstimate(hud.stocks?.[key]);
+    }
     hudEls.dateDay.textContent = ordinal(hud.date?.day || 1);
     hudEls.dateMonth.textContent = hud.date?.monthName || "Granite";
     hudEls.dateSeason.textContent = hud.date?.season || "Early Spring";
@@ -641,6 +648,7 @@
     "Research Breakthrough", "Guest Arrival", "Holdings", "Rumor",
     "Agreement", "Crime", "Deity Curse", "Combat", "Sparring", "Hunting"
   ];
+  const QUICK_ALERT_LINE_LIMIT = 5;
   const DF_COLORS = [
     ["#000000", "#555555"],
     ["#0000aa", "#5555ff"],
@@ -695,12 +703,52 @@
   }
   function renderAlertStack() {
     const alerts = Array.isArray(notificationState?.alerts) ? notificationState.alerts : [];
-    alertStack.innerHTML = alerts.map(alert => `
+    const petitionsPending = Math.max(0, Number(notificationState?.petitionsPending) || 0);
+    const diplomacyMeetingsQueued =
+      Math.max(0, Number(notificationState?.diplomacyMeetingsQueued) || 0);
+    const diplomacyOpen = notificationState?.diplomacyOpen === true;
+    const diplomacyActive = diplomacyOpen || diplomacyMeetingsQueued > 0;
+    const alertButtonActive = notificationState?.alertButtonActive === true;
+    const alertButtonDismissKeys = Array.isArray(notificationState?.alertButtonDismissKeys)
+      ? notificationState.alertButtonDismissKeys.filter(Boolean)
+      : [];
+    const attentionPlaques = `
+      ${alertButtonActive ? `<button class="attention-plaque alert-attention-plaque" type="button"
+        data-open-alerts title="Open alerts. Right-click to dismiss the native ALERT reports.">ALERT</button>` : ""}
+      ${diplomacyActive ? `<button class="attention-plaque diplomacy-attention-plaque" type="button"
+        data-open-diplomacy title="${diplomacyOpen
+          ? "A diplomacy meeting is underway. Open the live dialogue."
+          : `${diplomacyMeetingsQueued} diplomacy ${diplomacyMeetingsQueued === 1 ? "meeting is" : "meetings are"} ready.`}">DIPLOMACY</button>` : ""}
+      ${petitionsPending ? `<button class="attention-plaque petition-attention-plaque" type="button"
+        data-open-petitions title="${petitionsPending} pending ${petitionsPending === 1 ? "petition" : "petitions"}">PETITIONS</button>` : ""}`;
+    alertStack.innerHTML = attentionPlaques + alerts.map(alert => `
       <button class="alert-button${pinnedAlertKey === alert.dismissKey ? " pinned" : ""}"
         data-alert-key="${escapeHtml(alert.dismissKey || "")}"
         title="${escapeHtml(alertName(alert))}"
         style="${alertIconStyle(alert.iconIndex)}"></button>`).join("");
-    alertStack.style.display = alerts.length ? "flex" : "none";
+    alertStack.style.display =
+      alerts.length || petitionsPending || diplomacyActive || alertButtonActive ? "flex" : "none";
+    const alertsPlaque = alertStack.querySelector("[data-open-alerts]");
+    alertsPlaque?.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openNotificationsPanel();
+      });
+    alertsPlaque?.addEventListener("contextmenu", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        dismissNotificationKeys(alertButtonDismissKeys);
+      });
+    alertStack.querySelector("[data-open-diplomacy]")?.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openDiploPanel();
+    });
+    alertStack.querySelector("[data-open-petitions]")?.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openFortAdminPanel("petitions");
+    });
     alertStack.querySelectorAll(".alert-button").forEach(button => {
       const alert = alerts.find(a => a.dismissKey === button.dataset.alertKey);
       if (!alert) return;
@@ -722,19 +770,34 @@
         dismissAlert(alert);
       });
     });
-    if (pinnedAlertKey && !alerts.some(a => a.dismissKey === pinnedAlertKey)) {
+    const visibleAlertKey = alertPopup.dataset.alertKey || "";
+    if ((pinnedAlertKey && !alerts.some(a => a.dismissKey === pinnedAlertKey)) ||
+        (visibleAlertKey && !alerts.some(a => a.dismissKey === visibleAlertKey))) {
       pinnedAlertKey = null;
       hideAlertPopup();
     }
   }
   function showAlertPopup(alert, anchor, pinned) {
     const lines = alertDisplayLines(alert);
-    const rows = lines.length
-      ? lines.map(line => `<div class="alert-line${line.unit ? " alert-unit-line" : ""}" style="${line.color ? `color:${line.color}` : ""}">${escapeHtml(line.text)}</div>`).join("")
+    const visibleLines = lines.slice(-QUICK_ALERT_LINE_LIMIT);
+    const hiddenCount = Math.max(0, lines.length - visibleLines.length);
+    const rows = visibleLines.length
+      ? visibleLines.map(line => `<div class="alert-line${line.unit ? " alert-unit-line" : ""}" style="${line.color ? `color:${line.color}` : ""}">${escapeHtml(line.text)}</div>`).join("")
       : `<div class="alert-line alert-unit-line">${escapeHtml(alertName(alert))}</div>`;
     alertPopup.innerHTML = `
       <div class="alert-help">Left click to recenter. &nbsp;Right click to dismiss.</div>
-      ${rows}`;
+      ${rows}
+      ${hiddenCount ? `<button class="alert-more" type="button" data-alert-more>
+        View ${hiddenCount} earlier ${hiddenCount === 1 ? "report" : "reports"} in Announcements
+      </button>` : ""}`;
+    alertPopup.dataset.alertKey = alert?.dismissKey || "";
+    alertPopup.querySelector("[data-alert-more]")?.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      pinnedAlertKey = null;
+      hideAlertPopup();
+      openNotificationsPanel(Number(alert?.type));
+    });
     const rect = anchor.getBoundingClientRect();
     const left = Math.min(rect.right + 4, Math.max(8, window.innerWidth - alertPopup.offsetWidth - 8));
     alertPopup.style.left = `${left}px`;
@@ -750,6 +813,7 @@
   function hideAlertPopup() {
     alertPopup.style.display = "none";
     alertPopup.oncontextmenu = null;
+    delete alertPopup.dataset.alertKey;
   }
   function alertTarget(alert) {
     if (alert?.target && Number.isFinite(Number(alert.target.x)) &&
@@ -792,19 +856,23 @@
     const target = alertTarget(alert);
     setCameraToMapPos(target);
   }
-  async function dismissAlert(alert) {
-    const keys = Array.isArray(alert?.dismissKeys) ? alert.dismissKeys.filter(Boolean) : [];
-    if (!keys.length && alert?.dismissKey) keys.push(alert.dismissKey);
+  async function dismissNotificationKeys(rawKeys) {
+    const keys = [...new Set((Array.isArray(rawKeys) ? rawKeys : []).filter(Boolean))];
     if (!keys.length) return;
+    // Tear the popup down before the request removes its anchor from the DOM. A hover popup
+    // otherwise never receives mouseleave and can remain floating until a browser refresh.
+    pinnedAlertKey = null;
+    hideAlertPopup();
     try {
       await fetch(`/notification-action?player=${encodeURIComponent(player)}&action=dismiss&keys=${encodeURIComponent(keys.join(","))}`,
         { method: "POST", cache: "no-store" });
     } catch (_) {}
-    if (pinnedAlertKey === alert.dismissKey) {
-      pinnedAlertKey = null;
-      hideAlertPopup();
-    }
     await loadNotifications();
+  }
+  async function dismissAlert(alert) {
+    const keys = Array.isArray(alert?.dismissKeys) ? alert.dismissKeys.filter(Boolean) : [];
+    if (!keys.length && alert?.dismissKey) keys.push(alert.dismissKey);
+    await dismissNotificationKeys(keys);
   }
   function notificationPanelSignature(filterType) {
     const alerts = Array.isArray(notificationState?.alerts) ? notificationState.alerts : [];
@@ -834,6 +902,9 @@
     const alerts = Array.isArray(notificationState?.alerts) ? notificationState.alerts : [];
     const shownAlerts = filterType === null ? alerts : alerts.filter(a => Number(a.type) === Number(filterType));
     const recent = Array.isArray(notificationState?.recent) ? notificationState.recent : [];
+    const shownRecent = filterType === null
+      ? recent
+      : recent.filter(report => Number(report?.alertType) === Number(filterType));
     const alertRows = shownAlerts.length ? shownAlerts.map(alert => {
       const lines = alertDisplayLines(alert);
       const sub = lines.length ? lines.map(l => l.text).join("  ") : alertName(alert);
@@ -850,7 +921,7 @@
         </div>
       </div>`;
     }).join("") : `<div class="info-message">No active alerts.</div>`;
-    const recentRows = recent.length ? recent.slice(0, 120).map(report => `
+    const recentRows = shownRecent.length ? shownRecent.slice(0, 120).map(report => `
       <div class="alerts-row">
         <div class="alerts-icon" style="${alertIconStyle(alertTypeFromReport(report))}"></div>
         <div>

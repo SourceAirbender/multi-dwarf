@@ -5,10 +5,139 @@
 (function () {
   "use strict";
 
-  const pointers = new Map();
-  let single = null;
-  let multi = null;
-  const tapSlop = 10;
+  const idleState = () => ({ mode: "idle", points: {}, primary: null });
+  const pointValues = state => Object.values(state.points);
+  const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const midpoint = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+  function reduceGesture(state, event, config = {}) {
+    const next = {
+      ...state,
+      points: Object.fromEntries(Object.entries(state.points || {}).map(([id, point]) =>
+        [id, { ...point }]))
+    };
+    const effects = [];
+    const id = String(event.id);
+    const tapSlop = Number(config.tapSlop) || 10;
+    const cellX = Math.max(1, Number(config.cellX) || 24);
+    const cellY = Math.max(1, Number(config.cellY) || 24);
+
+    if (event.type === "down") {
+      if (event.placement) return {
+        state: { mode: "placement-pass-through", points: {}, primary: id }, effects
+      };
+      next.points[id] = { x: event.x, y: event.y, downX: event.x, downY: event.y,
+        anchorX: event.x, anchorY: event.y };
+      const points = pointValues(next);
+      if (points.length === 1) {
+        next.mode = "tap-candidate";
+        next.primary = id;
+      } else if (points.length === 2) {
+        const [a, b] = points;
+        next.mode = "pinch-preview";
+        next.primary = null;
+        next.startDistance = Math.max(1, distance(a, b));
+        next.lastDistance = next.startDistance;
+        next.startMid = midpoint(a, b);
+        next.lastMid = next.startMid;
+        next.intent = "undecided";
+        next.zRemainder = 0;
+      }
+      return { state: next, effects };
+    }
+
+    if (state.mode === "placement-pass-through") {
+      if (event.type === "up" || event.type === "cancel") return { state: idleState(), effects };
+      return { state, effects };
+    }
+
+    if (event.type === "cancel") {
+      effects.push({ type: "cancel" });
+      return { state: { ...idleState(), mode: "cancel-recovery" }, effects };
+    }
+
+    if (event.type === "move" && next.points[id]) {
+      const point = next.points[id];
+      point.x = event.x;
+      point.y = event.y;
+      const points = pointValues(next);
+
+      if ((next.mode === "pinch-preview" || next.mode === "elevation-swipe") && points.length >= 2) {
+        const [a, b] = points;
+        const dist = Math.max(1, distance(a, b));
+        const mid = midpoint(a, b);
+        const pinchDelta = Math.abs(dist - next.startDistance);
+        const verticalDelta = Math.abs(mid.y - next.startMid.y);
+        if (next.intent === "undecided") {
+          if (pinchDelta > 20 && pinchDelta > verticalDelta * 1.2) next.intent = "pinch";
+          else if (verticalDelta > 28 && verticalDelta > pinchDelta * 1.15) {
+            next.intent = "elevation";
+            next.mode = "elevation-swipe";
+          }
+        }
+        if (next.intent === "pinch") {
+          effects.push({ type: "pinch-preview", scale: dist / next.startDistance });
+          next.lastDistance = dist;
+        } else if (next.intent === "elevation") {
+          next.zRemainder += next.lastMid.y - mid.y;
+          const steps = Math.trunc(next.zRemainder / 52);
+          if (steps) {
+            effects.push({ type: "elevation", steps });
+            next.zRemainder -= steps * 52;
+          }
+        }
+        next.lastMid = mid;
+        return { state: next, effects };
+      }
+
+      if ((next.mode === "tap-candidate" || next.mode === "pan" ||
+           next.mode === "cancel-recovery") && next.primary === id) {
+        const total = Math.hypot(point.x - point.downX, point.y - point.downY);
+        if (next.mode !== "pan" && total > tapSlop) next.mode = "pan";
+        if (next.mode === "cancel-recovery") next.mode = "pan";
+        if (next.mode === "pan") {
+          const dx = Math.trunc((point.anchorX - point.x) / cellX);
+          const dy = Math.trunc((point.anchorY - point.y) / cellY);
+          if (dx || dy) {
+            effects.push({ type: "pan", dx, dy });
+            point.anchorX -= dx * cellX;
+            point.anchorY -= dy * cellY;
+          }
+        }
+      }
+      return { state: next, effects };
+    }
+
+    if (event.type === "up" && next.points[id]) {
+      const priorMode = next.mode;
+      const released = next.points[id];
+      delete next.points[id];
+      const remaining = Object.entries(next.points);
+      if (priorMode === "pinch-preview" && next.intent === "pinch") {
+        const scale = Math.max(.35, Math.min(3, next.lastDistance / next.startDistance));
+        const steps = Math.max(-3, Math.min(3, Math.round(Math.log(scale) / Math.log(1.18))));
+        if (steps) effects.push({ type: "zoom", steps });
+        effects.push({ type: "pinch-end" });
+      } else if (priorMode === "elevation-swipe") {
+        effects.push({ type: "pinch-end" });
+      } else if (priorMode === "tap-candidate") {
+        const moved = Math.hypot(released.x - released.downX, released.y - released.downY);
+        if (moved <= tapSlop) effects.push({ type: "tap", x: event.x, y: event.y });
+      }
+      if (remaining.length) {
+        const [remainingId, point] = remaining[0];
+        point.downX = point.anchorX = point.x;
+        point.downY = point.anchorY = point.y;
+        next.mode = "cancel-recovery";
+        next.primary = remainingId;
+        delete next.intent;
+        return { state: next, effects };
+      }
+      return { state: idleState(), effects };
+    }
+
+    return { state: next, effects };
+  }
 
   function cellSize() {
     const grid = typeof captureTileGrid === "function" ? captureTileGrid() : null;
@@ -20,19 +149,6 @@
     return { x: 24, y: 24 };
   }
 
-  function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
-  function midpointY(a, b) { return (a.y + b.y) / 2; }
-
-  function beginMulti() {
-    const ids = Array.from(pointers.keys()).slice(0, 2);
-    const a = pointers.get(ids[0]), b = pointers.get(ids[1]);
-    multi = {
-      ids, startDistance: distance(a, b), lastDistance: distance(a, b),
-      lastMidY: midpointY(a, b), mode: null, zRemainder: 0
-    };
-    single = null;
-  }
-
   function placementArmed() {
     try {
       if (window.DFPlacementArmed) return !!window.DFPlacementArmed();
@@ -40,97 +156,104 @@
     } catch (_) { return false; }
   }
 
+  function gestureHint() {
+    let hint = document.getElementById("touchGestureHint");
+    if (!hint) {
+      hint = document.createElement("div");
+      hint.id = "touchGestureHint";
+      hint.setAttribute("aria-live", "polite");
+      document.body.appendChild(hint);
+    }
+    return hint;
+  }
+
+  function showPinch(scale) {
+    const hint = gestureHint();
+    hint.textContent = `Zoom ${scale.toFixed(2)}x`;
+    hint.classList.add("visible");
+  }
+
+  function hidePinch() {
+    document.getElementById("touchGestureHint")?.classList.remove("visible");
+  }
+
   function bindTouch() {
     const map = document.getElementById("view");
     if (!map) return;
     map.style.touchAction = "none";
+    let gesture = idleState();
+
+    const dispatch = (type, event) => {
+      const size = cellSize();
+      const result = reduceGesture(gesture, {
+        type, id: event.pointerId, x: event.clientX, y: event.clientY,
+        placement: type === "down" && placementArmed(),
+      }, { cellX: size.x, cellY: size.y });
+      gesture = result.state;
+      result.effects.forEach(effect => {
+        if (effect.type === "pan") queueMove(effect.dx, effect.dy, 0);
+        else if (effect.type === "elevation") queueMove(0, 0, effect.steps);
+        else if (effect.type === "pinch-preview") showPinch(effect.scale);
+        else if (effect.type === "pinch-end" || effect.type === "cancel") hidePinch();
+        else if (effect.type === "zoom") {
+          const action = effect.steps > 0 ? "in" : "out";
+          for (let i = 0; i < Math.abs(effect.steps); ++i) sendZoom(action);
+        }
+        // Tap is intentionally not synthesized: the map's ordinary pointerup path receives the same
+        // real PointerEvent and performs its normal shared hit-test/inspect behavior.
+      });
+      return result;
+    };
 
     map.addEventListener("pointerdown", event => {
       if (event.pointerType !== "touch") return;
-      if (pointers.size === 0 && placementArmed()) return;
-      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-      if (pointers.size === 1) {
-        single = {
-          id: event.pointerId, downX: event.clientX, downY: event.clientY,
-          anchorX: event.clientX, anchorY: event.clientY, moved: false
-        };
-      } else if (pointers.size === 2) {
-        beginMulti();
+      const result = dispatch("down", event);
+      if (result.state.mode === "placement-pass-through") return;
+      if (result.state.mode === "pinch-preview") {
+        window.dfcCancelMapPointerGesture?.();
+        event.stopPropagation();
       }
       try { map.setPointerCapture(event.pointerId); } catch (_) {}
-    });
-
+    }, { capture: true });
     map.addEventListener("pointermove", event => {
-      if (event.pointerType !== "touch" || !pointers.has(event.pointerId)) return;
-      const point = pointers.get(event.pointerId);
-      point.x = event.clientX; point.y = event.clientY;
-      if (multi) {
-        const a = pointers.get(multi.ids[0]), b = pointers.get(multi.ids[1]);
-        if (!a || !b) return;
-        const dist = distance(a, b);
-        const midY = midpointY(a, b);
-        const pinchDelta = Math.abs(dist - multi.startDistance);
-        const verticalDelta = Math.abs(midY - multi.lastMidY);
-        if (!multi.mode && Math.max(pinchDelta, verticalDelta) > 24)
-          multi.mode = pinchDelta >= verticalDelta * 1.25 ? "pinch" : "elevation";
-        if (multi.mode === "pinch" && Math.abs(dist - multi.lastDistance) > 18) {
-          sendZoom(dist > multi.lastDistance ? "in" : "out");
-          multi.lastDistance = dist;
-        } else if (multi.mode === "elevation") {
-          multi.zRemainder += multi.lastMidY - midY;
-          const steps = Math.trunc(multi.zRemainder / 52);
-          if (steps) {
-            queueMove(0, 0, steps);
-            multi.zRemainder -= steps * 52;
-          }
-          multi.lastMidY = midY;
-        }
+      if (event.pointerType !== "touch" || !gesture.points?.[String(event.pointerId)]) return;
+      const result = dispatch("move", event);
+      if (["pan", "pinch-preview", "elevation-swipe"].includes(result.state.mode))
         event.preventDefault();
-        return;
-      }
-      if (!single || single.id !== event.pointerId) return;
-      const size = cellSize();
-      const dx = Math.round((single.anchorX - event.clientX) / size.x);
-      const dy = Math.round((single.anchorY - event.clientY) / size.y);
-      if (Math.hypot(event.clientX - single.downX, event.clientY - single.downY) > tapSlop)
-        single.moved = true;
-      if (dx || dy) {
-        queueMove(dx, dy, 0);
-        single.anchorX -= dx * size.x;
-        single.anchorY -= dy * size.y;
-      }
-      if (single.moved) event.preventDefault();
     }, { passive: false });
-
-    const finish = event => {
-      if (event.pointerType !== "touch" || !pointers.has(event.pointerId)) return;
-      pointers.delete(event.pointerId);
-      if (multi?.ids.includes(event.pointerId)) {
-        multi = null;
-        const rest = Array.from(pointers.entries())[0];
-        single = rest ? {
-          id: rest[0], downX: rest[1].x, downY: rest[1].y,
-          anchorX: rest[1].x, anchorY: rest[1].y, moved: true
-        } : null;
-      } else if (single?.id === event.pointerId) {
-        single = null;
-      }
+    map.addEventListener("pointerup", event => {
+      if (event.pointerType !== "touch") return;
+      dispatch("up", event);
       try { map.releasePointerCapture(event.pointerId); } catch (_) {}
-    };
-    map.addEventListener("pointerup", finish);
-    map.addEventListener("pointercancel", finish);
+    });
+    map.addEventListener("pointercancel", event => {
+      if (event.pointerType !== "touch") return;
+      dispatch("cancel", event);
+      try { map.releasePointerCapture(event.pointerId); } catch (_) {}
+    });
+    map.addEventListener("lostpointercapture", event => {
+      if (event.pointerType === "touch" && gesture.points?.[String(event.pointerId)])
+        dispatch("cancel", event);
+    });
 
     if (window.visualViewport) {
       const syncKeyboardInset = () => {
         const inset = Math.max(0, Math.round(
           innerHeight - visualViewport.height - visualViewport.offsetTop));
         document.documentElement.style.setProperty("--df-keyboard-inset", `${inset}px`);
+        window.recoverDfcapturePanels?.();
       };
       visualViewport.addEventListener("resize", syncKeyboardInset);
       visualViewport.addEventListener("scroll", syncKeyboardInset);
       syncKeyboardInset();
     }
+    addEventListener("orientationchange", () => {
+      gesture = idleState();
+      hidePinch();
+      setTimeout(() => window.recoverDfcapturePanels?.(), 50);
+    });
   }
 
+  window.dfTouchGesture = Object.freeze({ reduceGesture, idleState });
   addEventListener("DOMContentLoaded", bindTouch);
 })();

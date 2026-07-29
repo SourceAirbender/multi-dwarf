@@ -36,8 +36,7 @@ bool server_running();
 std::string server_url();
 std::string server_url(const std::string& bind_address, int port);
 
-// Action notification hook. Timed frame capture requires no explicit wakeup, so this implementation
-// is intentionally a no-op.
+// Wake pending delta long-polls after input or a world mutation.
 void notify_player_input();
 
 } // namespace dfcapture

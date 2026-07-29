@@ -29,8 +29,12 @@ int g_clear_frames = 0; // core thread only
 bool df_still_saving() {
     if (df::global::plotinfo && df::global::plotinfo->main.autosave_request)
         return true;
-    if (df::global::game && df::global::game->main_interface.options.do_manual_save)
-        return true;
+    // do_manual_save is a request/latch, not a completion signal. DF 53.15 can leave it set
+    // after the save viewscreen has closed and the fortress is interactive again. Using it here
+    // can strand every browser route
+    // behind the barrier. plugin_save_site_data() already engages us before serialization; the
+    // active save/export viewscreen and autosave request are the authoritative "still saving"
+    // signals after that point.
     auto screen = DFHack::Gui::getCurViewscreen(true);
     return strict_virtual_cast<df::viewscreen_savegamest>(screen) ||
            strict_virtual_cast<df::viewscreen_export_regionst>(screen);

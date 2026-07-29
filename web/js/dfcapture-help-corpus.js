@@ -4,10 +4,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// GENERATED FILE -- do not edit by hand. Regenerate with:
-//   node tools/harness/help_corpus_extractor.mjs
-// It is the baked tooltip corpus for the ? help reference. The drift guard
-// (tools/harness/help_reference_test.mjs) fails if this file falls out of sync with source.
+// Generated tooltip corpus for the help reference. Do not edit by hand.
 (function (root) {
   "use strict";
   var DFHelpCorpus = {
@@ -614,38 +611,6 @@
               "Zones are placed much like Stockpiles. Unlike Stockpiles, multiple Zones can overlap.",
               "Certain Zones like Bedrooms can be placed several at a time. Just make sure you have the correct Furniture placed in the rooms with Doors or vertical entries separating each room before you begin."
             ]
-          }
-        ]
-      },
-      {
-        "id": "world3d",
-        "label": "3D world viewer",
-        "kind": "tooltips",
-        "entries": [
-          {
-            "control": "",
-            "text": "3D world viewer",
-            "hotkey": ""
-          },
-          {
-            "control": "",
-            "text": "Close (Esc)",
-            "hotkey": ""
-          },
-          {
-            "control": "",
-            "text": "Re-frame the whole slab (F)",
-            "hotkey": ""
-          },
-          {
-            "control": "",
-            "text": "Rebuild (R)",
-            "hotkey": ""
-          },
-          {
-            "control": "",
-            "text": "Rebuild from the current world state (R)",
-            "hotkey": ""
           }
         ]
       },
@@ -2504,11 +2469,6 @@
           {
             "control": "voteBtn",
             "text": "Fortress vote",
-            "hotkey": ""
-          },
-          {
-            "control": "world3dBtn",
-            "text": "3D world viewer (Shift+V)",
             "hotkey": ""
           },
           {

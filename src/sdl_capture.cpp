@@ -1154,6 +1154,9 @@ struct RenderThreadCaptureRequest {
     Camera camera;
     CapturedFrame frame;
     std::string err;
+    std::chrono::steady_clock::time_point queued_at;
+    double render_wait_ms = 0.0;
+    double capture_ms = 0.0;
     std::promise<bool> done;
 };
 
@@ -1302,15 +1305,24 @@ void draw_placement_overlay(const Camera& camera, CapturedFrame& frame) {
 
 bool capture_camera_frame_on_render_thread(const Camera& requested,
                                            CapturedFrame& frame,
-                                           std::string* err) {
+                                           std::string* err,
+                                           FramePipelineTiming* timing = nullptr) {
     std::lock_guard<std::recursive_mutex> lock(g_capture_mutex);
 
     auto request = std::make_shared<RenderThreadCaptureRequest>();
     request->camera = requested;
+    request->queued_at = std::chrono::steady_clock::now();
     auto future = request->done.get_future();
 
     DFHack::runOnRenderThread([request]() {
-        request->done.set_value(capture_camera_frame(request->camera, request->frame, &request->err));
+        const auto started = std::chrono::steady_clock::now();
+        request->render_wait_ms =
+            std::chrono::duration<double, std::milli>(started - request->queued_at).count();
+        const bool ok = capture_camera_frame(request->camera, request->frame, &request->err);
+        request->capture_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+        request->done.set_value(ok);
     });
 
     bool ok = false;
@@ -1324,6 +1336,10 @@ bool capture_camera_frame_on_render_thread(const Camera& requested,
         return false;
     }
     frame = std::move(request->frame);
+    if (timing) {
+        timing->render_wait_ms = request->render_wait_ms;
+        timing->capture_ms = request->capture_ms;
+    }
     return true;
 }
 
@@ -1758,6 +1774,16 @@ bool composite_seedown_into(const Camera& camera, CapturedFrame& top, bool inclu
     return captured_aux_level;
 }
 
+void force_opaque_alpha(CapturedFrame& frame) {
+    // The offscreen SDL target retains transparency in fog/see-down pixels even after their RGB
+    // channels have been reconstructed from lower z-levels. JPEG keyframes implicitly flatten
+    // that alpha, but lossless PNG delta patches preserve it; drawing those patches over a cleared
+    // motion-compensated region therefore produced opaque black holes. A captured browser frame is
+    // a final display surface, not a compositing layer, so make that invariant explicit.
+    for (size_t i = 3; i < frame.bgra.size(); i += 4)
+        frame.bgra[i] = 255;
+}
+
 bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::string* err) {
     if (save_barrier_active()) {
         if (err) *err = "Dwarf Fortress is saving or unloading";
@@ -1774,6 +1800,8 @@ bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::strin
     bool ok = capture_shifted(camera, frame, true, &local_err);
     if (ok && composite_seedown_into(camera, frame, true))
         restore_host_buffers_after_aux_capture("see-down");
+    if (ok)
+        force_opaque_alpha(frame);
 
     if (!ok && err)
         *err = local_err;
@@ -1787,13 +1815,43 @@ bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::strin
 }
 
 bool capture_camera_jpeg(const Camera& camera, std::vector<uint8_t>& jpeg,
-                         CaptureGeometry* geometry, std::string* err) {
+                          CaptureGeometry* geometry, std::string* err,
+                          FramePipelineTiming* timing) {
+    const auto total_started = std::chrono::steady_clock::now();
+    FramePipelineTiming local_timing;
     CapturedFrame frame;
-    if (!capture_camera_frame_on_render_thread(camera, frame, err))
+    if (!capture_camera_frame_on_render_thread(camera, frame, err, &local_timing))
         return false;
     if (geometry)
         *geometry = frame.geometry;
-    return encode_jpeg(frame, jpeg, DEFAULT_JPEG_QUALITY, err);
+    local_timing.width = frame.width;
+    local_timing.height = frame.height;
+    const auto encode_started = std::chrono::steady_clock::now();
+    const bool ok = encode_jpeg(frame, jpeg, DEFAULT_JPEG_QUALITY, err);
+    local_timing.encode_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - encode_started).count();
+    local_timing.total_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - total_started).count();
+    if (timing)
+        *timing = local_timing;
+    return ok;
+}
+
+bool capture_camera_frame_timed(const Camera& camera, CapturedFrame& frame,
+                                std::string* err, FramePipelineTiming* timing) {
+    const auto total_started = std::chrono::steady_clock::now();
+    FramePipelineTiming local_timing;
+    if (!capture_camera_frame_on_render_thread(camera, frame, err, &local_timing))
+        return false;
+    local_timing.width = frame.width;
+    local_timing.height = frame.height;
+    local_timing.total_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - total_started).count();
+    if (timing) *timing = local_timing;
+    return true;
 }
 
 } // namespace dfcapture

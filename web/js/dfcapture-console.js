@@ -30,7 +30,7 @@
   let conHistory = [];       // command history for arrow keys
   let conHistIdx = -1;
 
-  // Client-side mirror of command_denied (head token, exact/prefix, case-insensitive) so the
+  // Apply the command policy client-side (head token, exact/prefix, case-insensitive) so the
   // palette can grey out blocked commands with the server's own reason. Server stays authoritative.
   function conDeniedReason(cmd) {
     const head = (cmd.trim().split(/\s+/)[0] || "").toLowerCase();

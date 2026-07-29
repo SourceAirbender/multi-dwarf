@@ -188,7 +188,7 @@ void register_write_guard_routes(httplib::Server& server) {
     // ---- GET /write-guards ----------------------------------------------------------------------
     // Read-only flag state for guard-aware clients:
     // locked control must never look live, and must light up on its own when the host flips a
-    // flag. Auth-gated upstream like every non-public route; never settable here.
+    // flag. It is never settable through this route.
     server.Get("/write-guards", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Cache-Control", "no-store");
         std::ostringstream body;

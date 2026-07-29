@@ -33,6 +33,11 @@
   let buildMatPicks = {};          // reqIndex -> "matType:matIndex" | "closest"
   let buildMaterialsToken = "";    // token buildMaterials was loaded for (guards stale responses)
   let lastBuildPicksByToken = {};  // token -> last per-requirement picks (DF-style "use last material")
+  // A specific item per requirement overrides the material pick.
+  let buildItemPicks = {};         // reqIndex -> item id
+  let buildCandidates = null;      // /place-candidates response { requirements:[{index,items:[...]}] }
+  let buildCandidatesToken = "";   // token buildCandidates was loaded for
+  let buildItemMenuReq = null;     // reqIndex whose candidate list is currently expanded, or null
 
   function defaultBuildOptions() {
     return {
@@ -114,12 +119,60 @@
     }
   }
 
+  // Lazy-load the specific-item candidates for a building (only when the player opens an item picker).
+  async function loadBuildCandidates(token) {
+    if (!token) return;
+    try {
+      const r = await fetch(`/place-candidates?token=${encodeURIComponent(token)}&t=${Date.now()}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      if (selectedBuild && selectedBuild.token === token) {
+        buildCandidates = data && data.ok ? data : { requirements: [] };
+        buildCandidatesToken = token;
+        if (buildCandidates.exactSelectionSupported !== true)
+          buildItemPicks = {};
+        if (clientPanel.classList.contains("build-panel")) renderBuildPanel();
+      }
+    } catch (_) {
+      if (selectedBuild && selectedBuild.token === token) {
+        buildCandidates = { requirements: [] };
+        buildCandidatesToken = token;
+        if (clientPanel.classList.contains("build-panel")) renderBuildPanel();
+      }
+    }
+  }
+
+  // Candidate items for a requirement: an array when loaded, or null while still loading.
+  function candidatesFor(idx) {
+    if (!buildCandidates || !Array.isArray(buildCandidates.requirements)) return null;
+    const req = buildCandidates.requirements.find(r => Number(r.index) === Number(idx));
+    return req && Array.isArray(req.items) ? req.items : [];
+  }
+  function candidateReq(idx) {
+    if (!buildCandidates || !Array.isArray(buildCandidates.requirements)) return null;
+    return buildCandidates.requirements.find(r => Number(r.index) === Number(idx)) || null;
+  }
+  function candidateName(idx, id) {
+    const items = candidatesFor(idx) || [];
+    const it = items.find(i => Number(i.id) === Number(id));
+    return it ? it.name : ("item " + id);
+  }
+  function candidateBadge(it) {
+    if (it.artifact) return " ★ artifact";
+    const q = Math.max(0, Math.min(6, Number(it.quality) || 0));
+    return q > 0 ? " " + "★".repeat(q) : "";
+  }
+
   function selectBuildItem(item, preserveOptions = false) {
     selectedBuild = item || null;
     buildOptions = preserveOptions && buildOptions ? buildOptions : defaultBuildOptions();
     buildMatPicks = {};
+    buildItemPicks = {};
     buildMaterials = null;
     buildMaterialsToken = "";
+    buildCandidates = null;
+    buildCandidatesToken = "";
+    buildItemMenuReq = null;
     if (item) loadBuildMaterials(item);
     const dirs = Array.isArray(item?.directions) ? item.directions : [];
     buildDirection = dirs.length ? Number(dirs[0].value) : 0;
@@ -263,8 +316,8 @@
       <div class="build-window">
         <div class="build-head">
           <div class="build-title">Build</div>
-          <input class="build-search" type="search" value="${escapeHtml(buildSearch)}" placeholder="SearchÃ¢â‚¬Â¦" data-build-search>
-          <button class="build-close" data-build-close title="Close">Ã¢Å“â€¢</button>
+          <input class="build-search" type="search" value="${escapeHtml(buildSearch)}" placeholder="Search..." data-build-search>
+          <button class="build-close" data-build-close title="Close">X</button>
         </div>
         <div class="build-body">
           <div class="build-cats">
@@ -324,6 +377,36 @@
       const idx = Number(sel.dataset.buildMat);
       const v = sel.value || "";
       if (v) buildMatPicks[idx] = v; else delete buildMatPicks[idx];
+      focusPage();
+    }));
+    clientPanel.querySelectorAll("[data-build-item-open]").forEach(b => b.addEventListener("click", event => {
+      event.preventDefault(); event.stopPropagation();
+      buildItemMenuReq = Number(b.dataset.buildItemOpen);
+      const token = selectedBuild && selectedBuild.token;
+      if (token && buildCandidatesToken !== token) { buildCandidates = null; loadBuildCandidates(token); }
+      renderBuildPanel();
+      focusPage();
+    }));
+    clientPanel.querySelectorAll("[data-build-item-pick]").forEach(b => b.addEventListener("click", event => {
+      event.preventDefault(); event.stopPropagation();
+      const idx = Number(b.dataset.buildItemPick);
+      if (idx !== 0 || buildCandidates?.exactSelectionSupported !== true) return;
+      buildItemPicks[idx] = Number(b.dataset.itemId);
+      delete buildMatPicks[idx];   // the exact item supersedes the material pick for this requirement
+      buildItemMenuReq = null;
+      renderBuildPanel();
+      focusPage();
+    }));
+    clientPanel.querySelectorAll("[data-build-item-clear]").forEach(b => b.addEventListener("click", event => {
+      event.preventDefault(); event.stopPropagation();
+      delete buildItemPicks[Number(b.dataset.buildItemClear)];
+      renderBuildPanel();
+      focusPage();
+    }));
+    clientPanel.querySelectorAll("[data-build-item-cancel]").forEach(b => b.addEventListener("click", event => {
+      event.preventDefault(); event.stopPropagation();
+      buildItemMenuReq = null;
+      renderBuildPanel();
       focusPage();
     }));
     clientPanel.querySelectorAll("[data-build-dir]").forEach(button => button.addEventListener("click", event => {
@@ -386,7 +469,33 @@
             const val = `${Number(m.matType)}:${Number(m.matIndex)}`;
             return `<option value="${val}"${pick === val ? " selected" : ""}>${escapeHtml(m.name || val)} (${Number(m.count) || 0})</option>`;
           }));
-        return `<div class="build-req-row"><span>${qtyText(req.quantity)}</span><span class="build-req-mat"><select class="build-mat-select" data-build-mat="${idx}">${opts.join("")}</select></span></div>`;
+        const shapeEligible = matReqs.length === 1 && idx === 0 && Number(req.quantity || 1) === 1;
+        const supportKnown = buildCandidates && buildCandidatesToken === item.token;
+        const exactSupported = supportKnown ? buildCandidates.exactSelectionSupported === true : null;
+        const chosenItem = shapeEligible ? buildItemPicks[idx] : null;
+        const itemUi = !shapeEligible || exactSupported === false ? ""
+          : (chosenItem != null)
+            ? `<span class="build-item-chosen" title="Exact item">${escapeHtml(candidateName(idx, chosenItem))}<button class="build-item-x" data-build-item-clear="${idx}" title="Use a material instead">×</button></span>`
+            : `<button class="build-item-btn" data-build-item-open="${idx}" title="Choose one specific finished item">Specific item&hellip;</button>`;
+        let menuUi = "";
+        if (shapeEligible && buildItemMenuReq === idx) {
+          const cands = candidatesFor(idx);
+          if (cands === null) {
+            menuUi = `<div class="build-item-menu"><div class="build-item-note">Loading items&hellip;</div></div>`;
+          } else if (exactSupported === false) {
+            const reason = buildCandidates?.reason || "This building does not accept a specific item.";
+            menuUi = `<div class="build-item-menu"><div class="build-item-note">${escapeHtml(reason)}</div><button class="build-item-cancel" data-build-item-cancel="${idx}">Close</button></div>`;
+          } else if (!cands.length) {
+            menuUi = `<div class="build-item-menu"><div class="build-item-note">No available items for this requirement.</div><button class="build-item-cancel" data-build-item-cancel="${idx}">Close</button></div>`;
+          } else {
+            const creq = candidateReq(idx);
+            const capNote = (creq && creq.capped) ? `<div class="build-item-note">Showing the first ${cands.length} of ${Number(creq.total) || cands.length}.</div>` : "";
+            menuUi = `<div class="build-item-menu">${capNote}${cands.map(it =>
+              `<button class="build-item-opt" data-build-item-pick="${idx}" data-item-id="${Number(it.id)}">${escapeHtml(it.name)}<span class="build-item-badge">${escapeHtml(candidateBadge(it))}</span></button>`).join("")}<button class="build-item-cancel" data-build-item-cancel="${idx}">Cancel</button></div>`;
+          }
+        }
+        const matSelect = (chosenItem != null) ? "" : `<select class="build-mat-select" data-build-mat="${idx}">${opts.join("")}</select>`;
+        return `<div class="build-req-row"><span>${qtyText(req.quantity)}</span><span class="build-req-mat">${matSelect}${itemUi}</span></div>${menuUi}`;
       }).join("");
     } else {
       reqHtml = reqs.length
@@ -495,8 +604,15 @@
     // DF-style material picks: mat0..matN per requirement -> "matType:matIndex", or the literal
     // "closest" (backend resolves it to the nearest matching item's material at placement time).
     for (const [idx, val] of Object.entries(buildMatPicks)) {
+      if (buildItemPicks[idx] != null) continue;   // an exact-item pick supersedes the material pick
       if (val === "closest" || /^-?\d+:-?\d+$/.test(val)) params.set(`mat${Number(idx)}`, val);
     }
+    // Exact-item selection is all-or-nothing and supported only for requirement zero of a
+    // single-quantity finished-object building. The backend independently enforces this contract.
+    const exactId = buildItemPicks[0];
+    if (buildCandidates?.exactSelectionSupported === true &&
+        Number.isInteger(Number(exactId)) && Number(exactId) >= 0)
+      params.set("item0", String(Number(exactId)));
   }
 
   async function placeBuildDrag(x1, y1, x2, y2) {
@@ -527,6 +643,12 @@
       buildStatusError = false;
       // Remember this building's material picks for next time ("use last material").
       if (item.token) lastBuildPicksByToken[item.token] = { ...buildMatPicks };
+      // The exact item (if any) was consumed by the placement; clear the pick + now-stale candidate
+      // list so the next placement lists fresh items instead of trying to reuse a consumed one.
+      buildItemPicks = {};
+      buildCandidates = null;
+      buildCandidatesToken = "";
+      buildItemMenuReq = null;
       renderBuildPanel();
       loadHud();
     } catch (err) {
@@ -718,6 +840,11 @@
         </div>
         <div class="stock-item-body">
           ${description ? `<div class="stock-item-description">${escapeHtml(description)}</div>` : ""}
+          ${result?.artwork?.description ? `
+            <div class="artwork-prose">
+              ${result.artwork.name ? `<strong>${escapeHtml(result.artwork.name)}</strong><br>` : ""}
+              ${escapeHtml(result.artwork.description)}
+            </div>` : ""}
           ${unit ? `
             <div class="stock-item-unit">
               <div>

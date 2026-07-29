@@ -44,6 +44,7 @@
 #include "df/buildingitemst.h"
 #include "df/building_extents_type.h"
 #include "df/building_farmplotst.h"
+#include "df/building_tradedepotst.h"
 #include "df/building_hatchst.h"
 #include "df/building_squad_infost.h"
 #include "df/biome_type.h"
@@ -822,6 +823,7 @@ bool building_info_on_core_thread(int32_t id, BuildingPanelInfo& out) {
         out.passage_control = get_door_passage_state(b, out.passage_forbidden,
                                                      out.passage_closed);
         out.is_farm_plot = virtual_cast<df::building_farmplotst>(b) != nullptr;
+        out.is_trade_depot = virtual_cast<df::building_tradedepotst>(b) != nullptr;
         if (auto cage = virtual_cast<df::building_cagest>(b)) {
             out.is_cage = true;
             out.cage_assigned_units = static_cast<int>(cage->assigned_units.size());
@@ -1013,6 +1015,7 @@ std::string building_info_json(const BuildingPanelInfo& b) {
        << ",\"passageClosed\":" << (b.passage_closed ? "true" : "false")
        << ",\"isFarmPlot\":" << (b.is_farm_plot ? "true" : "false")
        << ",\"isCage\":" << (b.is_cage ? "true" : "false")
+       << ",\"isTradeDepot\":" << (b.is_trade_depot ? "true" : "false")
        << ",\"cageAssignedUnits\":" << b.cage_assigned_units
        << ",\"cageAssignedItems\":" << b.cage_assigned_items << "}";
     return js.str();

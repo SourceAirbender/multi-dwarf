@@ -18,6 +18,20 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 
+  function decorateObjectAttribution(kind, id) {
+    const row = selection.querySelector(
+      ".bld-head,.sp-header,.farm-header,.cage-header,.coffin-header,.lever-header"
+    ) || selection;
+    row.dataset.attribKind = kind;
+    row.dataset.attribId = String(id);
+    if (!row.querySelector(":scope > [data-attrib-slot]")) {
+      const slot = document.createElement("span");
+      slot.dataset.attribSlot = "";
+      row.prepend(slot);
+    }
+    window.dfAttribution?.decorate(selection);
+  }
+
   async function buildingPanelPost(path, params) {
     const query = new URLSearchParams();
     Object.entries(params || {}).forEach(([key, value]) => query.set(key, String(value)));
@@ -192,7 +206,7 @@
     const cage = await fetchOptionalBuildingJson("/building-cage", info.id);
     if (!cage || cage.ok === false) return false;
     const rows = Array.isArray(cage.units) ? cage.units : [];
-    selection.className = "visible building-panel building-control-panel";
+    selection.className = "visible building-panel building-control-panel cage-panel";
     selection.innerHTML = `
       <div class="bld-head"><div class="bld-name">${escapeHtml(cage.name || info.name || "Cage")}</div>
         <button class="bld-x" data-bld-close title="Close">X</button></div>
@@ -231,7 +245,7 @@
     const hasTomb = Number(coffin.tombId) >= 0;
     const owner = coffin.owner || {};
     const tomb = coffin.tomb || {};
-    selection.className = "visible building-panel building-control-panel";
+    selection.className = "visible building-panel building-control-panel coffin-panel";
     selection.innerHTML = `
       <div class="bld-head"><div class="bld-name">${escapeHtml(coffin.name || info.name || "Coffin")}</div>
         <button class="bld-x" data-bld-close title="Close">X</button></div>
@@ -275,18 +289,44 @@
 
   function renderLeverLinkPanel(info, lever) {
     const targets = Array.isArray(lever.targets) ? lever.targets : [];
-    selection.className = "visible building-panel building-control-panel";
+    const currentLinks = Array.isArray(lever.currentLinks) ? lever.currentLinks : [];
+    const currentRows = currentLinks.length ? currentLinks.map(link => `
+      <div class="lever-current-row ${link.status === "pending" ? "pending" : "linked"}">
+        <div><strong>${escapeHtml(link.name || link.type || `Building ${link.id}`)}</strong>
+          <small>${escapeHtml(link.type || "Building")} at ${Number(link.x)}, ${Number(link.y)}, ${Number(link.z)}</small></div>
+        <span>${link.status === "pending" ? "Link queued" : "Linked"}</span>
+      </div>`).join("") : `<div class="bld-note">This lever is not connected to any buildings.</div>`;
+    selection.className = "visible building-panel building-control-panel lever-panel";
     selection.innerHTML = `
       <div class="bld-head"><div class="bld-name">${escapeHtml(lever.name || info.name || "Lever")}</div>
         <button class="bld-x" data-bld-close title="Close">X</button></div>
       <div class="bld-status">${Number(lever.mechanismCount) || 0} available mechanism(s)</div>
       ${lever.needsMechanisms ? `<div class="bld-note warning">Two available mechanisms are required to link a target.</div>` : ""}
-      <div class="building-control-list">${targets.length ? targets.map(target => `
-        <div class="building-control-row">
+      <div class="lever-section-title">Current connections (${currentLinks.length})</div>
+      <div class="lever-current-list">${currentRows}</div>
+      <div class="lever-section-title">Link another building (${targets.length})</div>
+      <input class="lever-target-search" type="search"
+        placeholder="Search floodgate, bridge, door..." data-lever-search>
+      <div class="building-control-list lever-target-list">${targets.length ? targets.map(target => {
+        const state = target.linked ? "linked" : target.pending ? "pending" : "available";
+        const searchAliases = target.type === "Floodgate" ? " watergate water gate sluice" : "";
+        return `
+        <div class="building-control-row ${state}" data-lever-target-row
+          data-lever-search-text="${escapeHtml(`${target.name || ""} ${target.type || ""}${searchAliases}`.toLowerCase())}">
           <div><strong>${escapeHtml(target.name || target.type || `Building ${target.id}`)}</strong>
             <small>${escapeHtml(target.type || "")} at ${Number(target.x)}, ${Number(target.y)}, ${Number(target.z)}</small></div>
-          <button class="bld-btn" data-lever-target="${Number(target.id)}"${lever.needsMechanisms ? " disabled" : ""}>Link</button>
-        </div>`).join("") : `<div class="bld-note">No linkable targets were found.</div>`}</div>`;
+          <button class="bld-btn" data-lever-target="${Number(target.id)}"
+            ${lever.needsMechanisms || target.linked || target.pending ? "disabled" : ""}>
+            ${target.linked ? "Linked" : target.pending ? "Queued" : "Link"}
+          </button>
+        </div>`;
+      }).join("") : `<div class="bld-note">No linkable targets were found.</div>`}</div>`;
+    selection.querySelector("[data-lever-search]")?.addEventListener("input", event => {
+      const needle = event.currentTarget.value.trim().toLowerCase();
+      selection.querySelectorAll("[data-lever-target-row]").forEach(row => {
+        row.hidden = !!needle && !String(row.dataset.leverSearchText || "").includes(needle);
+      });
+    });
     selection.querySelectorAll("[data-lever-target]").forEach(button =>
       button.addEventListener("click", async event => {
         event.stopPropagation();
@@ -310,15 +350,23 @@
       if (r.ok) info = await r.json();
     } catch (_) {}
     if (!info || info.error || info.id < 0) { closeSelection(); return; }
+    if (info.isTradeDepot && info.built) {
+      closeSelection();
+      await openTradeDepotPanel(info.id);
+      return;
+    }
     if (info.isFarmPlot && info.built) {
       const farm = await fetchFarmPlotInfo(info.id);
       if (farm) {
         renderFarmPlotPanel(info, farm);
+        decorateObjectAttribution("building", info.id);
         return;
       }
     }
-    if (info.isCage && info.built && await openBuildingCagePanel(info))
+    if (info.isCage && info.built && await openBuildingCagePanel(info)) {
+      decorateObjectAttribution("building", info.id);
       return;
+    }
     if (info.built) {
       const [coffin, lever] = await Promise.all([
         fetchOptionalBuildingJson("/burial-coffin", info.id),
@@ -326,16 +374,18 @@
       ]);
       if (coffin?.ok && coffin.isCoffin) {
         renderCoffinPanel(info, coffin);
+        decorateObjectAttribution("building", info.id);
         return;
       }
       if (lever?.ok && lever.isLever) {
         renderLeverLinkPanel(info, lever);
+        decorateObjectAttribution("building", info.id);
         return;
       }
     }
     const underConstruction = !info.built;
     const statusLine = info.built ? "Constructed."
-      : (info.suspended ? "Construction suspended." : "Waiting for constructionÃ¢â‚¬Â¦");
+      : (info.suspended ? "Construction suspended." : "Waiting for construction...");
     const suspendBtn = (underConstruction && info.hasJobs)
       ? `<button class="bld-btn" data-bld-act="${info.suspended ? "resume" : "suspend"}">${info.suspended ? "Resume construction" : "Suspend construction"}</button>`
       : "";
@@ -347,12 +397,13 @@
     selection.className = "visible building-panel";
     selection.innerHTML = `
       <div class="bld-head"><div class="bld-name">${escapeHtml(info.name || "Building")}</div>
-        <button class="bld-x" data-bld-close title="Close">Ã¢Å“â€¢</button></div>
+        <button class="bld-x" data-bld-close title="Close">X</button></div>
       <div class="bld-status${info.suspended ? " suspended" : ""}">${escapeHtml(statusLine)}</div>
       ${suspendBtn}
       ${passageBtn}
       <button class="bld-btn danger" data-bld-act="cancel">${escapeHtml(cancelLabel)}</button>
     `;
+    decorateObjectAttribution("building", info.id);
     selection.querySelectorAll("[data-bld-act]").forEach(btn => btn.addEventListener("click", async event => {
       event.stopPropagation();
       const action = btn.dataset.bldAct;
@@ -877,6 +928,7 @@
       </div>
       <button class="bld-btn danger" data-zone-act="remove">Remove zone</button>
     `;
+    decorateObjectAttribution("zone", info.id);
     selection.querySelectorAll("[data-zone-act]").forEach(btn => btn.addEventListener("click", async event => {
       event.stopPropagation();
       const action = btn.dataset.zoneAct;
@@ -1309,6 +1361,7 @@
         </div>
       </div>
     `;
+    decorateObjectAttribution("stockpile", id);
     selection.querySelector("[data-sp-close]").addEventListener("click", event => {
       event.stopPropagation(); closeSelection(); focusPage();
     });

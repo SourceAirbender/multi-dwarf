@@ -42,6 +42,11 @@ struct HudState {
     int happiness[7] = {};
     int food = 0;
     int drink = 0;
+    int seeds = 0;
+    int meat = 0;
+    int fish = 0;
+    int plant = 0;
+    int other = 0;
 
     int elevation = 0;
     int year = 0;

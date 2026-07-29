@@ -40,8 +40,7 @@ using namespace DFHack;
 
 namespace dfcapture {
 
-// Audit of main_interface.h for raw
-// building-pointer caches. A "*" row is a df::building* (subtype) our deconstruct paths can free
+// Native raw building-pointer caches. A "*" row is a df::building* subtype that deconstruction can free
 // and so is purged here; an "id" row is a bld_id/int reference DFHack reindexes on free and is
 // therefore SAFE and deliberately left alone.
 //
@@ -69,16 +68,8 @@ namespace dfcapture {
 //   squads_interfacest                (squad/bld ids)               int32_t id                 no (id)
 //   location_list/details/selector    valid_ab/selected_ab          abstract_building*         no (own cache) -- BUT see dependent-view sweep: location_selector is a dependent VIEW of civzone.cur_bld and IS closed
 //
-// Dependent-view sweep. The rows above classify each field by its own
-// cached pointer. That is necessary but not sufficient: a sub-interface can hold NO building
-// pointer of its own yet still assume, in its per-frame renderer, that ANOTHER purged cache is
-// non-null -- it is a *dependent view* of that cache. The location_selector proved this class:
-// context ZONE_MEETING_AREA_ASSIGNMENT holds no zone pointer, but FUN_1403b7cf0 dereferences
-// civzone.cur_bld->location_id unguarded while open, so nulling cur_bld without closing the picker
-// turned the freed-zone UAF into a null-deref crash (exe+0x3b9bc1). Rule adopted here: for every
-// purged building* cache, if a sub-interface with an `open` flag treats that cache (or its own
-// same-building cache) as a non-null subject, CLOSE it (open=false) when -- and only when -- that
-// subject IS the dying building. Sweep result:
+// A dependent view may assume another cache still owns its subject. Close an open dependent view
+// whenever that subject is the building being removed. Sweep:
 //   interface (open flag?)      subject cache            decision
 //   --------------------------- ------------------------ --------------------------------------------
 //   location_selector (open)    civzone.cur_bld          CLOSE (+context=NONE)
@@ -91,33 +82,25 @@ namespace dfcapture {
 //                                                        struct {doing_rectangle,box_on_left,erasing,repainting,
 //                                                        cur_bld} with NO open flag, so there is no dependent
 //                                                        view to close. The analogous
-//                                                        civzone ZONE_PAINT per-frame consumer null-checks its
-//                                                        cur_bld -- FUN_1403bafd0 case 4 `if (cur_bld && ...)`.)
+//                                                        paint consumers guard a null cur_bld
 //   buildjob          (no open) display_furniture_bld    null only -- no open flag; its sibling picker
 //                                                        (assign_display_item) is the open view and IS closed above
 //   info.buildings    (no open) list[mode][]             list fully erased; struct has no cur_bld/selected pointer,
 //                                                        only mode + per-mode scrolling_position (clamped), so
 //                                                        erasing the vectors is the complete fix
-// Closing is safe by construction: each close is guarded by identity against the dying building, so
-// it can fire only in the precise remote-delete-while-locally-open race and never dismisses an
-// unrelated panel; a spurious dismissal in that race is strictly better than a render-thread crash.
+// Each close is identity-guarded and therefore cannot dismiss an unrelated panel.
 // The 5 squad interfaces (squads.cpp) are out of this helper's scope: they cache squad*/unit*/
 // assignment ids around squad lifecycle, not building* our deconstruct paths free, so a building
 // deconstruct cannot dangle them.
 //
-// info_interfacest.buildings.list is a static-array[buildings_mode_type] of
-// stl-vector<building*>: the
-// per-mode (ZONES/LOCATIONS/STOCKPILES/WORKSHOPS/FARMPLOTS/SIEGE_ENGINES) Buildings-tab inventory,
-// reached via main_interface.info.buildings (xml:2448/5500). It persists across frames (each mode
-// keeps a sibling scrolling_position) and the info-tab RENDERER walks it every frame drawing each
-// building's name. Purge every mode before freeing a referenced building.
+// The Info screen retains per-mode building pointer lists across frames. Purge every mode before
+// freeing a referenced building.
 //
-// building_interfacest.button/press_button/filtered_button (xml:5464 building_interfacest) are
-// vectors of interface_button*, and the interface_button_buildingst subclass (xml:295-297) carries
-// a raw `building* bd`. Render methods use each button's own text/render virtual methods and do
+// Building-interface button collections share objects that carry raw building pointers. Render
+// methods use each button's own text/render virtual methods and do
 // not dereference bd; press handlers do. We do not mutate these vectors because the same button
 // object is stored in both button and
-// press_button (FUN_1407c3f60), so a naive erase/delete would dangle or double-free the shared
+// press_button, so a naive erase/delete would dangle or double-free the shared
 // object, and nulling ->bd would only convert a stale-menu click from a possible UAF into a
 // guaranteed null-deref -- strictly not safer, and building_interfacest has no `open` flag to
 // gate cleanly. The residual (clicking a material/color selector in a build sidebar whose target
@@ -166,7 +149,7 @@ void purge_ui_caches_for_building(df::building* b) {
     //     every frame (drawing each building's name), so a freed building left here is the same
     //     render-thread UAF. Every mode's list holds the exact types our four deconstruct paths
     //     free (ZONES/STOCKPILES/WORKSHOPS/FARMPLOTS/...); iterate ALL modes and erase identity
-    //     matches, mirroring the civzone.list block above. ---
+    //     matches, using the same identity guard as civzone.list. ---
     for (auto& mode_list : mi.info.buildings.list)
         for (size_t i = mode_list.size(); i-- > 0;)
             if (mode_list[i] == b)

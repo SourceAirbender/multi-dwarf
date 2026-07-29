@@ -29,6 +29,7 @@
 #include "image_encoder.h"
 #include "lua_bridge.h"
 #include "overlay_control.h"
+#include "player_ownership.h"
 #include "save_barrier.h"
 #include "sdl_capture.h"
 #include "web_assets.h"
@@ -141,6 +142,7 @@ command_result cmd_start(color_ostream& out, std::vector<std::string>& args) {
 
     std::string err;
     if (!dfcapture::start_server(port, bind_address, &err)) {
+        dfcapture::diagnostics_log("stream start failed: " + err);
         dfcapture::restore_overlay_after_stream(&out);
         out.printerr("dfcapture: %s\n", err.c_str());
         return CR_FAILURE;
@@ -225,17 +227,21 @@ DFhackCExport command_result plugin_shutdown(color_ostream&) {
     dfcapture::stop_server();
     dfcapture::restore_overlay_after_stream();
     dfcapture::shutdown_image_encoder();
+    dfcapture::ownership_clear_world();
 #endif
     return CR_OK;
 }
 
 DFhackCExport command_result plugin_onstatechange(color_ostream&, state_change_event event) {
-    if (event == SC_WORLD_UNLOADED)
+    if (event == SC_WORLD_UNLOADED) {
         dfcapture::save_barrier_set_world_loaded(false);
-    else if (event == SC_WORLD_LOADED) {
+        dfcapture::ownership_clear_world();
+    } else if (event == SC_WORLD_LOADED) {
         dfcapture::save_barrier_set_world_loaded(true);
-        if (df::global::world)
+        if (df::global::world) {
             dfcapture::attrib_note_world(df::global::world->cur_savegame.save_dir);
+            dfcapture::ownership_note_world(df::global::world->cur_savegame.save_dir);
+        }
         int holders = 0;
         int categories = 0;
         std::string repair_err;
@@ -257,5 +263,6 @@ DFhackCExport command_result plugin_save_site_data(color_ostream&) {
 
 DFhackCExport command_result plugin_onupdate(color_ostream&) {
     dfcapture::save_barrier_update();
+    dfcapture::ownership_scheduler_update();
     return CR_OK;
 }

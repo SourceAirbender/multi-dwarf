@@ -21,27 +21,15 @@
 
 // DFHack command-console containment policy.
 //
-// Security model:
-//   The browser command console is available to ANY player holding a valid join-auth cookie --
-//   NOT host-only. The existing auth pre-routing gate (http_server.cpp) already refuses
-//   anonymous/unauthed callers; the console routes add no host-only peer check. The host explicitly
-//   enables this access, subject to the containment rules below.
-//
-//   Because "any authed friend" now includes people who are NOT sitting at the DF console, a
-//   server-side BLOCKLIST is the SOLE containment, and it applies to EVERY caller INCLUDING THE
-//   HOST -- there is deliberately no host/loopback parameter in command_denied() below, so a rule
-//   cannot be written that a non-host bypasses or that the host escapes. The deny table is the one
-//   thing standing between a friend and re-opening the host-only /join-password + /save gates
-//   (via the plugin's own capture-* console commands), stopping DF, or freezing the fort.
+// The host must explicitly enable the browser console. Once enabled, every connected player is
+// subject to the same server-side blocklist; capture lifecycle, save, shutdown, and other unsafe
+// commands remain available only from the host's local DFHack console.
 //
 // The decision logic is header-only and DF/httplib-free so policy tests call the same
 // command_denied() implementation used by the HTTP route.
 //
-// ENFORCED IN TWO PLACES, ONE TABLE: the POST /console/run handler (console_routes.cpp) calls
-// command_denied() FIRST and returns 403 + reason on a hit (clean HTTP semantics); the bridge fn
-// console_run_via_lua (lua_bridge.cpp) calls it AGAIN as a backstop before it ever reaches
-// dfhack.run_command_silent, so no future C++ caller of the bridge can skip the gate. Both call
-// THIS function, so the deny table can never diverge.
+// The HTTP handler checks this policy before entering Lua, and the native execution bridge checks
+// the same table again before running a command.
 
 #pragma once
 
@@ -73,11 +61,7 @@ struct Denial {
 // conservative (the mandate: deny at minimum the categories below).
 inline const std::vector<DenyRule>& deny_table() {
     static const std::vector<DenyRule> kRules = {
-        // 1. THE PLUGIN'S OWN CONTROL COMMANDS -- deny the ENTIRE capture-* namespace. This is the
-        //    non-negotiable rule: capture-join-password / capture-stream-stop / the quicksave-class
-        //    capture-* commands would let a friend re-open the host-only /join-password and /save
-        //    HTTP gates or stop the stream, straight from the console. The HTTP layer gates those by
-        //    loopback; this closes the console back-door to the same power.
+        // Plugin lifecycle commands remain local to the host's DFHack console.
         // The plugin also registers a bare `capture` command
         //    plugin_init), which the "capture-" prefix does not match. Keep the bare rule.
         { DenyRule::Prefix, "capture-", "capture-* commands control the server itself and are host-console only" },

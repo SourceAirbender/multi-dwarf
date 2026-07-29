@@ -90,6 +90,21 @@ CaptureDiagnostics diagnostics_snapshot();
 std::string diagnostics_json(const std::string& player, const Camera& camera,
                              const CaptureDiagnostics& stats);
 
+void diagnostics_frame_pipeline(const std::string& player,
+                                double render_wait_ms, double capture_ms,
+                                double encode_ms, double total_ms,
+                                uint64_t payload_bytes, int width, int height,
+                                const std::string& transport = "jpeg",
+                                bool keyframe = true, int rectangles = 1,
+                                double changed_ratio = 1.0,
+                                const std::string& keyframe_reason = "",
+                                bool motion_compensated = false);
+void diagnostics_frame_client(const std::string& player,
+                              double fetch_ms, double blob_ms, double decode_ms,
+                              double paint_ms, double total_ms, double input_visible_ms,
+                              uint64_t payload_bytes);
+std::string frame_pipeline_diagnostics_json(const std::string& player);
+
 bool host_state_on_render_thread(HostState& state, std::string* err = nullptr);
 std::string host_state_json(const HostState& state);
 

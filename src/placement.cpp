@@ -440,15 +440,23 @@ bool apply_plant_designations(RenderDesignationRequest& req, MapExtras::MapCache
         if (!ok)
             continue;
 
+        // markPlant()/unmarkPlant() mutate the live map block directly. MapCache can hold a stale
+        // copy of that same 16x16 block; unless the changed dig bit is synchronized into the cache,
+        // WriteAll() restores the stale copy and only the first
+        // tree per map block remains designated. Keep the direct DFHack helper (it also handles
+        // existing plant jobs correctly), then explicitly synchronize its result into MapCache.
+        df::tile_designation des = map.designationAt(pos);
+        des.bits.dig = req.kind == DesignationKind::Clear
+            ? df::tile_dig_designation::No
+            : df::tile_dig_designation::Default;
         if (req.kind != DesignationKind::Clear) {
-            df::tile_designation des = map.designationAt(pos);
             df::tile_occupancy occ = map.occupancyAt(pos);
             if (occ.bits.dig_marked != req.request.marker) {
                 occ.bits.dig_marked = req.request.marker;
                 map.setOccupancyAt(pos, occ);
             }
-            map.setDesignationAt(pos, des, priority);
         }
+        map.setDesignationAt(pos, des, req.kind == DesignationKind::Clear ? 0 : priority);
         ++changed_count;
     }
 

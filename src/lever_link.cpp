@@ -17,6 +17,7 @@
 #include "modules/Job.h"
 
 #include "df/building.h"
+#include "df/building_actual.h"
 #include "df/building_bars_floorst.h"
 #include "df/building_bars_verticalst.h"
 #include "df/building_bridgest.h"
@@ -29,9 +30,13 @@
 #include "df/building_grate_wallst.h"
 #include "df/building_hatchst.h"
 #include "df/building_rollersst.h"
+#include "df/building_supportst.h"
 #include "df/building_trapst.h"
 #include "df/building_weaponst.h"
+#include "df/buildingitemst.h"
+#include "df/general_ref.h"
 #include "df/general_ref_building_holderst.h"
+#include "df/general_ref_building_triggerst.h"
 #include "df/general_ref_building_triggertargetst.h"
 #include "df/global_objects.h"
 #include "df/item.h"
@@ -46,6 +51,7 @@
 #include <cmath>
 #include <mutex>
 #include <new>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -78,6 +84,8 @@ struct TargetRow {
     std::string type;
     int32_t x = 0, y = 0, z = 0;
     int32_t distance = 0;
+    bool linked = false;
+    bool pending = false;
 };
 
 bool built_actual(df::building* building) {
@@ -105,7 +113,7 @@ bool linkable_target(df::building* building, std::string& label) {
         label = "Floodgate"; return virtual_cast<df::building_floodgatest>(building);
     case df::building_type::Bridge: {
         auto bridge = virtual_cast<df::building_bridgest>(building);
-        if (bridge && bridge->direction == df::building_bridgest::Retracting) {
+        if (bridge) {
             label = "Bridge"; return true;
         }
         return false;
@@ -139,6 +147,8 @@ bool linkable_target(df::building* building, std::string& label) {
     }
     case df::building_type::Rollers:
         label = "Roller"; return virtual_cast<df::building_rollersst>(building);
+    case df::building_type::Support:
+        label = "Support"; return virtual_cast<df::building_supportst>(building);
     default:
         return false;
     }
@@ -166,7 +176,59 @@ std::vector<MechanismRow> collect_mechanisms() {
     return rows;
 }
 
-std::vector<TargetRow> collect_targets(df::building* lever) {
+df::building* building_containing_item(df::item* item) {
+    auto world = df::global::world;
+    if (!world || !item)
+        return nullptr;
+    for (auto building : world->buildings.all) {
+        auto actual = virtual_cast<df::building_actual>(building);
+        if (!actual)
+            continue;
+        for (auto contained : actual->contained_items) {
+            if (contained && contained->item == item)
+                return building;
+        }
+    }
+    return nullptr;
+}
+
+std::set<int32_t> collect_linked_target_ids(df::building* lever) {
+    std::set<int32_t> ids;
+    auto trap = virtual_cast<df::building_trapst>(lever);
+    if (!trap)
+        return ids;
+    for (auto mechanism : trap->linked_mechanisms) {
+        // The lever stores the mechanism installed in the remote building.
+        // Finding that mechanism's containing building is the authoritative
+        // way to identify the other end of an established link.
+        auto target = building_containing_item(mechanism);
+        if (target && target->id != lever->id)
+            ids.insert(target->id);
+    }
+    return ids;
+}
+
+std::set<int32_t> collect_pending_target_ids(df::building* lever) {
+    std::set<int32_t> ids;
+    if (!lever)
+        return ids;
+    for (auto job : lever->jobs) {
+        if (!job || job->job_type != df::job_type::LinkBuildingToTrigger)
+            continue;
+        for (auto ref : job->general_refs) {
+            auto target_ref = virtual_cast<df::general_ref_building_triggertargetst>(ref);
+            if (target_ref && target_ref->building_id != lever->id)
+                ids.insert(target_ref->building_id);
+        }
+    }
+    return ids;
+}
+
+std::vector<TargetRow> collect_targets(
+    df::building* lever,
+    const std::set<int32_t>& linked_ids,
+    const std::set<int32_t>& pending_ids
+) {
     std::vector<TargetRow> rows;
     auto world = df::global::world;
     if (!world || !lever)
@@ -181,7 +243,9 @@ std::vector<TargetRow> collect_targets(df::building* lever) {
         const int distance = std::abs(building->centerx - lever->centerx) +
             std::abs(building->centery - lever->centery) + dz * 10;
         rows.push_back({building->id, building_name(building, type), type,
-                        building->centerx, building->centery, building->z, distance});
+                        building->centerx, building->centery, building->z, distance,
+                        linked_ids.count(building->id) > 0,
+                        pending_ids.count(building->id) > 0});
     }
     std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
         return a.distance != b.distance ? a.distance < b.distance : a.id < b.id;
@@ -203,12 +267,31 @@ std::string lever_link_json(int32_t id, std::string* err) {
             return true;
         }
         const auto mechanisms = collect_mechanisms();
-        const auto targets = collect_targets(lever);
+        const auto linked_ids = collect_linked_target_ids(lever);
+        const auto pending_ids = collect_pending_target_ids(lever);
+        const auto targets = collect_targets(lever, linked_ids, pending_ids);
         std::ostringstream out;
         out << "{\"ok\":true,\"id\":" << id << ",\"isLever\":true"
             << ",\"name\":" << json_string(building_name(lever, "Lever"))
             << ",\"mechanismCount\":" << mechanisms.size()
             << ",\"needsMechanisms\":" << (mechanisms.size() < 2 ? "true" : "false")
+            << ",\"linkedCount\":" << linked_ids.size()
+            << ",\"pendingCount\":" << pending_ids.size()
+            << ",\"currentLinks\":[";
+        bool first_link = true;
+        for (const auto& target : targets) {
+            if (!target.linked && !target.pending)
+                continue;
+            if (!first_link) out << ",";
+            first_link = false;
+            out << "{\"id\":" << target.id
+                << ",\"name\":" << json_string(target.name)
+                << ",\"type\":" << json_string(target.type)
+                << ",\"x\":" << target.x << ",\"y\":" << target.y << ",\"z\":" << target.z
+                << ",\"status\":" << json_string(target.linked ? "linked" : "pending")
+                << "}";
+        }
+        out << "]"
             << ",\"targets\":[";
         for (size_t i = 0; i < targets.size(); ++i) {
             if (i) out << ",";
@@ -216,7 +299,10 @@ std::string lever_link_json(int32_t id, std::string* err) {
             out << "{\"id\":" << target.id << ",\"name\":" << json_string(target.name)
                 << ",\"type\":" << json_string(target.type)
                 << ",\"x\":" << target.x << ",\"y\":" << target.y << ",\"z\":" << target.z
-                << ",\"distance\":" << target.distance << "}";
+                << ",\"distance\":" << target.distance
+                << ",\"linked\":" << (target.linked ? "true" : "false")
+                << ",\"pending\":" << (target.pending ? "true" : "false")
+                << "}";
         }
         out << "]}\n";
         json = out.str();
@@ -244,6 +330,14 @@ bool queue_link_job(int32_t lever_id, int32_t target_id, int32_t& job_id, std::s
         }
         if (!target || !linkable_target(target, target_label)) {
             if (err) *err = "target is not linkable";
+            return false;
+        }
+        if (collect_linked_target_ids(lever).count(target_id)) {
+            if (err) *err = "target is already linked";
+            return false;
+        }
+        if (collect_pending_target_ids(lever).count(target_id)) {
+            if (err) *err = "target link is already queued";
             return false;
         }
         auto mechanisms = collect_mechanisms();

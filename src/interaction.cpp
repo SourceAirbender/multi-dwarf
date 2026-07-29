@@ -20,6 +20,7 @@
 
 #include "interaction.h"
 
+#include "art_desc.h"
 #include "Core.h"
 #include "TileTypes.h"
 #include "json_util.h"
@@ -517,7 +518,9 @@ bool save_world_on_core_thread(std::string* err) {
 bool stock_item_action_on_core_thread(int32_t item_id,
                                       const std::string& action,
                                       StockItemActionResult& result) {
-    return run_suspended([&]() {
+    ArtworkModel artwork;
+    std::string artwork_quality;
+    bool ok = run_suspended([&]() {
         auto item = df::item::find(item_id);
         if (!item) {
             result.err = "item not found";
@@ -603,9 +606,27 @@ bool stock_item_action_on_core_thread(int32_t item_id,
                 break;
         }
 
+        int32_t* image_id = nullptr;
+        int16_t* image_sub_id = nullptr;
+        item->getImageRef(&image_id, &image_sub_id);
+        if (image_id && image_sub_id && *image_id >= 0 && *image_sub_id >= 0) {
+            artwork = capture_artwork_model(*image_id, *image_sub_id);
+            artwork_quality = item_quality_name(item->getOverallQuality());
+        }
+
         result.ok = true;
         return true;
     });
+    if (ok && artwork.art_id >= 0 && artwork.art_sub_id >= 0) {
+        result.art_id = artwork.art_id;
+        result.art_sub_id = artwork.art_sub_id;
+        result.art_name = artwork.name;
+        result.art_subjects = artwork.subjects;
+        result.art_properties = artwork.properties;
+        result.artwork_prose =
+            compose_artwork_prose(artwork, "depiction", artwork_quality, "", "");
+    }
+    return ok;
 }
 
 bool inspect_on_core_thread(const Camera& camera,
@@ -789,7 +810,14 @@ std::string tile_occupants_at_json_on_core_thread(int x, int y, int z,
 }
 
 std::string engraving_info_json_on_core_thread(int x, int y, int z, std::string* err) {
-    std::string json;
+    int32_t artist_id = -1;
+    int32_t art_id = -1;
+    int16_t art_sub_id = -1;
+    int quality = -1;
+    std::string artist;
+    std::string surface;
+    bool hidden = false;
+    ArtworkModel artwork;
     bool ok = run_suspended([&]() {
         auto world = df::global::world;
         if (!world) {
@@ -808,31 +836,47 @@ std::string engraving_info_json_on_core_thread(int x, int y, int z, std::string*
             if (err) *err = "engraving not found";
             return false;
         }
-        std::string artist;
+        artist_id = found->artist;
         if (auto hf = df::historical_figure::find(found->artist))
             artist = Translation::translateName(&hf->name, true);
-        static const char* qualities[] = {
-            "Ordinary", "Well-crafted", "Finely-crafted", "Superior",
-            "Exceptional", "Masterful", "Artifact"
-        };
-        int quality = static_cast<int>(found->quality);
-        std::string quality_name =
-            quality >= 0 && quality < static_cast<int>(sizeof(qualities) / sizeof(qualities[0]))
-                ? qualities[quality] : "Unknown";
-        std::ostringstream out;
-        out << "{\"ok\":true,\"title\":\"Engraving\",\"position\":{\"x\":" << x
-            << ",\"y\":" << y << ",\"z\":" << z << "},\"artistId\":" << found->artist
-            << ",\"artist\":" << json_string(artist)
-            << ",\"quality\":" << quality
-            << ",\"qualityName\":" << json_string(quality_name)
-            << ",\"surface\":" << json_string(found->flags.bits.floor ? "floor" : "wall")
-            << ",\"hidden\":" << (found->flags.bits.hidden ? "true" : "false")
-            << ",\"artId\":" << found->art_id
-            << ",\"artSubId\":" << found->art_subid << "}\n";
-        json = out.str();
+        quality = static_cast<int>(found->quality);
+        surface = found->flags.bits.floor ? "floor" : "wall";
+        hidden = found->flags.bits.hidden;
+        art_id = found->art_id;
+        art_sub_id = found->art_subid;
+        artwork = capture_artwork_model(art_id, art_sub_id);
         return true;
     });
-    return ok ? json : std::string();
+    if (!ok)
+        return {};
+
+    static const char* qualities[] = {
+        "Ordinary", "Well-crafted", "Finely-crafted", "Superior",
+        "Exceptional", "Masterful", "Artifact"
+    };
+    const std::string quality_name =
+        quality >= 0 && quality < static_cast<int>(sizeof(qualities) / sizeof(qualities[0]))
+            ? qualities[quality] : "Unknown";
+    const std::string prose =
+        compose_artwork_prose(artwork, "engraving", quality_name, surface, artist);
+    std::ostringstream out;
+    out << "{\"ok\":true,\"title\":\"Engraving\",\"position\":{\"x\":" << x
+        << ",\"y\":" << y << ",\"z\":" << z << "},\"artistId\":" << artist_id
+        << ",\"artist\":" << json_string(artist)
+        << ",\"quality\":" << quality
+        << ",\"qualityName\":" << json_string(quality_name)
+        << ",\"surface\":" << json_string(surface)
+        << ",\"hidden\":" << (hidden ? "true" : "false")
+        << ",\"artId\":" << art_id
+        << ",\"artSubId\":" << art_sub_id
+        << ",\"artName\":" << json_string(artwork.name)
+        << ",\"description\":" << json_string(prose)
+        << ",\"subjects\":";
+    append_json_string_array(out, artwork.subjects);
+    out << ",\"properties\":";
+    append_json_string_array(out, artwork.properties);
+    out << "}\n";
+    return out.str();
 }
 
 std::string hover_json(const std::string& player, const HoverResult& h) {
@@ -888,6 +932,21 @@ std::string stock_item_action_json(int32_t item_id, const StockItemActionResult&
         body << "null";
     }
     body << ",\"location\":" << json_string(result.location)
+         << ",\"artwork\":";
+    if (result.art_id >= 0 && result.art_sub_id >= 0) {
+        body << "{\"artId\":" << result.art_id
+             << ",\"artSubId\":" << result.art_sub_id
+             << ",\"name\":" << json_string(result.art_name)
+             << ",\"description\":" << json_string(result.artwork_prose)
+             << ",\"subjects\":";
+        append_json_string_array(body, result.art_subjects);
+        body << ",\"properties\":";
+        append_json_string_array(body, result.art_properties);
+        body << "}";
+    } else {
+        body << "null";
+    }
+    body
          << ",\"contents\":[";
     for (size_t i = 0; i < result.contents.size(); ++i) {
         if (i)

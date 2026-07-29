@@ -22,62 +22,25 @@
     } catch (_) {}
   }
 
-  function cookieCredential(password) {
-    document.cookie = `dfcap_auth=${encodeURIComponent(password)}; Path=/; SameSite=Strict`;
-  }
-
-  function clearCredential() {
-    document.cookie = "dfcap_auth=; Path=/; Max-Age=0; SameSite=Strict";
-  }
-
-  function showJoinGate() {
-    if (document.getElementById("sessionJoinGate")) return;
-    const gate = document.createElement("div");
-    gate.id = "sessionJoinGate";
-    gate.innerHTML = `
-      <form class="session-join-card">
-        <h2>Join fortress</h2>
-        <label>Display name<input name="name" maxlength="32" required value="${esc(displayName())}"></label>
-        <label>Join password<input name="password" type="password" autocomplete="current-password" required></label>
-        <div class="session-join-error" aria-live="polite"></div>
-        <button type="submit">Join</button>
-      </form>`;
-    document.body.appendChild(gate);
-    const form = gate.querySelector("form");
-    form.addEventListener("submit", async event => {
-      event.preventDefault();
-      const error = gate.querySelector(".session-join-error");
-      const data = new FormData(form);
-      const name = String(data.get("name") || "").trim();
-      const password = String(data.get("password") || "");
-      if (!name || !password) return;
-      error.textContent = "Joining...";
-      try {
-        const response = await fetch("/join", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: `password=${encodeURIComponent(password)}`,
-          cache: "no-store"
-        });
-        if (!response.ok) {
-          error.textContent = "Wrong password. Ask the host for the current passphrase.";
-          return;
-        }
-        setDisplayName(name);
-        cookieCredential(password);
-        location.reload();
-      } catch (_) {
-        error.textContent = "The fortress server is unavailable.";
-      }
+  async function ensureIdentity(candidate) {
+    const name = displayName();
+    const query = new URLSearchParams();
+    if (candidate) query.set("candidate", String(candidate));
+    if (name) query.set("name", name);
+    const response = await fetch(`/identity?${query.toString()}`, {
+      method: "POST", cache: "no-store"
     });
-    gate.querySelector('input[name="name"]')?.focus();
+    if (!response.ok) throw new Error("Player identity is unavailable");
+    const identity = await response.json();
+    if (!identity?.playerId) throw new Error("Player identity response is invalid");
+    try { localStorage.setItem("dfcapture.playerId", identity.playerId); } catch (_) {}
+    return identity;
   }
 
   async function api(path, options) {
     const response = await fetch(path, Object.assign({ cache: "no-store" }, options || {}));
     let body = null;
     try { body = await response.json(); } catch (_) {}
-    if (response.status === 401) showJoinGate();
     return { response, body };
   }
 
@@ -96,8 +59,6 @@
     toggleRow("setHostUnpause", config.hostUnpauseOnly, host);
     toggleRow("setRemoteSave", config.remoteSave, host);
     toggleRow("setRemoteAudio", config.remoteAudio, host);
-    const hostBox = document.getElementById("sessionHostSettings");
-    if (hostBox) hostBox.hidden = !host;
     const state = document.getElementById("sessionState");
     if (state) {
       const players = Array.isArray(config.players) ? config.players : [];
@@ -108,11 +69,60 @@
     if (name && document.activeElement !== name) name.value = displayName();
   }
 
+  // Saves block every browser view, including a localhost tab that the
+  // server correctly recognizes as host-authorized. The host distinction controls authority,
+  // not whether the browser is temporarily unable to interact with DF's unsafe object graph.
+  // Other-player/disconnect pauses still use the compact pill.
+  function reflectBusyState(s) {
+    if (!s) return;
+    let el = document.getElementById("dfcBusy");
+    if (!el) { el = document.createElement("div"); el.id = "dfcBusy"; document.body.appendChild(el); }
+    let saveNotice = document.getElementById("dfcSaveNotice");
+    if (!saveNotice) {
+      saveNotice = document.createElement("div");
+      saveNotice.id = "dfcSaveNotice";
+      saveNotice.setAttribute("role", "status");
+      saveNotice.setAttribute("aria-live", "assertive");
+      saveNotice.innerHTML = `<div class="dfc-save-card">
+        <strong>REMOTE GAME PAUSED</strong>
+        <span>Awaiting host save to finish</span>
+        <small>Interaction will resume automatically when the fortress is ready.</small>
+      </div>`;
+      document.body.appendChild(saveNotice);
+    }
+    const me = (typeof player !== "undefined") ? player : "";
+    const saveBlocking = !!s.saving;
+    let text = "";
+    if (!saveBlocking) {
+      if (s.paused && s.pauseReason === "disconnect") text = "Paused — everyone disconnected";
+      else if (s.paused && s.pauseActor && s.pauseActor !== me &&
+               (s.pauseReason === "player" || s.pauseReason === "host"))
+        text = "Paused by " + s.pauseActor;
+    }
+    el.textContent = text;
+    el.classList.toggle("visible", !!text);
+    el.classList.remove("saving");
+    saveNotice.classList.toggle("visible", saveBlocking);
+    saveNotice.setAttribute("aria-hidden", saveBlocking ? "false" : "true");
+    const playBtn = document.querySelector('#pauseRow [data-action="play"]');
+    if (playBtn) {
+      const blocked = s.canUnpause === false;
+      playBtn.classList.toggle("blocked", blocked);
+      playBtn.title = blocked ? "Only the host may unpause (session policy)" : "Play";
+    }
+  }
+
   async function refresh() {
     const result = await api("/session");
     if (result.response.ok && result.body) {
       config = result.body;
       renderSettings();
+      reflectBusyState(config);
+    } else if (result.response.status === 503 && result.body?.busy) {
+      // The global save barrier intentionally rejects /session while DF's object graph is unsafe.
+      // Preserve the last known host/remote identity and turn that authoritative 503 into the
+      // temporary saving state. The next successful poll clears the notice automatically.
+      reflectBusyState(Object.assign({}, config || {}, { saving: true, busyReason: "saving" }));
     }
     return config;
   }
@@ -146,18 +156,13 @@
         <b>Only host may unpause</b><span>Friends can pause, but only the host browser can resume.</span>
       </div></div>
       <div class="set-row" id="setRemoteSave"><div class="set-toggle"></div><div class="set-label">
-        <b>Allow remote save</b><span>Let authenticated friends queue a fortress save.</span>
+        <b>Allow remote save</b><span>Let connected friends queue a fortress save.</span>
       </div></div>
       <div class="set-row" id="setRemoteAudio"><div class="set-toggle"></div><div class="set-label">
-        <b>Stream audio to friends</b><span>Serve this installation's Dwarf Fortress music to authenticated remote players.</span>
+        <b>Stream audio to friends</b><span>Serve this installation's Dwarf Fortress music to connected remote players.</span>
       </div></div>
       <div class="session-actions">
         <button type="button" id="sessionSaveBtn">Save fortress</button>
-      </div>
-      <div id="sessionHostSettings" class="session-host" hidden>
-        <label>Join password<input id="sessionPassword" type="password" autocomplete="new-password"></label>
-        <button type="button" id="sessionPasswordSet">Set password</button>
-        <button type="button" id="sessionPasswordOff">Turn off password</button>
       </div>
       <div id="sessionMessage" class="session-message" aria-live="polite"></div>`;
     menu.appendChild(section);
@@ -168,6 +173,7 @@
     };
     document.getElementById("sessionDisplayName")?.addEventListener("change", event => {
       setDisplayName(event.target.value);
+      ensureIdentity(window.dfStablePlayerId || "").catch(() => {});
       message("Display name updated.");
     });
     [["setDisconnectPause", "disconnectPause"], ["setHostUnpause", "hostUnpauseOnly"],
@@ -184,24 +190,31 @@
         message(result.response.ok ? "Fortress save queued." : (result.body?.error || "Save failed."));
       } catch (_) { message("Save request failed."); }
     });
-    document.getElementById("sessionPasswordSet")?.addEventListener("click", async () => {
-      const input = document.getElementById("sessionPassword");
-      const password = String(input?.value || "");
-      if (!password) { message("Enter a password first."); return; }
-      try {
-        await updateConfig({ password });
-        cookieCredential(password);
-        input.value = "";
-        message("Join password updated.");
-      } catch (error) { message(error.message); }
-    });
-    document.getElementById("sessionPasswordOff")?.addEventListener("click", async () => {
-      try {
-        await updateConfig({ passwordOff: "true" });
-        clearCredential();
-        message("Join password disabled.");
-      } catch (error) { message(error.message); }
-    });
+  }
+
+  // Blocking mismatch screen: API-schema mismatches always block. Strict release deployments also
+  // block when plugin and web version/source receipts differ. Development deployments permit an
+  // exact-revision mismatch when the schemas remain compatible (web-only iteration).
+  function showCompatGate(info) {
+    const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g,
+      c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    const web = info && info.web;
+    const el = document.createElement("div");
+    el.id = "dfcCompatGate";
+    el.innerHTML = `<div class="dfc-compat-card">
+      <h2>Update mismatch</h2>
+      <p>${esc((info && info.reason) || "The plugin and web assets are from different builds.")}</p>
+      <div class="dfc-compat-ids">
+        <div>Plugin <b>v${esc(info && info.version)}</b>, schema <b>${Number(info && info.schema)}</b></div>
+        <div>Web <b>v${esc(web && web.version)}</b>, schema <b>${web ? Number(web.schema) : "?"}</b></div>
+        <div>Plugin source <b>${esc(info && info.sourceCommit)}</b></div>
+        <div>Web source <b>${esc(web && web.sourceCommit)}</b></div>
+      </div>
+      <p class="dfc-compat-fix">Redeploy both halves with tools/deploy.ps1. If the DLL is locked, close Dwarf Fortress first, reopen, then reload this page.</p>
+      <button id="dfcCompatReload">Reload</button></div>`;
+    document.body.appendChild(el);
+    const btn = document.getElementById("dfcCompatReload");
+    if (btn) btn.addEventListener("click", () => location.reload());
   }
 
   async function boot() {
@@ -209,19 +222,14 @@
     try {
       const version = await fetch("/version", { cache: "no-store" });
       const info = await version.json();
-      if (info.authRequired) {
-        const session = await fetch("/session", { cache: "no-store" });
-        if (session.status === 401) {
-          showJoinGate();
-          return;
-        }
-      }
+      if (info.compatible === false) { showCompatGate(info); return; }
+      if (info.warning) console.warn("DFCapture build identity:", info.warning, info);
       await refresh();
       setInterval(refresh, 3000);
     } catch (_) {}
   }
 
-  window.DFCaptureSession = { displayName, refresh, showJoinGate };
+  window.DFCaptureSession = { displayName, refresh, ensureIdentity };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
 })();

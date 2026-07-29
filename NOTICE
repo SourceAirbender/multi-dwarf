@@ -5,9 +5,9 @@ dfcapture is free software licensed under the GNU Affero General Public License,
 version 3.0 (AGPL-3.0-only). The complete license text is in the LICENSE file.
 
 dfcapture is a DFHack plugin and would not exist without the projects below. Their
-code and/or designs are used in accordance with their licenses, which are
-permissive and compatible with the AGPL. The required license texts are
-reproduced in full afterward.
+code and/or designs are used in accordance with their respective licenses. Code
+under the same AGPL-3.0-only license is covered by the LICENSE file; required
+permissive license texts are reproduced in full afterward.
 
 ================================================================================
 Third-party components and influences
@@ -19,6 +19,13 @@ DFHack
     License: Zlib
     Copyright (c) 2009-2012 Petr Mrazek and the DFHack contributors
     https://github.com/DFHack/dfhack
+
+Dwarf With Friends
+    Selected source files incorporate AGPL-licensed contributions from this
+    project and retain their file-level copyright notices.
+    License: AGPL-3.0-only
+    Copyright (C) 2026 Jake Taplin
+    https://github.com/JakesDwarfAccount/dwarf-with-friends
 
 DFPlex
     The multiplayer-Dwarf-Fortress DFHack plugin whose approach this project

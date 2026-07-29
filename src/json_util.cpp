@@ -21,6 +21,7 @@
 #include "json_util.h"
 
 #include "MiscUtils.h"
+#include "session_policy.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -46,8 +47,7 @@ bool is_safe_player_id(const std::string& player) {
 }
 
 std::string query_player(const httplib::Request& req) {
-    std::string player = req.has_param("player") ? req.get_param_value("player") : "default";
-    return is_safe_player_id(player) ? player : "default";
+    return session_request_player_id(req);
 }
 
 std::string json_escape(const std::string& raw) {

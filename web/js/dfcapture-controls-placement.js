@@ -24,7 +24,10 @@
       return;
     }
     try {
-      await fetch(`/action?player=${encodeURIComponent(player)}&action=${encodeURIComponent(action)}`, {
+      // Repeated delivery of the same request must not toggle the state twice.
+      const key = (self.crypto && self.crypto.randomUUID) ? self.crypto.randomUUID()
+        : (Date.now() + "-" + Math.random().toString(36).slice(2));
+      await fetch(`/action?player=${encodeURIComponent(player)}&action=${encodeURIComponent(action)}&key=${encodeURIComponent(key)}`, {
         method: "POST",
         cache: "no-store"
       });
@@ -274,7 +277,7 @@
   let plantMenuOpen = false;
   let smoothMenuOpen = false;
   let itemDesigMenuOpen = false;
-  // Dig-menu options (DF parity): priority 1-7 (default 4), marker mode, dig-through-warm/damp,
+  // Dig-menu options: priority 1-7 (default 4), marker mode, dig-through-warm/damp,
   // mine mode (0=all,1=automine,2=ore,3=gems), and whether the advanced options are expanded.
   let digPriority = 4;
   let markerMode = false;
@@ -1205,7 +1208,7 @@
       setTimeout(() => { if (dragPreview === held) { dragPreview = null; renderZoneOverlay(); } }, 380);
     }
   });
-  view.addEventListener("pointercancel", () => {
+  function cancelMapPointerGesture() {
     pdown = false;
     digSelect.style.display = "none";
     if (dragAnchor) {
@@ -1213,7 +1216,9 @@
       dragAnchor = null;
     }
     if (dragPreview) { dragPreview = null; renderZoneOverlay(); }
-  });
+  }
+  view.addEventListener("pointercancel", cancelMapPointerGesture);
+  window.dfcCancelMapPointerGesture = cancelMapPointerGesture;
 
   // --- DF-style hover tooltip: shows what's on the tile under the cursor ---
   const hoverInfo = document.getElementById("hoverInfo");

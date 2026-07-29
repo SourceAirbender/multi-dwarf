@@ -31,7 +31,9 @@
 #include "df/announcement_alertst.h"
 #include "df/announcement_handlerst.h"
 #include "df/announcement_type.h"
+#include "df/gamest.h"
 #include "df/global_objects.h"
+#include "df/plotinfost.h"
 #include "df/report.h"
 #include "df/unit.h"
 #include "df/unit_report_type.h"
@@ -169,6 +171,26 @@ bool build_notifications(const std::unordered_set<std::string>& dismissed,
     state = NotificationState{};
     state.next_report_id = world->status.next_report_id;
     state.report_count = static_cast<int32_t>(world->status.reports.size());
+    if (auto plotinfo = df::global::plotinfo) {
+        state.petitions_pending = static_cast<int32_t>(plotinfo->petitions.size());
+        state.diplomacy_meetings_queued =
+            static_cast<int32_t>(plotinfo->dipscript_popups.size());
+    }
+    if (auto game = df::global::game)
+        state.diplomacy_open = game->main_interface.diplomacy.open;
+
+    // This vector is DF's actual red ALERT plaque source. announcement_alert below is broader:
+    // it also drives ordinary category bubbles such as weather. Keep the two concepts separate
+    // so the browser plaque appears for exactly the reports that light native DF's ALERT button.
+    for (auto report_id : world->status.alert_button_announcement_id) {
+        std::string key = report_dismiss_key(report_id);
+        if (std::find(state.alert_button_dismiss_keys.begin(),
+                      state.alert_button_dismiss_keys.end(), key) ==
+            state.alert_button_dismiss_keys.end())
+            state.alert_button_dismiss_keys.push_back(key);
+        if (dismissed.find(key) == dismissed.end())
+            state.alert_button_active = true;
+    }
 
     std::unordered_map<int32_t, df::report*> reports_by_id;
     reports_by_id.reserve(world->status.reports.size());
@@ -342,6 +364,16 @@ std::string notifications_json(const std::string& player, const NotificationStat
     body << "{\"player\":" << json_string(player)
          << ",\"nextReportId\":" << state.next_report_id
          << ",\"reportCount\":" << state.report_count
+         << ",\"petitionsPending\":" << state.petitions_pending
+         << ",\"diplomacyMeetingsQueued\":" << state.diplomacy_meetings_queued
+         << ",\"diplomacyOpen\":" << (state.diplomacy_open ? "true" : "false")
+         << ",\"alertButtonActive\":" << (state.alert_button_active ? "true" : "false")
+         << ",\"alertButtonDismissKeys\":[";
+    for (size_t i = 0; i < state.alert_button_dismiss_keys.size(); ++i) {
+        if (i) body << ",";
+        body << json_string(state.alert_button_dismiss_keys[i]);
+    }
+    body << "]"
          << ",\"alerts\":[";
     for (size_t i = 0; i < state.alerts.size(); ++i) {
         if (i) body << ",";

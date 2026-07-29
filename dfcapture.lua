@@ -1324,8 +1324,9 @@ local function item_buildable(item)
     return true
 end
 
--- Does an item satisfy a building's job_item filter for material-grouping purposes? (item type +
--- subtype must match; mat_type < 0 means "any material", which is exactly what we want to enumerate.)
+-- Does an item satisfy a building's job_item filter? The DFHack helpers cover the raw/item/material
+-- flags encoded in job_item; the explicit type checks and building-material check cover properties
+-- that those helpers intentionally leave to their callers.
 local function item_matches_filter(filter, item)
     if filter.item_type ~= nil and filter.item_type >= 0 and item:getType() ~= filter.item_type then
         return false
@@ -1339,7 +1340,15 @@ local function item_matches_filter(filter, item)
             return false
         end
     end
-    return true
+    if filter.flags2 and filter.flags2.building_material and not item:isBuildMat() then
+        return false
+    end
+    local ok_item, suitable_item = pcall(
+        dfhack.job.isSuitableItem, filter, item:getType(), item:getSubtype())
+    if not ok_item or not suitable_item then return false end
+    local ok_mat, suitable_mat = pcall(
+        dfhack.job.isSuitableMaterial, filter, item:getMaterial(), item:getMaterialIndex(), item:getType())
+    return ok_mat and suitable_mat
 end
 
 -- List the AVAILABLE materials (grouped, with on-hand counts) for each requirement of a building,
@@ -1391,6 +1400,86 @@ function build_materials(token)
             ',"materials":[' .. table.concat(mats, ',') .. ']}')
     end
     return '{"ok":true,"requirements":[' .. table.concat(req_json, ',') .. ']}\n'
+end
+
+-- Exact selection is intentionally limited to finished-object buildings whose native placement
+-- consumes one item. Passing a partial item vector to constructBuilding bypasses its filter path,
+-- so component/quantity buildings must remain on ordinary filters.
+local SPECIFIC_ITEM_BUILDINGS = {
+    [df.building_type.Chair] = true, [df.building_type.Bed] = true,
+    [df.building_type.Table] = true, [df.building_type.Coffin] = true,
+    [df.building_type.Cabinet] = true, [df.building_type.Statue] = true,
+    [df.building_type.Slab] = true, [df.building_type.WindowGlass] = true,
+    [df.building_type.WindowGem] = true, [df.building_type.Box] = true,
+    [df.building_type.Bookcase] = true, [df.building_type.DisplayFurniture] = true,
+    [df.building_type.OfferingPlace] = true, [df.building_type.Instrument] = true,
+    [df.building_type.Weaponrack] = true, [df.building_type.Armorstand] = true,
+    [df.building_type.TractionBench] = true, [df.building_type.Door] = true,
+    [df.building_type.Hatch] = true, [df.building_type.GrateWall] = true,
+    [df.building_type.GrateFloor] = true, [df.building_type.BarsVertical] = true,
+    [df.building_type.BarsFloor] = true, [df.building_type.Floodgate] = true,
+    [df.building_type.Cage] = true, [df.building_type.Chain] = true,
+    [df.building_type.NestBox] = true, [df.building_type.Hive] = true,
+    [df.building_type.ArcheryTarget] = true,
+}
+
+local function exact_item_selection_supported(btype, filters)
+    return SPECIFIC_ITEM_BUILDINGS[btype] == true
+        and filters and #filters == 1 and (filters[1].quantity or 1) == 1
+end
+
+-- List the AVAILABLE specific ITEMS for supported single-item furniture. Read-only; runs under
+-- CoreSuspender. Bounded per requirement (kCap) so a huge fort cannot produce an unbounded response.
+function build_candidates(token)
+    local btype, subtype, custom = parse_token(token)
+    if not btype then return '{"ok":false,"error":"bad building token"}\n' end
+    local ok_f, filters = pcall(dfhack.buildings.getFiltersByType, {}, btype, subtype, custom)
+    if not ok_f or not filters then return '{"ok":false,"error":"no filters"}\n' end
+    if not exact_item_selection_supported(btype, filters) then
+        return '{"ok":true,"exactSelectionSupported":false,' ..
+            '"reason":"Specific selection is available only for single-item furniture.",' ..
+            '"requirements":[]}\n'
+    end
+    local kCap = 200
+    local items_vec = df.global.world.items.other.IN_PLAY
+    local req_json = {}
+    for fi, filter in ipairs(filters) do
+        local recs, total = {}, 0
+        for ii = 0, #items_vec - 1 do
+            local item = items_vec[ii]
+            if item_buildable(item) and item_matches_filter(filter, item) then
+                total = total + 1
+                if #recs < kCap then
+                    local q = 0
+                    pcall(function() q = item:getQuality() end)
+                    local name = 'item'
+                    pcall(function() name = dfhack.items.getDescription(item, 0, false) end)
+                    local p = item.pos or {}
+                    recs[#recs + 1] = { id = item.id, name = tostring(name), q = q,
+                        art = item.flags.artifact and true or false,
+                        x = p.x or -1, y = p.y or -1, z = p.z or -1 }
+                end
+            end
+        end
+        table.sort(recs, function(a, b)
+            if a.art ~= b.art then return a.art end   -- artifacts first
+            if a.q ~= b.q then return a.q > b.q end    -- then higher quality
+            return a.name < b.name
+        end)
+        local items_json = {}
+        for _, r in ipairs(recs) do
+            items_json[#items_json + 1] = '{"id":' .. r.id .. ',"name":' .. json_string(r.name) ..
+                ',"quality":' .. r.q .. ',"artifact":' .. json_bool(r.art) ..
+                ',"x":' .. r.x .. ',"y":' .. r.y .. ',"z":' .. r.z .. '}'
+        end
+        req_json[#req_json + 1] = '{"index":' .. (fi - 1) ..
+            ',"label":' .. json_string((filter.name and #tostring(filter.name) > 0) and tostring(filter.name) or 'Material') ..
+            ',"quantity":' .. tostring(filter.quantity or 1) ..
+            ',"total":' .. total .. ',"capped":' .. json_bool(total > kCap) ..
+            ',"items":[' .. table.concat(items_json, ',') .. ']}'
+    end
+    return '{"ok":true,"exactSelectionSupported":true,"requirements":[' ..
+        table.concat(req_json, ',') .. ']}\n'
 end
 
 -- Apply the browser's per-requirement material picks (opts.mat0, mat1, ... each "matType:matIndex")
@@ -1504,9 +1593,40 @@ local function plan_buildings(blds)
     return true, ''
 end
 
+-- Resolve one requested exact item and revalidate it immediately before construction. An item vector
+-- is all-or-nothing in DFHack, so unsupported or partial requests are rejected instead of silently
+-- bypassing the remaining filters.
+local function resolve_exact_items(btype, filters, opts)
+    local selected_key
+    for key, value in pairs(opts or {}) do
+        if tostring(key):match('^item%d+$') and value ~= nil and tostring(value) ~= '' then
+            if selected_key then return nil, 'select only one specific item' end
+            selected_key = tostring(key)
+        end
+    end
+    if not selected_key then return nil, nil end
+    if selected_key ~= 'item0' or not exact_item_selection_supported(btype, filters) then
+        return nil, 'this building does not accept a specific item'
+    end
+    local id = tonumber(opts.item0)
+    local item = id and df.item.find(id) or nil
+    if not item then return nil, 'the selected item no longer exists' end
+    if not item_buildable(item) then return nil, 'the selected item is no longer available' end
+    if not item_matches_filter(filters[1], item) then
+        return nil, 'the selected item no longer fits this building'
+    end
+    return {item}, nil
+end
+
 local function place_one(pos, btype, subtype, custom, width, height, direction, opts, full_rectangle)
     local filters = filters_for_building(btype, subtype, custom, opts)
     if not filters then return nil, 'building has no material filter' end
+    -- Exact-item picks (opts.itemN) are revalidated here, immediately before constructBuilding, so a
+    -- candidate that was forbidden/reserved/consumed since the browser listed it fails cleanly with no
+    -- world change instead of silently building from some other item. constructBuilding consumes the
+    -- item, so a rectangle that reuses one item fails its second placement's revalidation by design.
+    local items_list, item_err = resolve_exact_items(btype, filters, opts)
+    if item_err then return nil, item_err end
     local fields = {}
     if btype == df.building_type.SiegeEngine then
         fields.facing = direction
@@ -1515,7 +1635,7 @@ local function place_one(pos, btype, subtype, custom, width, height, direction, 
     local bld, err = dfhack.buildings.constructBuilding{
         pos=pos, type=btype, subtype=subtype, custom=custom,
         width=width, height=height, direction=direction,
-        filters=filters, fields=fields, full_rectangle=full_rectangle}
+        filters=filters, fields=fields, full_rectangle=full_rectangle, items=items_list}
     if not bld then return nil, tostring(err or 'could not place building') end
     apply_building_options(bld, btype, subtype, direction, opts)
     return bld, ''
@@ -1546,6 +1666,16 @@ function place_building(x1, y1, x2, y2, z, token, direction, options)
     local opts = parse_options(options)
     local bounds, err = map_bounds(x1, y1, x2, y2, z)
     if not bounds then return 0, -1, err end
+    local has_exact_item = false
+    for key, value in pairs(opts) do
+        if tostring(key):match('^item%d+$') and value ~= nil and tostring(value) ~= '' then
+            has_exact_item = true
+            break
+        end
+    end
+    if has_exact_item and (is_construction(btype) or is_variable_area(btype)) then
+        return 0, -1, 'specific item selection requires a single-item building'
+    end
     -- Resolve any "closest material" picks against the placement center before constructing.
     pcall(resolve_closest_materials, opts, btype, subtype, custom,
         math.floor((bounds.x1 + bounds.x2) / 2), math.floor((bounds.y1 + bounds.y2) / 2), bounds.z)
@@ -2606,6 +2736,13 @@ function location_detail_json(location_id)
         ',"restriction":' .. json_string(location_restriction(loc)) ..
         ',"tier":' .. (contents and tostring(contents.location_tier) or 'null') ..
         ',"value":' .. (contents and tostring(contents.location_value) or 'null') ..
+        -- DF stores no "next tier threshold"; the tier boundaries are hardcoded in the game, so we
+        -- report null with a capability flag rather than invent a value.
+        ',"nextTierValue":null' ..
+        ',"supportsInstruments":' .. json_bool(kind == 'tavern' or kind == 'temple') ..
+        ',"countInstruments":' .. (contents and tostring(contents.count_instruments) or 'null') ..
+        ',"desiredInstruments":' .. (contents and tostring(contents.desired_instruments) or 'null') ..
+        ',"needsInstruments":' .. (contents and json_bool(contents.need_more.instruments) or 'null') ..
         ',"zones":[' .. table.concat(zone_json, ',') .. ']' ..
         ',"occupancy":{"inside":' .. tostring(occ.inside) ..
             ',"citizens":' .. tostring(occ.citizens) ..
@@ -2791,7 +2928,7 @@ end
 --   occupation-assign  kind='<OCCUPATION_TYPE>' or 'id:<occupationId>', unit = unit id (-1 vacates)
 --   deity              kind='hf:<histfigId>' | 'religion:<entityId>'
 --   guild              kind='<PROFESSION>'
-function location_action(location_id, action, kind, unit_id)
+function location_action(location_id, action, kind, unit_id, value)
     local site = current_site()
     if not site then return false, 'current site unavailable' end
     local loc = find_location(site, tonumber(location_id) or -1)
@@ -2816,6 +2953,20 @@ function location_action(location_id, action, kind, unit_id)
             return false, 'rented-room writes remain disabled until rental-room coordinates are verified'
         end
         return false, 'rented-room writes not implemented'
+    elseif action == 'desired-instruments' then
+        -- Only taverns and temples store instruments; the write is a plain data set on the
+        -- location's contents plus the matching "needs more" bookkeeping bit, no native screen.
+        if not (location_kind(loc) == 'tavern' or location_kind(loc) == 'temple') then
+            return false, 'this location does not use instruments'
+        end
+        local contents = loc:getContents()
+        if not contents then return false, 'location has no contents' end
+        local v = tonumber(value)
+        if not v or v < 0 then return false, 'invalid desired instrument count' end
+        v = math.floor(math.min(v, 100))   -- bound against pathological input
+        contents.desired_instruments = v
+        contents.need_more.instruments = (contents.count_instruments or 0) < v
+        return true, ''
     end
     return false, 'unknown location action'
 end

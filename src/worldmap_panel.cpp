@@ -164,12 +164,8 @@ std::string build_worldmap_json(const std::string& player, std::string* err) {
         int32_t own_civ = plotinfo ? plotinfo->civ_id : -1;
         auto* fort_entity = df::historical_entity::find(own_group);
 
-        // Resolve the DF world-region name for the
-        // fort's own site the same way embark-assistant/prospector/probe do -- region_map is
-        // indexed by world-tile coords (same space as world_site::pos), region_map_entry's
-        // region_id is a direct index into world_data->regions
-        // (dfhack/plugins/embark-assistant/survey.cpp:1228 and probe.cpp:158). Bounds-checked;
-        // absent on a pocket/degenerate world or before region_map is populated -> "".
+        // region_map uses world-tile coordinates, and each entry's region_id indexes
+        // world_data->regions. Pocket worlds and early world loading may not provide the map.
         std::string region_name;
         for (auto site : wd->sites) {
             if (!site || site->id != own_site)

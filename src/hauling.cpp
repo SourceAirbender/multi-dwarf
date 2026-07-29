@@ -19,58 +19,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Hauling routes panel.
-// Ground truth 10-hauling.png: left panel "Add new route" + per-route rows (name, stops,
-// vehicle assignment, status icons). Mutations follow the exact same lock/allocation posture
-// as burrows_panel.cpp (df::global::plotinfo->hauling is well-typed: df::hauling_infost holds
-// routes/next_id; df::hauling_route/df::hauling_stop are plain heap structs with a single
-// shared id counter, same pattern as plotinfo->burrows.next_id).
-//
-// =============================================================================================
-// Hauling data model and vehicle invariants.
-// =============================================================================================
-// df-structures (<DFHACK_ROOT>\library\xml):
-//   df.hauling.xml:51  df::hauling_route   -- id, name, stops, vehicle_ids, vehicle_stops
-//   df.hauling.xml:37  df::hauling_stop    -- id, name, pos, settings, conditions, stockpiles,
-//                                             time_waiting, cart_id
-//   df.hauling.xml:17  df::stop_depart_condition -- timeout, direction, mode, load_percent,
-//                                             flags, guide_path
-//   df.hauling.xml:12  df::stop_leave_condition_flag -- at_most (USE_LESS), desired (DESIRED_ITEMS)
-//   df.hauling.xml:1   df::route_stockpile_link / stop_stockpile_link_flag (take/give)
-//   df.vehicle.xml:47  df::vehicle         -- id, item_id, route_id
-//   df.item.xml:1511   df::item_toolst::vehicle_id  (ref-target='vehicle')
-//   df.item.xml:522    df::item::getVehicleID()     (vmethod)
-//   df.dfhack.xml:620  df::coord_path      -- parallel int16 x/y/z vectors
-//
-// *** THE VEHICLE-ASSIGN WRITE WAS WRONG. *** hauling_route.vehicle_ids is declared
-//     <stl-vector type-name='int32_t' name="vehicle_ids" ref-target='vehicle'/>
-// -- it holds df::vehicle IDs. The original do_vehicle_assign() pushed the *ITEM* id (a
-// different id space entirely), never touched the PARALLEL vector `vehicle_stops`, and never
-// set `vehicle.route_id`. Consequences, all silent:
-//   * DF binsearches world.vehicles.active for vehicle_ids[i] -> finds the wrong cart or none;
-//   * vehicle_ids and vehicle_stops are indexed in lockstep by DF -- growing one and not the
-//     other is exactly the parallel-vector desync we are forbidden to ship;
-//   * nothing hauls, because both DF and DFHack (autolabor/labormanager.cpp:1394,
-//     Items::isRouteVehicle @ library/modules/Items.cpp:2044) key "this cart is on a route" off
-//     vehicle.route_id, which stayed -1 forever.
-// The corrected write set below is DFHack's own, copied field-for-field from its canonical
-// minecart assigner, scripts/assign-minecarts.lua::assign_minecart_to_route():
-//       route.vehicle_ids:insert('#', minecart.id)   -- VEHICLE id, not item id
-//       route.vehicle_stops:insert('#', 0)           -- parallel: index into route.stops
-//       minecart.route_id = route.id
-// and on release / route teardown:  vehicle.route_id = -1  before dropping the id.
-// That script also refuses to assign to a route with NO STOPS, and treats a route as holding a
-// single cart; both are honoured here.
-//
-// Runtime-owned fields that this module does not write:
-//   * stop_depart_condition.guide_path -- df-structures annotates it "initialized on first run,
-//     and saved". DF's pathfinder OWNS it. We SERIALIZE it read-only so the player can see the
-//     path their cart actually took, and never author it. See do_stop_condition_add().
-//   * hauling_stop.cart_id / time_waiting -- live runtime state DF maintains per tick.
-//   * df::vehicle allocation -- DF creates the vehicle record when the minecart is built; we
-//     only ever bind an EXISTING free vehicle (route_id == -1) to a route, exactly as
-//     assign-minecarts.lua does.
-// Offline tests assert both the write set and these refusal paths.
+// Hauling route vehicle state has three coupled fields: route.vehicle_ids stores vehicle IDs,
+// route.vehicle_stops stores the corresponding stop index, and vehicle.route_id points back to
+// the route. Assignment and teardown update all three together. Runtime path, cart, and waiting
+// fields remain owned by DF and are exposed read-only.
 
 #include "hauling.h"
 
@@ -187,9 +139,7 @@ bool item_is_minecart(df::item* item) {
     return false;
 }
 
-// item -> its df::vehicle, via the vmethod df-structures declares for exactly this
-// (df.item.xml:522); DFHack itself resolves a cart the same way in Items::isRouteVehicle
-// (library/modules/Items.cpp:2044-2047). Returns nullptr when the item has no vehicle record.
+// Resolve the vehicle record associated with an item, or nullptr if none exists.
 df::vehicle* vehicle_for_item(df::item* item) {
     if (!item)
         return nullptr;
@@ -199,8 +149,7 @@ df::vehicle* vehicle_for_item(df::item* item) {
     return df::vehicle::find(vid);
 }
 
-// plotinfo.hauling.view_routes, view_stops, and view_bad (df.hauling.xml
-// i_route / i_stop / i_stop_flag) are the native Hauling menu's SCREEN CACHES -- parallel
+// plotinfo.hauling.view_routes, view_stops, and view_bad are native Hauling menu caches -- parallel
 // vectors of raw pointers into the same route/stop objects the delete paths below free. DF
 // rebuilds them while the menu is open, but a browser-driven delete can land BETWEEN native
 // rebuilds; freeing a route/stop that is still cached leaves the native UI iterating dangling
@@ -227,8 +176,7 @@ void purge_view_route(df::plotinfost* plotinfo, df::hauling_route* route) {
     }
 }
 
-// Drop every vehicle binding a route holds, releasing each cart back to the free pool. Mirrors
-// the release loop in assign-minecarts.lua (vehicle.route_id = -1, then clear BOTH vectors).
+// Release every cart and clear both parallel route binding vectors.
 void release_route_vehicles(df::hauling_route* route) {
     if (!route)
         return;
@@ -272,7 +220,7 @@ void append_conditions(std::ostringstream& body, const df::hauling_stop* stop) {
              << ",\"desired\":" << (c->flags.bits.desired ? "true" : "false")
              << ",\"guidePath\":[";
         // Read-only: DF owns guide_path. Parallel int16 x/y/z vectors (df::coord_path,
-        // df.dfhack.xml:620); guard on the shortest in case DF is mid-write.
+        // Guard on the shortest coordinate vector in case DF is mid-write.
         size_t n = std::min(c->guide_path.x.size(),
                             std::min(c->guide_path.y.size(), c->guide_path.z.size()));
         for (size_t p = 0; p < n; ++p) {
@@ -299,10 +247,8 @@ void append_stockpiles(std::ostringstream& body, const df::hauling_stop* stop) {
     body << "]";
 }
 
-// The 17 group bits of df::hauling_stop.settings (a full df::stockpile_settings -- the SAME type
-// a stockpile carries, which is precisely why DFHack's stockpiles plugin edits a route stop with
-// its stockpile serializer: plugins/stockpiles/stockpiles.cpp:126 get_stop_settings()). This is
-// the stop's desired-items filter. Item-level detail is served by
+// A stop uses the same stockpile-settings type as a stockpile. This is the stop's desired-items
+// filter. Item-level detail is served by
 // /hauling-stop-settings-snapshot via the same Lua the stockpile editor already uses; here we
 // only summarise which top-level groups are on, so a stop row can say "wants: stone, wood".
 void append_desired_groups(std::ostringstream& body, const df::hauling_stop* stop) {
@@ -334,9 +280,7 @@ void append_stop(std::ostringstream& body, const df::hauling_stop* stop) {
     body << "}";
 }
 
-// Vehicles, told properly. vehicle_ids holds df::vehicle ids (df.hauling.xml:57, ref-target
-// 'vehicle'); vehicle_stops is its parallel vector of indexes into route->stops. The payload
-// includes each cart's item id and current stop.
+// vehicle_ids holds vehicle ids; vehicle_stops is its parallel vector of route-stop indexes.
 void append_route_vehicles(std::ostringstream& body, const df::hauling_route* route) {
     body << "[";
     for (size_t i = 0; i < route->vehicle_ids.size(); ++i) {
@@ -534,7 +478,7 @@ bool do_stop_remove(int32_t route_id, int32_t stop_id, std::string* err) {
         list.erase(it);
         delete stop;
 
-        // route->vehicle_stops holds indexes into route->stops (df.hauling.xml:58,
+        // route->vehicle_stops holds indexes into route->stops,
         // refers-to '$$._global.stops[$]'), so erasing a stop shifts every later index by one.
         // Erasing a stop shifts later indexes. Adjust them, and if the route
         // has no stops left, release the carts entirely (assign-minecarts.lua will not bind a
@@ -653,8 +597,7 @@ bool do_stop_condition_remove(int32_t route_id, int32_t stop_id, int index, std:
 // POST /hauling-vehicle-assign?route=&item=&on=1 -> bind/release a MINECART on a route.
 //
 // vehicle_ids stores df::vehicle ids and remains index-parallel with vehicle_stops.
-// The write set below is field-for-field DFHack's canonical assigner,
-// scripts/assign-minecarts.lua::assign_minecart_to_route():
+// The route and vehicle store the binding on both sides:
 //     route.vehicle_ids  += vehicle.id      (NOT item.id)
 //     route.vehicle_stops += 0              (parallel; index into route.stops)
 //     vehicle.route_id    = route.id
@@ -702,9 +645,7 @@ bool do_vehicle_assign(int32_t route_id, int32_t item_id, bool on, std::string* 
 
         if (present) return true;        // idempotent
         if (route->stops.empty()) {
-            // assign-minecarts.lua refuses this exact case ("Route %s has no stops defined.
-            // Cannot assign minecart."): vehicle_stops indexes into route.stops, so binding a
-            // cart to a stopless route would store an index into an empty vector.
+            // vehicle_stops indexes into route.stops, so a stopless route cannot own a cart.
             if (err) *err = "add at least one stop before assigning a minecart to this route";
             return false;
         }
@@ -764,12 +705,7 @@ void register_hauling_routes(httplib::Server& server) {
     auto route_remove_handler = [](const httplib::Request& req, httplib::Response& res) {
         int id = -1;
         if (!query_int(req, "id", id)) { json_error(res, 400, "missing id"); return; }
-        // Deleting a hauling route is available to every authenticated player. do_route_remove
-        // runs under CoreSuspender,
-        // releases the route's carts first, and purges the native Hauling menu's pointer
-        // caches (view_routes/view_stops) BEFORE freeing the route -- the same purge-before-free
-        // discipline the zone remove path uses. Unauthenticated callers are refused upstream by
-        // join-auth like every other mutation route.
+        // Release carts and purge native UI pointer caches before freeing the route.
         std::string err;
         if (!do_route_remove(id, &err)) { json_error(res, 400, err); return; }
         notify_player_input();
@@ -811,9 +747,7 @@ void register_hauling_routes(httplib::Server& server) {
             json_error(res, 400, "missing route/stop");
             return;
         }
-        // Same delete family as /hauling-route-remove: open to every authenticated player.
-        // do_stop_remove purges the native view_stops/view_bad caches before
-        // the free and fixes up vehicle_stop indexes, under CoreSuspender. Join-auth still applies.
+        // Purge native UI pointer caches and repair vehicle-stop indexes before freeing the stop.
         std::string err;
         if (!do_stop_remove(route_id, stop_id, &err)) { json_error(res, 400, err); return; }
         notify_player_input();
@@ -933,13 +867,8 @@ void register_hauling_routes(httplib::Server& server) {
     });
 
     // ------------------------------------------------------------------------------------------
-    // Per-stop desired items. df::hauling_stop.settings is a df::stockpile_settings, the
-    // very same struct a stockpile carries. DFHack banks on that identity: its stockpiles plugin
-    // edits a route stop by handing get_stop_settings() (plugins/stockpiles/stockpiles.cpp:126)
-    // to the same serializer it uses for piles. We do the same thing one layer up: the four
-    // endpoints below are the /stockpile-* settings editor pointed at a stop instead of a pile,
-    // and they run through the same dfcapture.lua SP_CATEGORIES machinery, which only
-    // ever touches `target.settings`. No second copy of the 17-category item filter exists.
+    // Per-stop desired items use the stockpile settings editor pointed at a route stop. The shared
+    // Lua category logic only touches target.settings, so there is one item-filter implementation.
     // ------------------------------------------------------------------------------------------
     // The per-stop item filter is the stockpile item editor pointed at the stop: route+stop replace
     // the stockpile id, and each call runs through the SAME dfcapture.lua machinery (hauling_stop_*

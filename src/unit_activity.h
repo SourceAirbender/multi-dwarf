@@ -57,8 +57,7 @@ private:
 // play, performance, conversation, sparring, drills, reading, research). Reading only the job
 // vector makes every activity read as idle.
 //
-// Activities hang off four purpose-specific unit vectors (df.unit.xml:2686-2689, DF original names
-// in parens):
+// Activities hang off four purpose-specific unit vectors:
 //   individual_drills  (personal_activity_id)  -- military drills, service orders
 //   social_activities  (shared_activity_id)    -- worship/prayer/socialize/play/perform/read/...
 //   conversations      (conv_activity_id)
@@ -66,15 +65,8 @@ private:
 // `ignored_activities` (ignore_activity_id) is deliberately omitted: DF's own name says it is not
 // current work.
 //
-// An entry holds a parent event plus newer subevents. DFHack's Units::getMainSocialEvent() defines
-// the current social event as the last event of the last social activity (Units.cpp:2017); we use
-// the same last/last rule on the three other unit-owned channels, and DFHack's own helper for the
-// social one rather than reimplementing it.
-//
-// PRECEDENT: DFHack's manipulator plugin establishes current_job before a social activity
-// (plugins/manipulator.cpp:1293-1305). No DFHack/native source available to us establishes an
-// overlap order among the four unit-side vectors, so preserve the established order here
-// of silently inventing one. The world index is strictly a fallback after all four cheap channels.
+// An entry holds a parent event plus newer subevents. The last event of the last activity is
+// current. A normal job wins over activities, and the world index is only a fallback.
 inline df::activity_event* last_unit_activity_event(const std::vector<int32_t>& activity_ids) {
     for (auto id = activity_ids.rbegin(); id != activity_ids.rend(); ++id) {
         auto activity = df::activity_entry::find(*id);
@@ -90,7 +82,7 @@ inline df::activity_event* unit_current_activity_event(df::unit* unit) {
     if (!unit)
         return nullptr;
 
-    // Use DFHack's canonical helper for the common path instead of reimplementing it.
+    // Use the shared social-event helper for the common path.
     if (auto event = DFHack::Units::getMainSocialEvent(unit))
         return event;
     if (auto event = last_unit_activity_event(unit->individual_drills))
@@ -105,12 +97,8 @@ inline bool is_idle_task_placeholder(const std::string& name) {
            name == "No activity" || name == "No Activity";
 }
 
-// DFHack's Job::getName invokes DF's interface_button_building_new_jobst::text vmethod with the
-// complete live job record, so it can interpolate material, item, reaction, and art-spec details.
-// The enum caption is DF structures' native generic label and is only a safety net. Three current
-// enum captions are themselves idle placeholders (DrinkBlood, HeistItem, AcceptHeistItem), and ten
-// reserved values have no caption; for those fallback cases, use DF structures' exact
-// generated enum key. No browser-authored wording enters this path.
+// The live job formatter can include material, item, reaction, and art details. Enum captions and
+// generated keys provide bounded fallbacks when no formatted label is available.
 inline std::string native_job_name(df::job* job) {
     if (!job)
         return {};
@@ -192,10 +180,8 @@ inline UnitTaskColorBucket activity_task_color_bucket(df::activity_event_type ty
     return UnitTaskColorBucket::None;
 }
 
-// Return DF's exact native current-task wording. `activity_event::getName` IS DF's own virtual
-// `get_idle_string` (df.activity.xml:178, vmethod slot 22), so every shipped event subclass -- all
-// 28 activity_event_type values, present and future -- composes its own label inside DF. We never
-// author a word. That is why this is not, and must never become, a local enum->label table: DF
+// Return the game's current-task wording through the activity's virtual formatter. Every event
+// subclass composes its own label, so this must not become a local enum-to-label table. The game
 // interpolates the deity ("Pray to Armok"), the topic ("Ponder Justice"), the toy, the value, the
 // per-participant role (organizer vs trainee), the travel prefixes ("Go to Sparring Match"), the
 // "/Resting" suffix, and the trailing '!' -- and it does so per-unit, which is why the vmethod takes

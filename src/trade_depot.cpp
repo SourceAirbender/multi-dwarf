@@ -28,6 +28,7 @@
 #include "http_server.h"
 #include "json_util.h"
 #include "lua_bridge.h"
+#include "native_trade_5315.h"
 #include "save_barrier.h"
 #include "sdl_capture.h"
 
@@ -68,13 +69,19 @@
 #include "df/plotinfost.h"
 #include "df/trade_interfacest.h"
 #include "df/tile_building_occ.h"
+#include "df/talk_line_type.h"
 #include "df/unit.h"
 #include "df/world.h"
 
 #include <mutex>
+#include <chrono>
+#include <climits>
+#include <iomanip>
+#include <random>
 #include <sstream>
 #include <stack>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -85,9 +92,38 @@ namespace {
 
 std::recursive_mutex g_depot_mutex;
 
-// Same lock discipline as fort_admin.cpp / squads.cpp: panel mutex -> capture-state mutex ->
-// CoreSuspender. Reads and mutations share the guard so iterating caravans / jobs / items never
-// races the sim.
+struct PendingCounterOffer {
+    std::string player;
+    int32_t depot_id = -1;
+    int32_t caravan_index = -1;
+    std::vector<NativeTradeSelection> merchant;
+    std::vector<NativeTradeSelection> fortress;
+    std::vector<int32_t> counter_offer_ids;
+    std::chrono::steady_clock::time_point expires;
+};
+
+std::unordered_map<std::string, PendingCounterOffer> g_pending_counteroffers;
+
+void purge_expired_counteroffers() {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = g_pending_counteroffers.begin(); it != g_pending_counteroffers.end();) {
+        if (it->second.expires <= now)
+            it = g_pending_counteroffers.erase(it);
+        else
+            ++it;
+    }
+}
+
+std::string counteroffer_token() {
+    static std::mt19937_64 random(std::random_device{}());
+    std::ostringstream out;
+    out << std::hex << std::setfill('0') << std::setw(16) << random()
+        << std::setw(16) << random();
+    return out.str();
+}
+
+// Lock order: panel mutex -> capture-state mutex -> CoreSuspender. Reads and mutations use the
+// same guard.
 template <typename Fn>
 bool run_depot_locked(Fn&& fn) {
     std::lock_guard<std::recursive_mutex> depot_lock(g_depot_mutex);
@@ -118,10 +154,8 @@ bool depot_built(df::building* b) {
     return b && b->getBuildStage() >= b->getMaxBuildStage();
 }
 
-// building_tradedepotst::accessible (original name: have_access) is caravan-maintained state,
-// not the live answer shown by DF's depot-access check. In particular, it can remain false when
-// no caravan is present. Mirror DFHack pathable's native-map wagon flood here, but seed it from
-// only the requested depot instead of combining every depot in the fort.
+// building_tradedepotst::accessible is caravan-maintained state and can remain false when no
+// caravan is present. Compute live wagon access from the requested depot instead.
 struct WagonFloodContext {
     uint16_t walk_group;
     std::unordered_set<df::coord> seen;
@@ -266,8 +300,7 @@ bool depot_accessible_by_wagons(df::building_tradedepotst* depot) {
 }
 
 // True iff the depot hosts a live TradeAtDepot job (the broker-comes-to-depot job DF spawns when
-// a trader is requested and a caravan is present). caravan.lua's `leave` reads/removes exactly
-// this job.
+// a trader is requested and a caravan is present).
 bool depot_has_trade_job(df::building_tradedepotst* depot) {
     for (auto* job : depot->jobs)
         if (job && job->job_type == df::job_type::TradeAtDepot)
@@ -339,7 +372,7 @@ std::string broker_json(const BrokerInfo& b) {
 }
 
 // ---------------------------------------------------------------------------
-// Caravans (plotinfo->caravans). Mirrors caravan.lua state/origin/day math.
+// Caravans from plotinfo->caravans.
 // ---------------------------------------------------------------------------
 std::string caravan_origin_name(df::caravan_state* car) {
     auto entity = df::historical_entity::find(car->entity);
@@ -404,8 +437,7 @@ void append_caravan_json(std::ostringstream& js, df::caravan_state* car, int idx
 }
 
 // ---------------------------------------------------------------------------
-// Tradeable-goods enumeration (mirrors movegoods.lua is_tradeable_item, default filters:
-// group off / inside_containers off -> in_inventory items are skipped).
+// Tradeable-goods enumeration excludes grouped container contents and inventory-held items.
 // ---------------------------------------------------------------------------
 bool item_hard_rejected(df::item* item) {
     auto& f = item->flags;
@@ -466,6 +498,7 @@ std::string build_depot_info_json(int32_t id, std::string* err) {
 
         // Count goods physically at the depot + pending haul jobs (cheap scans).
         int at_depot = 0, pending = 0;
+        std::vector<df::item*> construction_materials;
         {
             auto world = df::global::world;
             for (df::job_list_link* link = world->jobs.list.next; link; link = link->next) {
@@ -473,11 +506,15 @@ std::string build_depot_info_json(int32_t id, std::string* err) {
                 if (job && job->job_type == df::job_type::BringItemToDepot)
                     ++pending;
             }
-            // TEMP-role contained items are goods sitting at the depot for trade; PERM-role
-            // items are the depot's own construction materials (excluded) -- movegoods parity.
+            // TEMP-role items are trade goods at the depot; PERM-role items are the depot's own
+            // construction materials and must be excluded.
             for (auto* ci : depot->contained_items) {
-                if (ci && ci->item && ci->use_mode == df::building_item_role_type::TEMP)
+                if (!ci || !ci->item)
+                    continue;
+                if (ci->use_mode == df::building_item_role_type::TEMP)
                     ++at_depot;
+                else if (ci->use_mode == df::building_item_role_type::PERM)
+                    construction_materials.push_back(ci->item);
             }
         }
 
@@ -497,7 +534,16 @@ std::string build_depot_info_json(int32_t id, std::string* err) {
            << ",\"goodsAtDepot\":" << at_depot
            << ",\"pendingCount\":" << pending
            << ",\"broker\":" << broker_json(broker)
-           << ",\"caravans\":[";
+           << ",\"constructionMaterials\":[";
+        for (size_t i = 0; i < construction_materials.size(); ++i) {
+            auto* item = construction_materials[i];
+            if (i) js << ",";
+            js << "{\"id\":" << item->id
+               << ",\"desc\":" << json_string(DFHack::Items::getDescription(item, 0, false))
+               << ",\"forbidden\":" << (item->flags.bits.forbid ? "true" : "false")
+               << ",\"dump\":" << (item->flags.bits.dump ? "true" : "false") << "}";
+        }
+        js << "],\"caravans\":[";
         if (plotinfo) {
             bool first = true;
             for (size_t i = 0; i < plotinfo->caravans.size(); ++i) {
@@ -547,6 +593,7 @@ std::string build_depot_goods_json(int32_t id, bool all, std::string* err) {
             first = false;
             js << "{\"id\":" << item->id
                << ",\"desc\":" << json_string(item_display_name(item, 0, true))
+               << ",\"category\":" << json_string(DFHack::enum_item_key(item->getType()))
                << ",\"value\":" << value
                << ",\"dist\":" << dist
                << ",\"pending\":" << (pending ? "true" : "false")
@@ -564,6 +611,131 @@ std::string build_depot_goods_json(int32_t id, bool all, std::string* err) {
     if (!ok)
         return "";
     return js.str();
+}
+
+void append_barter_item_json(std::ostringstream& js, df::item* item,
+                             df::caravan_state* caravan) {
+    int32_t whole = 0, fraction = 0;
+    native_trade_item_mass(item, 0, &whole, &fraction);
+    js << "{\"id\":" << item->id
+       << ",\"desc\":" << json_string(item_display_name(item, 0, true))
+       << ",\"category\":" << json_string(DFHack::enum_item_key(item->getType()))
+       << ",\"value\":" << native_trade_item_value(item, caravan, 0)
+       << ",\"stack\":" << std::max(1, item->getStackSize())
+       << ",\"massWhole\":" << whole
+       << ",\"massFraction\":" << fraction
+       << ",\"artifact\":" << (item->flags.bits.artifact ? "true" : "false")
+       << ",\"foreign\":" << (item->flags.bits.foreign ? "true" : "false")
+       << "}";
+}
+
+std::string build_barter_json(int32_t id, int32_t caravan_index, std::string* err) {
+    std::ostringstream js;
+    bool ok = run_depot_locked([&]() -> bool {
+        auto* depot = resolve_depot(id);
+        if (!depot) { if (err) *err = "not a trade depot"; return false; }
+        df::trade_interfacest state;
+        int32_t resolved_index = -1;
+        if (!native_trade_prepare(depot, caravan_index, state, &resolved_index, err))
+            return false;
+        std::string civ = state.civ
+            ? DFHack::Translation::translateName(&state.civ->name, false)
+            : std::string();
+        js << "{\"ok\":true,\"nativeVersion\":\"53.15\""
+           << ",\"depotId\":" << id
+           << ",\"caravanIndex\":" << resolved_index
+           << ",\"merchantCiv\":" << json_string(civ)
+           << ",\"talker\":" << json_string(state.talker)
+           << ",\"fortressTrader\":"
+           << json_string(state.fortress_trader
+                ? DFHack::Units::getReadableName(state.fortress_trader) : std::string())
+           << ",\"merchantMood\":" << state.mer->mood
+           << ",\"merchant\":[";
+        for (size_t i = 0; i < state.good[0].size(); ++i) {
+            if (i) js << ",";
+            append_barter_item_json(js, state.good[0][i], state.mer);
+        }
+        js << "],\"fortress\":[";
+        for (size_t i = 0; i < state.good[1].size(); ++i) {
+            if (i) js << ",";
+            append_barter_item_json(js, state.good[1][i], state.mer);
+        }
+        js << "]}\n";
+        return true;
+    });
+    return ok ? js.str() : std::string();
+}
+
+bool parse_trade_selections(const std::string& raw,
+                            std::vector<NativeTradeSelection>* out,
+                            std::string* err) {
+    out->clear();
+    if (raw.empty())
+        return true;
+    size_t start = 0;
+    while (start < raw.size()) {
+        size_t comma = raw.find(',', start);
+        std::string part = raw.substr(start,
+            comma == std::string::npos ? std::string::npos : comma - start);
+        size_t colon = part.find(':');
+        std::string id_text = part.substr(0, colon);
+        std::string amount_text = colon == std::string::npos ? "0" : part.substr(colon + 1);
+        try {
+            size_t id_used = 0, amount_used = 0;
+            long id = std::stol(id_text, &id_used);
+            long amount = std::stol(amount_text, &amount_used);
+            if (id_used != id_text.size() || amount_used != amount_text.size() ||
+                id < 0 || id > INT32_MAX || amount < 0 || amount > INT32_MAX) {
+                if (err) *err = "invalid trade selection";
+                return false;
+            }
+            out->push_back({static_cast<int32_t>(id), static_cast<int32_t>(amount)});
+        } catch (...) {
+            if (err) *err = "invalid trade selection";
+            return false;
+        }
+        if (comma == std::string::npos)
+            break;
+        start = comma + 1;
+    }
+    return true;
+}
+
+std::string talkline_message(int32_t talkline) {
+    switch (static_cast<df::talk_line_type>(talkline)) {
+    case df::talk_line_type::Trade:
+        return "The merchants have agreed to the trade.";
+    case df::talk_line_type::CounterOffer:
+        return "The merchants will agree if you include their requested counteroffer.";
+    case df::talk_line_type::CouldNotFindCounterOffer1:
+    case df::talk_line_type::CouldNotFindCounterOffer2:
+        return "The offer is too low, and the merchants could not find a suitable counteroffer.";
+    case df::talk_line_type::NoMoreTradeHaggleFailure:
+        return "The merchants have lost patience and will not trade further.";
+    case df::talk_line_type::ICannotAfford:
+        return "The merchants cannot carry or afford this exchange.";
+    case df::talk_line_type::YouCannotAfford:
+        return "Your offer is not sufficient.";
+    case df::talk_line_type::AnimalTreeReject:
+    case df::talk_line_type::AnimalReject:
+    case df::talk_line_type::TreeReject:
+    case df::talk_line_type::LiveAnimalReject:
+        return "The merchants reject one or more restricted goods.";
+    case df::talk_line_type::NoGoods:
+    case df::talk_line_type::NoGoods1:
+    case df::talk_line_type::NoGoods2:
+        return "No goods are selected.";
+    case df::talk_line_type::FortNone:
+    case df::talk_line_type::FortNone1:
+    case df::talk_line_type::FortNone2:
+        return "Select fortress goods to offer.";
+    case df::talk_line_type::TraderNone:
+    case df::talk_line_type::TraderNone1:
+    case df::talk_line_type::TraderNone2:
+        return "Select merchant goods to receive.";
+    default:
+        return "The merchants declined this exchange.";
+    }
 }
 
 std::string build_trade_status_json(int32_t id, std::string* err) {
@@ -598,7 +770,7 @@ std::string build_trade_status_json(int32_t id, std::string* err) {
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------
-// Mark / unmark ONE item for trade at this depot. Mirrors movegoods.lua onDismiss exactly:
+// Mark or unmark one item for trade at this depot:
 //   on=1, item already at depot (holder==depot) -> item.flags.in_building = true
 //   on=1, otherwise -> clear forbid + Items::markForTrade(item, depot)  [creates BringItemToDepot]
 //   on=0, item has a BringItemToDepot job -> Job::removeJob(job)
@@ -643,9 +815,8 @@ int do_depot_mark(int32_t id, int32_t item_id, bool on, std::string* err) {
     return result;
 }
 
-// Toggle the depot's trade flags. request: set/clear trader_requested (the exact bit DF's own
-// "Request trader at depot" checkbox writes). When clearing, also remove any live TradeAtDepot
-// job on the depot (caravan.lua `leave` parity). anyone: set/clear anyone_can_trade.
+// Toggle the depot's trade flags. Clearing trader_requested also removes any live TradeAtDepot
+// job on the depot. The anyone parameter controls anyone_can_trade.
 bool do_depot_broker(int32_t id, bool has_request, bool request, bool has_anyone, bool anyone,
                      std::string* err) {
     return run_depot_locked([&]() -> bool {
@@ -654,7 +825,7 @@ bool do_depot_broker(int32_t id, bool has_request, bool request, bool has_anyone
         if (has_request) {
             depot->trade_flags.bits.trader_requested = request;
             if (!request) {
-                // Recall: drop the broker's TradeAtDepot job (mirrors caravan.lua leave).
+                // Recalling the broker removes the active TradeAtDepot job.
                 for (auto* job : depot->jobs) {
                     if (job && job->job_type == df::job_type::TradeAtDepot) {
                         DFHack::Job::removeJob(job);
@@ -765,26 +936,152 @@ void register_trade_depot_routes(httplib::Server& server) {
         set_no_store_json(res, json);
     });
 
-    // /depot-trade requires an atomic transaction through DF's native trade state.
+    // GET /depot-trade?id=[&caravan=] -> live merchant + fortress barter inventories.
+    // This builds a transient closed trade_interfacest. It never opens or drives the host UI.
+    server.Get("/depot-trade", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1, caravan = -1;
+        if (!query_int(req, "id", id)) { json_error(res, 400, "missing id"); return; }
+        if (req.has_param("caravan") && !query_int(req, "caravan", caravan)) {
+            json_error(res, 400, "invalid caravan"); return;
+        }
+        std::string err;
+        std::string json = build_barter_json(id, caravan, &err);
+        if (json.empty()) {
+            json_error(res, 409, err.empty() ? "barter is not ready" : err);
+            return;
+        }
+        set_no_store_json(res, json);
+    });
+
+    // POST /depot-trade
+    //   action=trade  merchant=id:amount,... fort=id:amount,...
+    //   action=accept token=<server-held-counteroffer-token>
+    //   action=decline token=<server-held-counteroffer-token>
     //
-    // The barter write-set includes ownership, trader flags, caravan counters, merchant state,
-    // entity resources, and history events. It must not be hand-written. Selection, commit, offer,
-    // seize, and counter-offer actions remain unavailable until they can be applied atomically
-    // through DF's native transaction.
-    // The barter transaction is not available until selection writes and the native commit can
-    // be performed atomically and safely. Until then both routes return 501 so the frontend can
-    // direct players to DF's own trade screen. The rest of the depot panel (goods, marking,
-    // broker request, and trade status) remains fully available.
-    auto trade_screen_stub = [](const httplib::Request& req, httplib::Response& res) {
-        (void)req;
-        res.status = 501;
-        res.set_header("Cache-Control", "no-store");
-        res.set_content("{\"ok\":false,\"error\":\"barter remains native-only; goods marked here "
-                        "reach the depot, but complete the trade in Dwarf Fortress\"}\n",
-                        "application/json; charset=utf-8");
-    };
-    server.Get("/depot-trade", trade_screen_stub);
-    server.Post("/depot-trade", trade_screen_stub);
+    // Only the selection vectors are assembled here. Steam DF 53.15's standalone native barter
+    // function owns counteroffer choice and the complete item/caravan/entity/history mutation.
+    // Counteroffer acceptance is server-held so a client cannot forge the bypass flag.
+    server.Post("/depot-trade", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1, caravan = -1;
+        if (!query_int(req, "id", id)) { json_error(res, 400, "missing id"); return; }
+        if (req.has_param("caravan") && !query_int(req, "caravan", caravan)) {
+            json_error(res, 400, "invalid caravan"); return;
+        }
+        const std::string player = query_player(req);
+        const std::string action = req.has_param("action")
+            ? req.get_param_value("action") : "trade";
+        const std::string token = req.has_param("token")
+            ? req.get_param_value("token") : std::string();
+
+        if (action == "decline") {
+            bool removed = false;
+            run_depot_locked([&]() -> bool {
+                purge_expired_counteroffers();
+                auto it = g_pending_counteroffers.find(token);
+                if (it != g_pending_counteroffers.end() && it->second.player == player &&
+                    it->second.depot_id == id) {
+                    g_pending_counteroffers.erase(it);
+                    removed = true;
+                }
+                return true;
+            });
+            if (!removed) { json_error(res, 404, "counteroffer expired or not found"); return; }
+            set_no_store_json(res, "{\"ok\":true,\"declined\":true}\n");
+            return;
+        }
+
+        std::vector<NativeTradeSelection> merchant, fortress;
+        std::vector<int32_t> counter_ids;
+        bool accepting = action == "accept";
+        if (accepting) {
+            std::string lookup_error;
+            bool found = run_depot_locked([&]() -> bool {
+                purge_expired_counteroffers();
+                auto it = g_pending_counteroffers.find(token);
+                if (it == g_pending_counteroffers.end() || it->second.player != player ||
+                    it->second.depot_id != id) {
+                    lookup_error = "counteroffer expired or not found";
+                    return false;
+                }
+                caravan = it->second.caravan_index;
+                merchant = it->second.merchant;
+                fortress = it->second.fortress;
+                counter_ids = it->second.counter_offer_ids;
+                // Consume before commit. A lost HTTP response can never replay an atomic trade.
+                g_pending_counteroffers.erase(it);
+                return true;
+            });
+            if (!found) { json_error(res, 409, lookup_error); return; }
+        } else if (action == "trade") {
+            std::string parse_error;
+            const std::string merchant_raw = req.has_param("merchant")
+                ? req.get_param_value("merchant") : std::string();
+            const std::string fort_raw = req.has_param("fort")
+                ? req.get_param_value("fort") : std::string();
+            if (!parse_trade_selections(merchant_raw, &merchant, &parse_error) ||
+                !parse_trade_selections(fort_raw, &fortress, &parse_error)) {
+                json_error(res, 400, parse_error); return;
+            }
+        } else {
+            json_error(res, 400, "unknown trade action");
+            return;
+        }
+
+        NativeTradeOfferResult result;
+        std::string execute_error;
+        std::string response;
+        bool executed = run_depot_locked([&]() -> bool {
+            auto* depot = resolve_depot(id);
+            if (!depot) { execute_error = "not a trade depot"; return false; }
+            if (!native_trade_execute(depot, caravan, merchant, fortress, counter_ids,
+                                      accepting, &result, &execute_error))
+                return false;
+
+            std::string pending_token;
+            if (result.counter_offer && !accepting) {
+                PendingCounterOffer pending;
+                pending.player = player;
+                pending.depot_id = id;
+                pending.caravan_index = caravan;
+                pending.merchant = merchant;
+                pending.fortress = fortress;
+                pending.counter_offer_ids = result.counter_offer_ids;
+                pending.expires = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+                pending_token = counteroffer_token();
+                g_pending_counteroffers.emplace(pending_token, std::move(pending));
+            }
+
+            std::ostringstream js;
+            js << "{\"ok\":true"
+               << ",\"committed\":" << (result.committed ? "true" : "false")
+               << ",\"counterOffer\":" << (result.counter_offer ? "true" : "false")
+               << ",\"talkline\":" << result.talkline
+               << ",\"message\":" << json_string(talkline_message(result.talkline))
+               << ",\"merchantValue\":" << result.merchant_value
+               << ",\"fortressValue\":" << result.fortress_value;
+            if (!pending_token.empty())
+                js << ",\"token\":" << json_string(pending_token);
+            js << ",\"counterItems\":[";
+            for (size_t i = 0; i < result.counter_offer_ids.size(); ++i) {
+                if (i) js << ",";
+                int32_t item_id = result.counter_offer_ids[i];
+                auto* item = df::item::find(item_id);
+                js << "{\"id\":" << item_id
+                   << ",\"desc\":" << json_string(item
+                        ? item_display_name(item, 0, true) : std::string("Unavailable item"))
+                   << "}";
+            }
+            js << "]}\n";
+            response = js.str();
+            return true;
+        });
+        if (!executed) {
+            json_error(res, 409, execute_error.empty() ? "trade could not be applied" : execute_error);
+            return;
+        }
+        notify_player_input();
+        set_no_store_json(res, response);
+    });
 }
 
 } // namespace dfcapture

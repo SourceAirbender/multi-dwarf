@@ -1,102 +1,131 @@
-# Multi Dwarf / dfcapture — multiplayer Dwarf Fortress in your browser
+# Multi Dwarf / DFCapture — multiplayer Dwarf Fortress in your browser
 
 A [DFHack](https://github.com/DFHack/dfhack) plugin that lets several people watch and
-play **one shared Dwarf Fortress** from a web browser. The host runs the game & everyone
-else opens a URL and gets their own independent camera, designations, menus, and HUD streamed live.
+play **one shared Dwarf Fortress** through a web browser. The host runs the actual game &
+everyone else opens a link and gets their own independent camera, controls, menus, and HUD.
 
-[Video showcase of the mod -older version though-](https://www.youtube.com/watch?v=5uvzqwSsfbQ)
+The big thing I wanted to preserve is that this still looks like Dwarf Fortress. The browser is
+showing the game's real rendered pixels, and the streaming has been improved so it can send only the parts of the screen that changed.
 
+[Video showcase of the mod — older version though](https://www.youtube.com/watch?v=5uvzqwSsfbQ)
 
-## Important Notes
+## What can you do with it?
 
-Would highly, highly recommend playing without the portraits, this feature is experimental and causes the game to crash frequently when the host
-opens the Residents menu, or when both the host & remote player have the same unit window open.
+- Every player gets their own camera, zoom, elevation, follow mode, cursors, pings, and bookmarks.
+- Mine, chop trees, gather plants, smooth, engrave, build, place exact furniture, and manage
+  stockpiles, zones, burrows, and hauling routes.
+- Manage work orders, labors, workshops, kitchen rules, standing orders, squads, uniforms,
+  schedules, hospitals, locations, nobles, and most everyday fortress administration.
+- Use the trade depot and barter with merchants without taking over whatever the host is doing.
+- See alerts, petitions, diplomacy, reports, native popups, announcements, and what happened since
+  you last connected.
+- Chat, see what the other players are doing, and attribute buildings, zones, stockpiles, and work
+  orders to the player who created them.
+- Assign dwarves to players, favorite up to five of them, and keep small MMO-style HUDs open for
+  their health and current activity.
+- Player owned dwarves! Assign dwarves to yourself and favorite them to add them to your HUD.
 
-![settings](img/settings.png)
+## Important notes
 
-Please collect crash logs and include them when submitting issues, lots to work on still!
+This version is built for:
 
-If the remote player interacts with the game while the game is saving on the host side, your game will probably crash!
+- **Dwarf Fortress 53.15**
+- **DFHack 53.15-r1**
+- **Windows x64**
+- **Fortress mode**
 
+The versions have to match. The plugin will not load in a different DFHack version. Apparently this works with Linux with Proton though.
+
+This is meant for a trusted LAN or private VPN. I use PiVPN / WireGuard; Tailscale also works. Don't
+forward the server port directly to the public internet.
+
+Remote interaction is blocked while the host is saving, loading, or shutting down. The browser will
+pause and show a notice until the fortress is ready again.
+
+Please keep normal fortress backups and include your DFHack logs when reporting a crash.
 
 ## Install
 
-1. Download the latest `dfcapture-…-DFHack-53.15-r1.zip` from the
+1. Install **DFHack 53.15-r1 directly into your Dwarf Fortress game folder**.
+2. Download `dfcapture-v0.9.46-DFHack-53.15-r1.zip` from the
    [**Releases**](../../releases) page.
-2. Extract it, then copy the **`hack`** folder into your Dwarf Fortress directory — the
-   one that already contains a `hack` folder (your DFHack install). This mod doesn't currently work with the Steam version of DFHack. DFHack has to be installed the old way, directly into your Dwarf Fortress directory
-3. Start the game through DFHack as usual.
+3. Extract it, then copy the included **`hack`** folder into the Dwarf Fortress folder that contains
+   `Dwarf Fortress.exe`. Merge it with the `hack` folder that is already there.
+4. Start Dwarf Fortress normally with DFHack loaded.
 
+The separate Steam `DFHack` folder is not the install for this plugin. The files need to be in
+the actual Dwarf Fortress game folder. DFHack needs to be installed the old way:
 
-```
+```text
 <Dwarf Fortress>/hack/
-├── plugins/dfcapture.plug.dll        the plugin
-├── dfcapture-web/                    the browser UI
-├── lua/plugins/dfcapture.lua         plugin support code
-└── scripts/gui/dfcapture.lua         the in-game control window
+|-- plugins/dfcapture.plug.dll        the plugin
+|-- dfcapture-web/                    the browser UI
+|-- lua/plugins/dfcapture.lua         plugin support code
+`-- scripts/gui/dfcapture.lua         the in-game control window
 ```
-
-> **Version must match.** The `.plug.dll` only loads in the exact DFHack version it was
-> built for (53.15-r1).
 
 ## Usage
 
-In-game, open the DFHack launcher (**Ctrl-Shift-D**) and run **`gui/dfcapture`**. A small
-window lets you **Start/Stop** the server, pick the **port**, choose **who can connect**
-(your network vs. this PC only (for testing))
+In-game, open the DFHack launcher (**Ctrl-Shift-D**) and run:
 
-![GUI1](img/gui1.png)
+```text
+gui/dfcapture
+```
 
-and
+A small window lets you start/stop the server
 
-![GUI2](img/gui2.png)
+![DFCapture server window](img/gui1.png)
 
-Give every viewer a link with their **own unique name** on the end:
+![DFCapture player link](img/gui2.png)
 
-- **You** connect at `http://localhost:8765/view?player=YOURNAME`.
-- **Friends** connect at `http://<your-LAN-IP>:8765/view?player=THEIRNAME` (find `<your-LAN-IP>`
-  by running `ipconfig` and reading the IPv4 Address; they must be on the same network or reach
-  you through a forwarded port / VPN). I use PiVPN / WireGuard. Tailscale also works.
-- Example after starting the server: http://192.168.1.202:8765/view?player=player1
+Give every viewer a link with their **own unique name** at the end:
 
-Use a different name per viewer. You can use the same link as the host locally to see what your remote player is seeing, if you want.
+- **You:** `http://localhost:8765/view?player=YOURNAME`
+- **Friends:** `http://<your-LAN-IP>:8765/view?player=THEIRNAME`
+- **Example:** `http://192.168.1.202:8765/view?player=player1`
 
-If you prefer the command line, after the fortress is loaded, you can use `capture-stream-start 8765 0.0.0.0` and does the same thing, and
-`capture-stream-stop` ends it. To put the window on a hotkey, add to
-`<Dwarf Fortress>/hack/dfhack.init`:
+Friends need to be on the same network or connected through your private VPN.
 
-For example: `& '<Dwarf Fortress>\hack\dfhack-run.exe' capture-stream-start 8765 0.0.0.0`
+Use a different name for each viewer. You can also open another player's link locally if you want
+to see exactly what they are seeing.
 
+If you prefer the command line, load a fortress and use:
 
+```text
+capture-stream-start 8765 0.0.0.0
+capture-stream-stop
+```
 
 ## Build from source (developers)
 
-This is an *external* DFHack plugin so it builds as part of the DFHack source tree.
+This is an *external* DFHack plugin, so it builds as part of a matching DFHack source tree.
 
 1. Clone DFHack at the matching tag, with submodules:
-   ```
+
+   ```powershell
    git clone --recursive --branch 53.15-r1 https://github.com/DFHack/dfhack
    ```
-2. Clone this repo into `dfhack/plugins/external/dfcapture/`.
-3. Configure and build just this plugin (needs the DFHack build prerequisites, please see the
-   [DFHack build docs](https://docs.dfhack.org/en/stable/docs/dev/compile/index.html);
-   I used Visual Studio 2022):
-   ```
-   cmake -S dfhack -B dfhack/build -GNinja -DDFHACK_BUILD_ARCH=64 -DCMAKE_BUILD_TYPE=Release
-   ninja -C dfhack/build dfcapture_public
-   ```
-   The result is `dfcapture.plug.dll`. Copy it (plus `web/`, `dfcapture.lua`, and
-   `scripts/gui/dfcapture.lua`) into your DF `hack/` folder as shown above.
 
-cpp-httplib is vendored in `third_party/cpp-httplib/`, so no external checkout is needed.
+2. Clone this repository into `dfhack/plugins/external/dfcapture_public/`.
+3. Configure DFHack using its normal Windows build instructions. I use Visual Studio 2022.
+4. Build just this plugin:
+
+   ```powershell
+   cmake --build dfhack/build/VC2022 --config Release --target dfcapture_public
+   ```
+
+The result is `dfcapture.plug.dll`. Copy it, the `web/` directory, `dfcapture.lua`, and
+`scripts/gui/dfcapture.lua` into the matching locations shown above.
+
+`cpp-httplib` is vendored in `third_party/cpp-httplib/`, so no extra checkout is needed.
 
 
 ## License
 
-dfcapture is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0-only) —
-see [LICENSE](LICENSE). Because it serves over a network, the AGPL also requires offering
-the source to people who use it remotely.
+DFCapture is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0-only) —
+see [LICENSE](LICENSE). Because it serves over a network, the AGPL also requires offering the
+source to people who use it remotely.
 
 It builds on **DFHack** (Zlib), continues the approach of **DFPlex** (Zlib), descends from
-**webfort** (ISC), and embeds **cpp-httplib** (MIT). Full attributions and their license
-texts are in [NOTICE](NOTICE).
+**webfort** (ISC), and embeds **cpp-httplib** (MIT). Full third-party notices and license text are
+in [NOTICE](NOTICE).

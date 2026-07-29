@@ -84,12 +84,8 @@ void json_error(httplib::Response& res, int status, const std::string& message) 
 }
 
 // Per-row brew toggle. Native DF shows cook and brew controls for each
-// plant). DFHack's Kitchen module only wraps the Cook half (allowPlantSeedCookery/
-// isSeedCookeryAllowed); the same exclusion-list primitives (findExclusion/addExclusion/
-// removeExclusion) also carry a Brew bit (df::kitchen_exc_type.bits.Brew) for the PLANT item
-// type against the plant's "drink" material def -- exactly the plant_raw_flags::DRINK-flagged
-// crops (plump helmets etc.) DF lets you brew. Mirrors Kitchen::allow/denyPlantSeedCookery's own
-// shape, just for the Brew bit instead of Cook.
+// plant). Brew exclusions use df::kitchen_exc_type.bits.Brew for the PLANT item type against the
+// drink material definition used by plant_raw_flags::DRINK crops.
 df::kitchen_exc_type brew_exc_type() {
     df::kitchen_exc_type type;
     type.bits.Brew = true;
@@ -112,9 +108,9 @@ df::kitchen_exc_type cook_exc_type() {
 // material has no [EDIBLE_COOKED] (vanilla_plants/plant_standard.txt:
 // ROPE_REED's STRUCTURAL template has no EDIBLE_COOKED; its SEED template does). Without a PLANT
 // row that tri-state has nowhere to live. Its cook exclusion is keyed on the item's OWN material,
-// which is exactly Kitchen::isPlantCookeryAllowed's key (DFHack Kitchen.cpp:95-97), so the
+// which is the plant-cookery key, so the
 // existing (type, mat, matIndex) toggle addressing drives it correctly with no new route.
-// item_type enum: df.d_basics.xml:11540.
+// Item categories use the live item_type enum.
 bool is_cookable_item_type(df::item_type t) {
     switch (t) {
         case df::item_type::MEAT:
@@ -136,7 +132,7 @@ bool plant_brew_capable(df::plant_raw* type) {
 }
 
 // DF's source of truth for cook capability is the material's
-// `material_flags::EDIBLE_COOKED` bit (df/material_flags.h:18), i.e. the raws' [EDIBLE_COOKED]
+// `material_flags::EDIBLE_COOKED` bit, i.e. the raws' [EDIBLE_COOKED]
 // token. It is what separates native's GREY (CANNOT) from RED (RESTRICTED: possible, but the
 // player put it on the kitchen exclusion list). Representative raw definitions:
 //   plant_standard.txt PLANT:ROPE_REED  STRUCTURAL -> no EDIBLE_COOKED   -> native cook = GREY
@@ -257,7 +253,7 @@ std::string build_kitchen_json(const std::string& player, std::string* err) {
             bool brew_capable = plant_brew_capable(plant);
             bool brew_allowed = brew_capable && is_brew_allowed(plant);
             // The cook cell on a plant row is the seed toggle (allow/denyPlantSeedCookery,
-            // exclusion key = item_type::SEEDS + the seed material -- DFHack Kitchen.cpp:107-109),
+            // exclusion key = item_type::SEEDS + the seed material),
             // so `cookCapable` here is the capability of THAT material: the seed's EDIBLE_COOKED.
             // `plantCookCapable` is the structural material's, the twin of `plantCookAllowed`.
             // Emitting both keeps every cell honest about the toggle that sits behind it.

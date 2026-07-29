@@ -146,6 +146,35 @@
     </section>`;
   }
 
+  // Instruments: only taverns/temples store them (backend sets supportsInstruments). Current/desired
+  // counts and the "needs more" flag come straight from the location's contents; the desired count is
+  // a plain data write (no native screen). nextTierValue is null unless DF exposes a real threshold.
+  function instrumentsMarkup(data) {
+    if (!data || !data.supportsInstruments) return "";
+    const cur = Number(data.countInstruments);
+    const des = Number(data.desiredInstruments);
+    const curTxt = Number.isFinite(cur) ? cur : "?";
+    const desTxt = Number.isFinite(des) ? des : "?";
+    const needs = data.needsInstruments === true;
+    const valNum = Number(data.value);
+    const valueLine = Number.isFinite(valNum)
+      ? `<div class="location-note subtle">Location value: ${valNum}${data.nextTierValue != null ? ` (next tier at ${Number(data.nextTierValue)})` : ""}</div>`
+      : "";
+    return `
+      <section class="location-section">
+        <h3>Instruments</h3>
+        <div class="location-note">${curTxt} of ${desTxt} desired stored${needs ? ` <span class="location-need">&mdash; needs more</span>` : ""}</div>
+        ${valueLine}
+        <div class="location-inst-row">
+          <span>Desired</span>
+          <button class="location-inst-btn" data-inst-delta="-1" title="Fewer">&minus;</button>
+          <input type="number" class="location-inst-input" min="0" max="100" value="${Number.isFinite(des) ? des : 0}" data-inst-value>
+          <button class="location-inst-btn" data-inst-delta="1" title="More">+</button>
+          <button class="location-inst-set" data-inst-set>Set</button>
+        </div>
+      </section>`;
+  }
+
   function render() {
     selection.className = "visible building-panel location-panel";
     const data = state.data;
@@ -165,6 +194,7 @@
             : "No zones attached."}</div>
           <div class="location-note">Access: ${esc(data?.restriction || "Unavailable")}</div>
         </section>
+        ${instrumentsMarkup(data)}
         ${occupationsMarkup(data)}
         ${templeMarkup(data)}
         ${guildMarkup(data)}
@@ -175,10 +205,10 @@
     wire();
   }
 
-  async function post(action, kind = "", unit = -1) {
+  async function post(action, kind = "", unit = -1, value = 0) {
     state.error = "";
     const params = new URLSearchParams({
-      id: String(state.id), action, kind, unit: String(unit)
+      id: String(state.id), action, kind, unit: String(unit), value: String(value)
     });
     const response = await fetch(`/location-action?${params}`, { method: "POST", cache: "no-store" });
     const result = await response.json().catch(() => ({}));
@@ -202,6 +232,19 @@
     selection.querySelector("[data-location-close]")?.addEventListener("click", () => {
       closeSelection();
       focusPage();
+    });
+    const setDesired = value =>
+      post("desired-instruments", "", -1, value).catch(error => { state.error = error.message; render(); });
+    selection.querySelectorAll("[data-inst-delta]").forEach(button => {
+      button.addEventListener("click", () => {
+        const input = selection.querySelector("[data-inst-value]");
+        const cur = input ? (Number(input.value) || 0) : 0;
+        setDesired(Math.max(0, Math.min(100, cur + Number(button.dataset.instDelta))));
+      });
+    });
+    selection.querySelector("[data-inst-set]")?.addEventListener("click", () => {
+      const input = selection.querySelector("[data-inst-value]");
+      setDesired(Math.max(0, Math.min(100, Number(input?.value) || 0)));
     });
     selection.querySelectorAll("[data-location-assign]").forEach(button => {
       button.addEventListener("click", () => {
