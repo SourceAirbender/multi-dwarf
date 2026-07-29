@@ -30,12 +30,21 @@
 namespace dfcapture {
 
 struct FramePipelineTiming {
+    double capture_queue_ms = 0.0;
     double render_wait_ms = 0.0;
     double capture_ms = 0.0;
+    double target_setup_ms = 0.0;
+    double viewport_draw_ms = 0.0;
+    double readback_ms = 0.0;
+    double host_restore_ms = 0.0;
     double encode_ms = 0.0;
     double total_ms = 0.0;
     int width = 0;
     int height = 0;
+    int lower_viewports = 0;
+    int auxiliary_renders = 0;
+    bool host_paused = false;
+    bool reused = false;
 };
 
 bool read_host_camera(Camera& camera, std::string* err = nullptr);

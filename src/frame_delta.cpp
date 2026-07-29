@@ -26,6 +26,9 @@ constexpr int kBlockSize = 32;
 constexpr int kMaxRectangles = 48;
 constexpr double kKeyframeChangedRatio = 0.42;
 constexpr auto kKeyframeInterval = std::chrono::seconds(5);
+constexpr auto kPausedProbeInterval = std::chrono::seconds(1);
+constexpr auto kStaticProbeInterval = std::chrono::milliseconds(250);
+constexpr int kStaticFramesBeforeReuse = 2;
 constexpr auto kStateExpiry = std::chrono::seconds(60);
 constexpr size_t kMaxPlayerStates = 32;
 constexpr size_t kMaxPacketBytes = 64 * 1024 * 1024;
@@ -45,11 +48,25 @@ struct PlayerDeltaState {
     bool has_previous_camera = false;
     uint64_t sequence = 0;
     Clock::time_point last_keyframe{};
+    Clock::time_point last_capture{};
     Clock::time_point last_access = Clock::now();
+    bool last_host_paused = false;
+    int consecutive_empty = 0;
 };
 
 std::mutex g_states_mutex;
 std::unordered_map<std::string, std::shared_ptr<PlayerDeltaState>> g_states;
+
+bool camera_equal(const Camera& a, const Camera& b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z &&
+           a.zoom_factor == b.zoom_factor &&
+           a.placement_mode == b.placement_mode &&
+           a.hover_px == b.hover_px && a.hover_py == b.hover_py &&
+           a.ui_frame_w == b.ui_frame_w && a.ui_frame_h == b.ui_frame_h &&
+           a.drag_active == b.drag_active &&
+           a.drag_px == b.drag_px && a.drag_py == b.drag_py &&
+           a.build_w == b.build_w && a.build_h == b.build_h;
+}
 
 std::shared_ptr<PlayerDeltaState> state_for_player(const std::string& raw_player) {
     const std::string player = raw_player.substr(0, 64);
@@ -279,15 +296,54 @@ void assemble_packet(FrameDeltaResult& result, int width, int height,
 
 bool capture_camera_delta(const std::string& player, const Camera& camera,
                           uint64_t client_base, bool force_keyframe,
+                          bool content_wake,
                           FrameDeltaResult& result, std::string* err) {
     const auto total_started = Clock::now();
     auto state = state_for_player(player);
     // Serialize a player's capture through baseline replacement. This prevents two overlapping
     // polls from committing captured frames in reverse order after the global render lock releases.
     std::lock_guard<std::mutex> lock(state->mutex);
+    const auto now = Clock::now();
+    const bool baseline_valid =
+        state->sequence != 0 && !state->previous.bgra.empty();
+    const bool same_camera =
+        state->has_previous_camera && camera_equal(state->previous_camera, camera);
+    const auto capture_age =
+        state->last_capture.time_since_epoch().count() == 0
+            ? Clock::duration::max()
+            : now - state->last_capture;
+    const bool within_reuse_window =
+        (state->last_host_paused && capture_age < kPausedProbeInterval) ||
+        (!state->last_host_paused &&
+         state->consecutive_empty >= kStaticFramesBeforeReuse &&
+         capture_age < kStaticProbeInterval);
+    if (!force_keyframe && !content_wake && baseline_valid && same_camera &&
+            client_base == state->sequence && within_reuse_window) {
+        result.sequence = state->sequence + 1;
+        result.base_sequence = state->sequence;
+        result.keyframe = false;
+        result.geometry = state->previous.geometry;
+        result.changed_ratio = 0.0;
+        result.rectangle_count = 0;
+        result.timing.width = state->previous.width;
+        result.timing.height = state->previous.height;
+        result.timing.host_paused = state->last_host_paused;
+        result.timing.reused = true;
+        const std::vector<DirtyRect> rectangles;
+        assemble_packet(result, state->previous.width, state->previous.height,
+                        rectangles, "png");
+        result.timing.total_ms =
+            std::chrono::duration<double, std::milli>(
+                Clock::now() - total_started).count();
+        state->sequence = result.sequence;
+        return true;
+    }
+
     CapturedFrame current;
     if (!capture_camera_frame_timed(camera, current, err, &result.timing))
         return false;
+    state->last_capture = Clock::now();
+    state->last_host_paused = result.timing.host_paused;
     result.geometry = current.geometry;
     result.timing.width = current.width;
     result.timing.height = current.height;
@@ -363,6 +419,10 @@ bool capture_camera_delta(const std::string& player, const Camera& camera,
     }
 
     result.rectangle_count = static_cast<int>(rectangles.size());
+    if (!result.keyframe && rectangles.empty())
+        ++state->consecutive_empty;
+    else
+        state->consecutive_empty = 0;
     if (result.packet.size() > kMaxPacketBytes) {
         if (err) *err = "delta packet exceeded the 64 MiB safety limit";
         return false;

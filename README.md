@@ -12,11 +12,16 @@ showing the game's real rendered pixels, and the streaming has been improved so 
 ## What can you do with it?
 
 - Every player gets their own camera, zoom, elevation, follow mode, cursors, pings, and bookmarks.
+
+![Another player's live cursor, name, and elevation](img/presence.gif)
+
+![Pinging a map location for the other players](img/pinging.gif)
+
 - Mine, chop trees, gather plants, smooth, engrave, build, place exact furniture, and manage
   stockpiles, zones, burrows, and hauling routes.
 - Manage work orders, labors, workshops, kitchen rules, standing orders, squads, uniforms,
   schedules, hospitals, locations, nobles, and most everyday fortress administration.
-- Use the trade depot and barter with merchants without taking over whatever the host is doing.
+- Use the trade depot and barter with merchants
 - See alerts, petitions, diplomacy, reports, native popups, announcements, and what happened since
   you last connected.
 - Chat, see what the other players are doing, and attribute buildings, zones, stockpiles, and work
@@ -24,6 +29,8 @@ showing the game's real rendered pixels, and the streaming has been improved so 
 - Assign dwarves to players, favorite up to five of them, and keep small MMO-style HUDs open for
   their health and current activity.
 - Player owned dwarves! Assign dwarves to yourself and favorite them to add them to your HUD.
+
+![Assigning player-owned dwarves and managing favorite dwarf HUDs](img/player-owned-dwarves.gif)
 
 ## Important notes
 

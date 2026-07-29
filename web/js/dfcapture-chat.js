@@ -102,6 +102,20 @@
     return "#8fd7ff";
   }
 
+  function displayName() {
+    const value = window.DFCaptureSession?.displayName?.();
+    return String(value || player || "player").slice(0, 32);
+  }
+
+  function lineDisplayName(line) {
+    if (line.player === player)
+      return displayName();
+    const peers = typeof window.dfPresencePeers === "function"
+      ? window.dfPresencePeers() : [];
+    const peer = peers.find(value => String(value.player || value.id) === line.player);
+    return String(peer?.name || line.from || "player").slice(0, 32);
+  }
+
   function appendTextWithLocations(container, text) {
     let cursor = 0;
     LOCATION_RE.lastIndex = 0;
@@ -154,8 +168,8 @@
       row.className = "chat-line";
       const name = document.createElement("span");
       name.className = "chat-name";
-      name.style.color = colorFor(line.from);
-      name.textContent = `${line.from}: `;
+      name.style.color = colorFor(line.player || line.from);
+      name.textContent = `${lineDisplayName(line)}: `;
       const body = document.createElement("span");
       body.className = "chat-text";
       appendTextWithLocations(body, String(line.text || ""));
@@ -173,15 +187,18 @@
       const seq = Number(raw?.seq) || 0;
       if (!seq || lines.has(seq))
         continue;
+      const from = String(raw.from || "player").slice(0, 32);
       const line = {
         seq,
-        from: String(raw.from || "player").slice(0, 32),
+        player: String(raw.player ||
+          (/^[0-9a-f]{32}$/.test(from) ? from : "")).slice(0, 64),
+        from,
         text: String(raw.text || "").slice(0, MAX_TEXT),
         ts: Number(raw.ts) || 0
       };
       lines.set(seq, line);
       changed = true;
-      if (!opened && line.from !== player)
+      if (!opened && line.player !== player)
         unread++;
     }
     if (!changed)
@@ -214,7 +231,7 @@
     text = String(text || "").trim().slice(0, MAX_TEXT);
     if (!text)
       return false;
-    const query = new URLSearchParams({ player, name: player, text });
+    const query = new URLSearchParams({ name: displayName(), text });
     try {
       const response = await fetch(`/chat?${query.toString()}`,
         { method: "POST", cache: "no-store" });
@@ -239,7 +256,8 @@
       return false;
     const sent = await postText(locationToken(p));
     const query = new URLSearchParams({
-      player, name: player, color: (typeof myColor === "string" ? myColor : colorFor(player)),
+      name: displayName(),
+      color: (typeof myColor === "string" ? myColor : colorFor(player)),
       x: String(p.x), y: String(p.y), z: String(p.z)
     });
     fetch(`/ping?${query.toString()}`, { method: "POST", cache: "no-store" }).catch(() => {});

@@ -226,6 +226,7 @@
   const activeFramePeriodMs = 80;
   const activeFrameWindowMs = 750;
   const failedFrameRetryMs = 500;
+  const maxFailedFrameRetryMs = 5000;
   let currentFrameUrl = "";
   let frameSeq = 0;
   let frameMetricSeq = 0;
@@ -242,6 +243,7 @@
   let deltaSequence = 0;
   let deltaForceKeyframe = true;
   let deltaCooldownUntil = 0;
+  let frameFailureStreak = 0;
   const ZONE_SHEET_URL = "/asset/activity_zones.png";
   const zoneSheet = new Image();
   zoneSheet.onload = () => renderZoneOverlay();
@@ -425,7 +427,12 @@
       if (timeout) clearTimeout(timeout);
     }
     const fetched = performance.now();
-    if (!response.ok) throw new Error(`delta frame failed: ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`delta frame failed: ${response.status}`);
+      error.status = response.status;
+      error.transient = [429, 502, 503, 504].includes(response.status);
+      throw error;
+    }
     if (deltaLongPollAvailable) {
       const wake = Number(response.headers.get("X-DFCapture-Wake"));
       if (Number.isSafeInteger(wake) && wake >= 0) deltaWakeGeneration = wake;
@@ -450,7 +457,12 @@
       `/frame.jpg?player=${encodeURIComponent(player)}&ui=0&t=${Date.now()}-${frameSeq++}`,
       { cache: "no-store" });
     const fetched = performance.now();
-    if (!response.ok) throw new Error("frame failed");
+    if (!response.ok) {
+      const error = new Error(`JPEG frame failed: ${response.status}`);
+      error.status = response.status;
+      error.transient = [429, 502, 503, 504].includes(response.status);
+      throw error;
+    }
     const fc = parseFrameCamera(response.headers.get("X-DFCapture-Camera"));
     const fg = parseFrameGrid(response.headers.get("X-DFCapture-Grid"));
     const blobStarted = performance.now();
@@ -516,6 +528,11 @@
         try {
           metric = await fetchDeltaFrame(started);
         } catch (error) {
+          // A busy renderer, save barrier, or temporary server failure is not evidence that the
+          // delta protocol is broken. Falling back immediately used to issue a second full native
+          // capture in the same failure window, amplifying two-viewer overload.
+          if (error?.transient || error?.name === "AbortError")
+            throw error;
           console.warn("DFCapture delta frame fell back to JPEG:", error);
           deltaSequence = 0;
           deltaForceKeyframe = true;
@@ -526,17 +543,24 @@
         metric = await fetchJpegFrame(started);
       }
       reportFrameMetrics(metric);
-    } catch (_) {
+      frameFailureStreak = 0;
+    } catch (error) {
       failed = true;
+      frameFailureStreak += 1;
+      if (frameFailureStreak === 1 || frameFailureStreak % 5 === 0)
+        console.warn("DFCapture frame request failed; backing off:", error);
     } finally {
       frameInFlight = false;
       const queued = immediateFrameQueued;
       immediateFrameQueued = false;
-      if (queued) {
+      const failureDelay = Math.min(
+        maxFailedFrameRetryMs,
+        failedFrameRetryMs * (2 ** Math.min(4, Math.max(0, frameFailureStreak - 1))));
+      if (queued && !failed) {
         nextDeltaHoldMs = 0;
         scheduleFrame(0);
       } else if (failed) {
-        scheduleFrame(failedFrameRetryMs);
+        scheduleFrame(failureDelay);
       } else {
         const active = lastFrameActivityAt >= 0 &&
           performance.now() - lastFrameActivityAt < activeFrameWindowMs;

@@ -59,6 +59,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <future>
@@ -115,6 +116,65 @@ RenderMapMode g_render_map_mode = RenderMapMode::None;
 #endif
 
 std::recursive_mutex g_capture_mutex;
+std::mutex g_capture_budget_mutex;
+std::condition_variable g_capture_budget_cv;
+uint64_t g_capture_budget_next_ticket = 0;
+uint64_t g_capture_budget_serving_ticket = 0;
+std::chrono::steady_clock::time_point g_capture_budget_not_before{};
+double g_capture_budget_cost_ema_ms = 20.0;
+
+// Leave a bounded share of the render thread available to Dwarf Fortress itself. With the native
+// lower-viewport stack, ordinary captures should be cheap enough that two viewers are unaffected;
+// if a driver/readback path becomes expensive, the arbiter slows every requester fairly instead of
+// allowing HTTP threads to saturate DF's renderer and fail in a retry storm.
+constexpr double kCaptureBudgetUtilization = 0.65;
+
+class CaptureBudgetPermit {
+public:
+    CaptureBudgetPermit() : queued_at_(std::chrono::steady_clock::now()) {
+        std::unique_lock<std::mutex> lock(g_capture_budget_mutex);
+        ticket_ = g_capture_budget_next_ticket++;
+        g_capture_budget_cv.wait(lock, [&]() {
+            return ticket_ == g_capture_budget_serving_ticket;
+        });
+        while (std::chrono::steady_clock::now() < g_capture_budget_not_before)
+            g_capture_budget_cv.wait_until(lock, g_capture_budget_not_before);
+    }
+
+    double queue_ms() const {
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - queued_at_).count();
+    }
+
+    void complete(double capture_ms) {
+        if (completed_) return;
+        completed_ = true;
+        std::lock_guard<std::mutex> lock(g_capture_budget_mutex);
+        const double bounded = std::max(1.0, std::min(1000.0, capture_ms));
+        g_capture_budget_cost_ema_ms =
+            g_capture_budget_cost_ema_ms * 0.85 + bounded * 0.15;
+        const double idle_ms = std::max(
+            1.0, std::min(250.0,
+                g_capture_budget_cost_ema_ms *
+                    (1.0 / kCaptureBudgetUtilization - 1.0)));
+        g_capture_budget_not_before =
+            std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(static_cast<int>(idle_ms + 0.5));
+        ++g_capture_budget_serving_ticket;
+        g_capture_budget_cv.notify_all();
+    }
+
+    ~CaptureBudgetPermit() {
+        complete(g_capture_budget_cost_ema_ms);
+    }
+
+private:
+    std::chrono::steady_clock::time_point queued_at_;
+    uint64_t ticket_ = 0;
+    bool completed_ = false;
+};
+
+thread_local FramePipelineTiming* g_active_frame_timing = nullptr;
 std::atomic<bool> g_warned_restore(false);
 std::atomic<bool> g_warned_capture_target_bind(false);
 std::atomic<bool> g_warned_host_buffer_restore(false);
@@ -1155,8 +1215,7 @@ struct RenderThreadCaptureRequest {
     CapturedFrame frame;
     std::string err;
     std::chrono::steady_clock::time_point queued_at;
-    double render_wait_ms = 0.0;
-    double capture_ms = 0.0;
+    FramePipelineTiming timing;
     std::promise<bool> done;
 };
 
@@ -1307,39 +1366,50 @@ bool capture_camera_frame_on_render_thread(const Camera& requested,
                                            CapturedFrame& frame,
                                            std::string* err,
                                            FramePipelineTiming* timing = nullptr) {
-    std::lock_guard<std::recursive_mutex> lock(g_capture_mutex);
-
-    auto request = std::make_shared<RenderThreadCaptureRequest>();
-    request->camera = requested;
-    request->queued_at = std::chrono::steady_clock::now();
-    auto future = request->done.get_future();
-
-    DFHack::runOnRenderThread([request]() {
-        const auto started = std::chrono::steady_clock::now();
-        request->render_wait_ms =
-            std::chrono::duration<double, std::milli>(started - request->queued_at).count();
-        const bool ok = capture_camera_frame(request->camera, request->frame, &request->err);
-        request->capture_ms =
-            std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - started).count();
-        request->done.set_value(ok);
-    });
-
+    CaptureBudgetPermit permit;
     bool ok = false;
-    if (!render_future_get(future, ok, 10)) {
-        if (err) *err = "frame-capture render-thread request timed out or was abandoned";
-        diagnostics_log("WARN: frame-capture render-thread request timed out or was abandoned");
-        return false;
+    double capture_cost_ms = 1.0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_capture_mutex);
+
+        auto request = std::make_shared<RenderThreadCaptureRequest>();
+        request->camera = requested;
+        request->timing.capture_queue_ms = permit.queue_ms();
+        request->queued_at = std::chrono::steady_clock::now();
+        auto future = request->done.get_future();
+
+        DFHack::runOnRenderThread([request]() {
+            const auto started = std::chrono::steady_clock::now();
+            request->timing.render_wait_ms =
+                std::chrono::duration<double, std::milli>(
+                    started - request->queued_at).count();
+            request->timing.host_paused =
+                df::global::pause_state && *df::global::pause_state;
+            g_active_frame_timing = &request->timing;
+            const bool captured =
+                capture_camera_frame(request->camera, request->frame, &request->err);
+            g_active_frame_timing = nullptr;
+            request->timing.capture_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started).count();
+            request->done.set_value(captured);
+        });
+
+        if (!render_future_get(future, ok, 10)) {
+            if (err) *err = "frame-capture render-thread request timed out or was abandoned";
+            diagnostics_log("WARN: frame-capture render-thread request timed out or was abandoned");
+            return false;
+        }
+        capture_cost_ms = request->timing.capture_ms;
+        if (!ok) {
+            if (err) *err = request->err;
+            return false;
+        }
+        frame = std::move(request->frame);
+        if (timing)
+            *timing = request->timing;
     }
-    if (!ok) {
-        if (err) *err = request->err;
-        return false;
-    }
-    frame = std::move(request->frame);
-    if (timing) {
-        timing->render_wait_ms = request->render_wait_ms;
-        timing->capture_ms = request->capture_ms;
-    }
+    permit.complete(capture_cost_ms);
     return true;
 }
 
@@ -1416,6 +1486,7 @@ bool effective_capture_viewport_dims(const Camera& camera, int& width_tiles,
 
 bool capture_current_frame(CapturedFrame& frame, bool include_ui = true,
                            std::string* err = nullptr) {
+    const auto setup_started = std::chrono::steady_clock::now();
     if (!capture_ready(err) || !resolve_sdl(err))
         return false;
 
@@ -1457,10 +1528,28 @@ bool capture_current_frame(CapturedFrame& frame, bool include_ui = true,
         return false;
     }
 
+    if (p_SetRenderDrawColor(sdl_renderer, 0, 0, 0, 255) != 0 ||
+            p_RenderClear(sdl_renderer) != 0) {
+        p_SetRenderTarget(sdl_renderer, nullptr);
+        p_DestroyTexture(target);
+        if (err) *err = "SDL_RenderClear(capture target) failed";
+        return false;
+    }
+
+    if (g_active_frame_timing) {
+        g_active_frame_timing->target_setup_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - setup_started).count();
+    }
+
     auto gps = df::global::gps;
-    if (gps && gps->main_viewport) {
+    int lower_viewports = 0;
+    const auto draw_started = std::chrono::steady_clock::now();
+    auto draw_viewport = [&](df::graphic_viewportst* viewport) {
+        if (!viewport)
+            return true;
 #ifdef _WIN32
-        bool viewport_ok = call_update_full_viewport_seh(renderer, gps->main_viewport);
+        bool viewport_ok = call_update_full_viewport_seh(renderer, viewport);
         if (!viewport_ok) {
             std::ostringstream msg;
             msg << "DIAG update_full_viewport FAULT: code=0x" << std::hex << g_seh_code
@@ -1469,9 +1558,40 @@ bool capture_current_frame(CapturedFrame& frame, bool include_ui = true,
             diagnostics_log(msg.str());
             g_zoom_unsafe.store(true);
         }
+        return viewport_ok;
 #else
-        renderer->update_full_viewport(gps->main_viewport);
+        renderer->update_full_viewport(viewport);
+        return true;
 #endif
+    };
+
+    bool viewport_ok = true;
+    if (gps) {
+        // This is the same back-to-front viewport stack used by renderer::display(): DF's map
+        // renderer has already populated these lower levels with the proper see-down masks and
+        // tinting. Drawing the stack once preserves native fog while avoiding five extra captures.
+        for (int i = 7; i >= 0 && viewport_ok; --i) {
+            auto viewport = gps->lower_viewport[i];
+            if (viewport && viewport->flag.bits.active) {
+                viewport_ok = draw_viewport(viewport);
+                if (viewport_ok)
+                    ++lower_viewports;
+            }
+        }
+        if (viewport_ok)
+            viewport_ok = draw_viewport(gps->main_viewport);
+    }
+    if (g_active_frame_timing) {
+        g_active_frame_timing->viewport_draw_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - draw_started).count();
+        g_active_frame_timing->lower_viewports = lower_viewports;
+    }
+    if (!viewport_ok) {
+        p_SetRenderTarget(sdl_renderer, nullptr);
+        p_DestroyTexture(target);
+        if (err) *err = "renderer::update_full_viewport failed";
+        return false;
     }
 
     if (include_ui && !g_warned_ui_overlay_skip.exchange(true)) {
@@ -1488,8 +1608,14 @@ bool capture_current_frame(CapturedFrame& frame, bool include_ui = true,
         read_capture_geometry_seh(renderer, gps->main_viewport, next.geometry);
 #endif
     next.bgra.resize(static_cast<size_t>(width) * height * 4);
+    const auto readback_started = std::chrono::steady_clock::now();
     int rc = p_RenderReadPixels(sdl_renderer, nullptr, SDL_PIXELFORMAT_ARGB8888,
                                 next.bgra.data(), width * 4);
+    if (g_active_frame_timing) {
+        g_active_frame_timing->readback_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - readback_started).count();
+    }
 
     p_SetRenderTarget(sdl_renderer, nullptr);
     p_DestroyTexture(target);
@@ -1663,6 +1789,7 @@ bool capture_shifted(const Camera& camera, CapturedFrame& frame,
     if (gps)
         gps->force_full_display_count = 1;
 
+    const auto restore_started = std::chrono::steady_clock::now();
     if (restore_host_buffers) {
 #ifdef _WIN32
         bool full_restore_ok = false;
@@ -1692,94 +1819,18 @@ bool capture_shifted(const Camera& camera, CapturedFrame& frame,
         if (gps)
             gps->force_full_display_count = 1;
     }
+    if (g_active_frame_timing) {
+        g_active_frame_timing->host_restore_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - restore_started).count();
+    }
 
     return ok;
 }
 
-std::atomic<bool> g_warned_seedown_host_restore(false);
-std::atomic<bool> g_warned_seedown_viewscreen_restore(false);
-
-void restore_host_buffers_after_aux_capture(const char* reason) {
-    auto gps = df::global::gps;
-    if (gps)
-        gps->force_full_display_count = 1;
-
-#ifdef _WIN32
-    std::string restore_err;
-    if (!render_map_for_current_window(&restore_err) &&
-            !g_warned_seedown_host_restore.exchange(true)) {
-        diagnostics_log(std::string("DIAG: host map-buffer restore failed after ") + reason +
-                        " auxiliary capture: " + restore_err);
-    }
-
-    std::string vs_restore_err;
-    if (!render_viewscreen_without_overlay(&vs_restore_err) &&
-            !g_warned_seedown_viewscreen_restore.exchange(true)) {
-        diagnostics_log(std::string("DIAG: host viewscreen restore failed after ") + reason +
-                        " auxiliary capture: " + vs_restore_err);
-    }
-#else
-    (void)reason;
-#endif
-
-    if (gps)
-        gps->force_full_display_count = 1;
-}
-
-bool composite_seedown_into(const Camera& camera, CapturedFrame& top, bool include_ui) {
-    if (top.bgra.size() < 4)
-        return false;
-
-    auto is_black = [&](size_t i) {
-        return top.bgra[i] < 16 && top.bgra[i + 1] < 16 && top.bgra[i + 2] < 16;
-    };
-
-    size_t total_px = top.bgra.size() / 4;
-    size_t black = 0;
-    for (size_t i = 0; i < top.bgra.size(); i += 4)
-        if (is_black(i))
-            ++black;
-    if (black < total_px / 50)
-        return false;
-
-    bool captured_aux_level = false;
-    for (int depth = 1; depth <= 5 && camera.z - depth >= 0; ++depth) {
-        Camera below = camera;
-        below.z = camera.z - depth;
-        CapturedFrame lower;
-        std::string lower_err;
-        if (!capture_shifted(below, lower, false, &lower_err, false))
-            break;
-        if (lower.bgra.size() != top.bgra.size())
-            break;
-        captured_aux_level = true;
-
-        float bright = 0.74f - 0.14f * (depth - 1);
-        if (bright < 0.20f)
-            bright = 0.20f;
-
-        size_t remaining = 0;
-        for (size_t i = 0; i < top.bgra.size(); i += 4) {
-            if (!is_black(i))
-                continue;
-            top.bgra[i] = static_cast<uint8_t>(lower.bgra[i] * bright);
-            top.bgra[i + 1] = static_cast<uint8_t>(lower.bgra[i + 1] * bright * 0.90f);
-            top.bgra[i + 2] = static_cast<uint8_t>(lower.bgra[i + 2] * bright * 0.74f);
-            if (is_black(i))
-                ++remaining;
-        }
-        if (remaining < total_px / 200)
-            break;
-    }
-    return captured_aux_level;
-}
-
 void force_opaque_alpha(CapturedFrame& frame) {
-    // The offscreen SDL target retains transparency in fog/see-down pixels even after their RGB
-    // channels have been reconstructed from lower z-levels. JPEG keyframes implicitly flatten
-    // that alpha, but lossless PNG delta patches preserve it; drawing those patches over a cleared
-    // motion-compensated region therefore produced opaque black holes. A captured browser frame is
-    // a final display surface, not a compositing layer, so make that invariant explicit.
+    // A captured browser frame is a final display surface, not a compositing layer. JPEG keyframes
+    // flatten alpha implicitly; lossless PNG patches must preserve that same invariant.
     for (size_t i = 3; i < frame.bgra.size(); i += 4)
         frame.bgra[i] = 255;
 }
@@ -1798,8 +1849,6 @@ bool capture_camera_frame(const Camera& camera, CapturedFrame& frame, std::strin
 
     std::string local_err;
     bool ok = capture_shifted(camera, frame, true, &local_err);
-    if (ok && composite_seedown_into(camera, frame, true))
-        restore_host_buffers_after_aux_capture("see-down");
     if (ok)
         force_opaque_alpha(frame);
 

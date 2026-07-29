@@ -39,6 +39,7 @@ struct FrameDeltaResult {
 // lossless PNG dirty rectangles. client_base is the last sequence the browser has applied.
 bool capture_camera_delta(const std::string& player, const Camera& camera,
                           uint64_t client_base, bool force_keyframe,
+                          bool content_wake,
                           FrameDeltaResult& result, std::string* err = nullptr);
 
 // Releases all per-player raw-frame baselines. Called on server shutdown.

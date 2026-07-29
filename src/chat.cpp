@@ -11,6 +11,7 @@
 
 #include "httplib.h"
 #include "json_util.h"
+#include "session_policy.h"
 
 #include <algorithm>
 #include <chrono>
@@ -33,6 +34,7 @@ constexpr int64_t CHAT_RATE_LIMIT_MS = 550;
 struct ChatLine {
     int64_t seq = 0;
     int64_t ts = 0;
+    std::string player;
     std::string from;
     std::string text;
 };
@@ -122,6 +124,7 @@ std::string chat_json_string(const std::string& raw) {
 std::string line_json(const ChatLine& line) {
     std::ostringstream out;
     out << "{\"seq\":" << line.seq
+        << ",\"player\":" << chat_json_string(line.player)
         << ",\"from\":" << chat_json_string(line.from)
         << ",\"text\":" << chat_json_string(line.text)
         << ",\"ts\":" << line.ts << "}";
@@ -165,9 +168,8 @@ void register_chat_routes(httplib::Server& server) {
 
     server.Post("/chat", [](const httplib::Request& req, httplib::Response& res) {
         const std::string player = query_player(req);
-        const std::string supplied_name =
-            req.has_param("name") ? req.get_param_value("name") : player;
-        const std::string from = sanitize_text(supplied_name, CHAT_NAME_LIMIT);
+        const std::string from =
+            sanitize_text(session_display_name(player), CHAT_NAME_LIMIT);
         const std::string text = sanitize_text(
             req.has_param("text") ? req.get_param_value("text") : std::string(),
             CHAT_TEXT_LIMIT);
@@ -208,6 +210,7 @@ void register_chat_routes(httplib::Server& server) {
             g_chat_last_post[player] = now;
             line.seq = g_chat_next_seq++;
             line.ts = now;
+            line.player = player;
             line.from = from.empty() ? player : from;
             line.text = text;
             g_chat_lines.push_back(line);

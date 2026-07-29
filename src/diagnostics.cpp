@@ -59,8 +59,13 @@ std::mutex g_diag_mutex;
 CaptureDiagnostics g_diag;
 
 struct ServerFrameMetric {
+    double capture_queue_ms = 0;
     double render_wait_ms = 0;
     double capture_ms = 0;
+    double target_setup_ms = 0;
+    double viewport_draw_ms = 0;
+    double readback_ms = 0;
+    double host_restore_ms = 0;
     double encode_ms = 0;
     double total_ms = 0;
     uint64_t bytes = 0;
@@ -70,6 +75,9 @@ struct ServerFrameMetric {
     bool keyframe = true;
     std::string keyframe_reason;
     bool motion_compensated = false;
+    bool reused = false;
+    int lower_viewports = 0;
+    int auxiliary_renders = 0;
     int rectangles = 1;
     double changed_ratio = 1.0;
     long long at_ms = 0;
@@ -458,17 +466,27 @@ std::string diagnostics_json(const std::string& player, const Camera& camera,
 }
 
 void diagnostics_frame_pipeline(const std::string& player,
-                                double render_wait_ms, double capture_ms,
-                                double encode_ms, double total_ms,
+                                double capture_queue_ms, double render_wait_ms,
+                                double capture_ms, double target_setup_ms,
+                                double viewport_draw_ms, double readback_ms,
+                                double host_restore_ms, double encode_ms,
+                                double total_ms,
                                 uint64_t payload_bytes, int width, int height,
+                                int lower_viewports, int auxiliary_renders,
+                                bool reused,
                                 const std::string& transport, bool keyframe,
                                 int rectangles, double changed_ratio,
                                 const std::string& keyframe_reason,
                                 bool motion_compensated) {
     if (player.empty()) return;
     ServerFrameMetric sample;
+    sample.capture_queue_ms = std::max(0.0, capture_queue_ms);
     sample.render_wait_ms = std::max(0.0, render_wait_ms);
     sample.capture_ms = std::max(0.0, capture_ms);
+    sample.target_setup_ms = std::max(0.0, target_setup_ms);
+    sample.viewport_draw_ms = std::max(0.0, viewport_draw_ms);
+    sample.readback_ms = std::max(0.0, readback_ms);
+    sample.host_restore_ms = std::max(0.0, host_restore_ms);
     sample.encode_ms = std::max(0.0, encode_ms);
     sample.total_ms = std::max(0.0, total_ms);
     sample.bytes = payload_bytes;
@@ -478,6 +496,9 @@ void diagnostics_frame_pipeline(const std::string& player,
     sample.keyframe = keyframe;
     sample.keyframe_reason = keyframe_reason.substr(0, 24);
     sample.motion_compensated = motion_compensated;
+    sample.reused = reused;
+    sample.lower_viewports = std::max(0, lower_viewports);
+    sample.auxiliary_renders = std::max(0, auxiliary_renders);
     sample.rectangles = std::max(0, rectangles);
     sample.changed_ratio = std::max(0.0, std::min(1.0, changed_ratio));
     sample.at_ms = wall_now_ms();
@@ -545,6 +566,7 @@ std::string frame_pipeline_diagnostics_json(const std::string& player) {
     size_t keyframes = 0;
     size_t empty_deltas = 0;
     size_t motion_frames = 0;
+    size_t reused_frames = 0;
     size_t forced_keyframes = 0;
     size_t periodic_keyframes = 0;
     size_t resync_keyframes = 0;
@@ -561,6 +583,7 @@ std::string frame_pipeline_diagnostics_json(const std::string& player) {
         }
         if (sample.keyframe) ++keyframes;
         if (sample.motion_compensated) ++motion_frames;
+        if (sample.reused) ++reused_frames;
         if (sample.keyframe_reason == "forced") ++forced_keyframes;
         if (sample.keyframe_reason == "periodic") ++periodic_keyframes;
         if (sample.keyframe_reason == "resync") ++resync_keyframes;
@@ -587,9 +610,23 @@ std::string frame_pipeline_diagnostics_json(const std::string& player) {
         << ",\"windowLimit\":" << kMaxFrameMetricSamples
         << ",\"server\":{\"samples\":" << server.size()
         << ",\"payloadBytes\":" << server_bytes << ",";
+    append_summary(out, "captureQueueMs",
+                   server_values(&ServerFrameMetric::capture_queue_ms));
+    out << ",";
     append_summary(out, "renderWaitMs", server_values(&ServerFrameMetric::render_wait_ms));
     out << ",";
     append_summary(out, "captureMs", server_values(&ServerFrameMetric::capture_ms));
+    out << ",";
+    append_summary(out, "targetSetupMs",
+                   server_values(&ServerFrameMetric::target_setup_ms));
+    out << ",";
+    append_summary(out, "viewportDrawMs",
+                   server_values(&ServerFrameMetric::viewport_draw_ms));
+    out << ",";
+    append_summary(out, "readbackMs", server_values(&ServerFrameMetric::readback_ms));
+    out << ",";
+    append_summary(out, "hostRestoreMs",
+                   server_values(&ServerFrameMetric::host_restore_ms));
     out << ",";
     append_summary(out, "encodeMs", server_values(&ServerFrameMetric::encode_ms));
     out << ",";
@@ -610,6 +647,7 @@ std::string frame_pipeline_diagnostics_json(const std::string& player) {
         << ",\"keyframeRate\":"
         << (server.empty() ? 0.0 : static_cast<double>(keyframes) / server.size())
         << ",\"emptyDeltas\":" << empty_deltas
+        << ",\"reusedFrames\":" << reused_frames
         << ",\"motionFrames\":" << motion_frames
         << ",\"keyframeReasons\":{\"forced\":" << forced_keyframes
         << ",\"periodic\":" << periodic_keyframes
@@ -624,6 +662,9 @@ std::string frame_pipeline_diagnostics_json(const std::string& player) {
             << ",\"keyframeReason\":" << json_string(server.back().keyframe_reason)
             << ",\"motionCompensated\":"
             << (server.back().motion_compensated ? "true" : "false")
+            << ",\"reused\":" << (server.back().reused ? "true" : "false")
+            << ",\"lowerViewports\":" << server.back().lower_viewports
+            << ",\"auxiliaryRenders\":" << server.back().auxiliary_renders
             << ",\"rectangles\":" << server.back().rectangles
             << ",\"changedRatio\":" << server.back().changed_ratio
             << ",\"at\":" << server.back().at_ms << "}";

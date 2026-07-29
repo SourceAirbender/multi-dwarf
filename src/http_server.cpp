@@ -95,19 +95,44 @@ int g_port = DEFAULT_STREAM_PORT;
 std::string g_bind_address = DEFAULT_BIND_ADDRESS;
 std::mutex g_frame_wake_mutex;
 std::condition_variable g_frame_wake_condition;
-uint64_t g_frame_wake_generation = 1;
+uint64_t g_frame_wake_next_generation = 1;
+uint64_t g_world_frame_wake_generation = 1;
+std::unordered_map<std::string, uint64_t> g_player_frame_wake_generations;
 
-uint64_t wait_for_frame_wake(uint64_t known_generation, int hold_ms) {
+uint64_t frame_wake_generation_locked(const std::string& player) {
+    const auto found = g_player_frame_wake_generations.find(player);
+    return found == g_player_frame_wake_generations.end()
+        ? g_world_frame_wake_generation
+        : std::max(g_world_frame_wake_generation, found->second);
+}
+
+uint64_t wait_for_frame_wake(const std::string& player,
+                             uint64_t known_generation, int hold_ms) {
     std::unique_lock<std::mutex> lock(g_frame_wake_mutex);
-    if (hold_ms > 0 && known_generation == g_frame_wake_generation) {
+    if (hold_ms > 0 &&
+            known_generation == frame_wake_generation_locked(player)) {
         g_frame_wake_condition.wait_for(
             lock, std::chrono::milliseconds(hold_ms),
-            [known_generation] {
+            [&player, known_generation] {
                 return !g_running.load() ||
-                       g_frame_wake_generation != known_generation;
+                       frame_wake_generation_locked(player) != known_generation;
             });
     }
-    return g_frame_wake_generation;
+    return frame_wake_generation_locked(player);
+}
+
+void notify_player_camera_input(const std::string& player) {
+    {
+        std::lock_guard<std::mutex> lock(g_frame_wake_mutex);
+        if (g_player_frame_wake_generations.size() >= 64 &&
+                !g_player_frame_wake_generations.count(player)) {
+            g_player_frame_wake_generations.clear();
+            g_world_frame_wake_generation = ++g_frame_wake_next_generation;
+        }
+        g_player_frame_wake_generations[player] =
+            ++g_frame_wake_next_generation;
+    }
+    g_frame_wake_condition.notify_all();
 }
 
 // --- Player presence (cursors + camera) -----------------------------------------------------
@@ -417,7 +442,7 @@ void register_routes(httplib::Server& server) {
 
         res.set_header("Cache-Control", "no-store");
         res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
-        notify_player_input();
+        notify_player_camera_input(player);
     };
     server.Get("/reset", reset_handler);
     server.Post("/reset", reset_handler);
@@ -475,7 +500,7 @@ void register_routes(httplib::Server& server) {
         set_player_camera(player, camera);
         res.set_header("Cache-Control", "no-store");
         res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
-        notify_player_input();
+        notify_player_camera_input(player);
     });
 
     // Presence relay (see PresenceEntry above). No DF access; safe to serve at high frequency.
@@ -560,7 +585,7 @@ void register_routes(httplib::Server& server) {
         }
         res.set_header("Cache-Control", "no-store");
         res.set_content(camera_json(player, camera), "application/json; charset=utf-8");
-        notify_player_input();
+        notify_player_camera_input(player);
     };
     server.Get("/zoom", zoom_handler);
     server.Post("/zoom", zoom_handler);
@@ -947,12 +972,16 @@ void register_routes(httplib::Server& server) {
         FramePipelineTiming timing;
         if (!capture_camera_jpeg(camera, jpeg, &geometry, &err, &timing)) {
             res.status = 503;
+            res.set_header("Retry-After", "1");
             res.set_content("capture failed: " + err + "\n", "text/plain; charset=utf-8");
             return;
         }
-        diagnostics_frame_pipeline(player, timing.render_wait_ms, timing.capture_ms,
-                                   timing.encode_ms, timing.total_ms, jpeg.size(),
-                                   timing.width, timing.height);
+        diagnostics_frame_pipeline(
+            player, timing.capture_queue_ms, timing.render_wait_ms,
+            timing.capture_ms, timing.target_setup_ms, timing.viewport_draw_ms,
+            timing.readback_ms, timing.host_restore_ms, timing.encode_ms,
+            timing.total_ms, jpeg.size(), timing.width, timing.height,
+            timing.lower_viewports, timing.auxiliary_renders, timing.reused);
 
         res.set_header("Cache-Control", "no-store");
         res.set_header("X-DFCapture-Camera",
@@ -1009,7 +1038,11 @@ void register_routes(httplib::Server& server) {
         }
         hold_ms = std::clamp(hold_ms, 0, 250);
         const uint64_t acknowledged_wake =
-            long_poll ? wait_for_frame_wake(wake_generation, hold_ms) : 0;
+            long_poll ? wait_for_frame_wake(
+                player, wake_generation, hold_ms) : 0;
+        const bool content_wake =
+            long_poll && wake_generation != 0 &&
+            acknowledged_wake != wake_generation;
 
         Camera camera;
         std::string err;
@@ -1024,16 +1057,23 @@ void register_routes(httplib::Server& server) {
 
         FrameDeltaResult delta;
         if (!capture_camera_delta(player, camera, base_sequence, force_keyframe,
+                                  content_wake,
                                   delta, &err)) {
             res.status = 503;
+            res.set_header("Retry-After", "1");
             res.set_content("capture failed: " + err + "\n",
                             "text/plain; charset=utf-8");
             return;
         }
         diagnostics_frame_pipeline(
-            player, delta.timing.render_wait_ms, delta.timing.capture_ms,
-            delta.timing.encode_ms, delta.timing.total_ms, delta.packet.size(),
-            delta.timing.width, delta.timing.height, "delta", delta.keyframe,
+            player, delta.timing.capture_queue_ms, delta.timing.render_wait_ms,
+            delta.timing.capture_ms, delta.timing.target_setup_ms,
+            delta.timing.viewport_draw_ms, delta.timing.readback_ms,
+            delta.timing.host_restore_ms, delta.timing.encode_ms,
+            delta.timing.total_ms, delta.packet.size(),
+            delta.timing.width, delta.timing.height,
+            delta.timing.lower_viewports, delta.timing.auxiliary_renders,
+            delta.timing.reused, "delta", delta.keyframe,
             delta.rectangle_count, delta.changed_ratio, delta.keyframe_reason,
             delta.has_scroll);
 
@@ -1105,9 +1145,13 @@ void register_routes(httplib::Server& server) {
                     sink.done();
                     return;
                 }
-                diagnostics_frame_pipeline(player, timing.render_wait_ms, timing.capture_ms,
-                                           timing.encode_ms, timing.total_ms, jpeg.size(),
-                                           timing.width, timing.height);
+                diagnostics_frame_pipeline(
+                    player, timing.capture_queue_ms, timing.render_wait_ms,
+                    timing.capture_ms, timing.target_setup_ms,
+                    timing.viewport_draw_ms, timing.readback_ms,
+                    timing.host_restore_ms, timing.encode_ms,
+                    timing.total_ms, jpeg.size(), timing.width, timing.height,
+                    timing.lower_viewports, timing.auxiliary_renders, timing.reused);
 
                 std::ostringstream header;
                 header << "--dfcapture\r\n"
@@ -2710,7 +2754,7 @@ void register_routes(httplib::Server& server) {
 void notify_player_input() {
     {
         std::lock_guard<std::mutex> lock(g_frame_wake_mutex);
-        ++g_frame_wake_generation;
+        g_world_frame_wake_generation = ++g_frame_wake_next_generation;
     }
     g_frame_wake_condition.notify_all();
 }
