@@ -54,7 +54,7 @@ Please keep normal fortress backups and include your DFHack logs when reporting 
 ## Install
 
 1. Install **DFHack 53.15-r1 directly into your Dwarf Fortress game folder**.
-2. Download `dfcapture-v0.9.46-DFHack-53.15-r1.zip` from the
+2. Download `dfcapture-v0.9.71-DFHack-53.15-r1.zip` from the
    [**Releases**](../../releases) page.
 3. Extract it, then copy the included **`hack`** folder into the Dwarf Fortress folder that contains
    `Dwarf Fortress.exe`. Merge it with the `hack` folder that is already there.

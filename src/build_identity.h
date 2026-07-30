@@ -13,7 +13,7 @@ namespace dfcapture {
 // stamps the same value into web/build.json so /version can detect mismatched plugin and web files.
 // kPluginVersion is informational only. This file is the single source of the schema number.
 constexpr int kApiSchemaVersion = 2;
-constexpr const char* kPluginVersion = "0.9.46";
+constexpr const char* kPluginVersion = "0.9.71";
 
 // The /version payload distinguishes API compatibility from an exact packaged build match.
 // - schemaCompatible: plugin and web speak the same API schema.
