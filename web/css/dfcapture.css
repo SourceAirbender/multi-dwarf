@@ -877,6 +877,7 @@ body.dfc-delta-active #view { opacity: 0; }
 .building-panel .bld-x:hover { color: #fff; }
 .building-panel .bld-status { padding: 9px 10px 3px; color: #7fe07f; font: 700 12px var(--df-font-face); }
 .building-panel .bld-status.suspended { color: #ffb454; }
+.building-panel .bld-status .bld-note { display: block; margin: 3px 0 0; }
 .building-panel .bld-btn {
   display: block; width: calc(100% - 18px); margin: 6px 9px; padding: 8px 10px;
   cursor: pointer; text-align: left;
@@ -887,13 +888,36 @@ body.dfc-delta-active #view { opacity: 0; }
 .building-panel .bld-btn.active { color: #1a1206; background: #d89b27; border-color: #ffd45c; }
 .building-panel .bld-btn.danger { color: #ffb0a0; border-color: #7a4a44; }
 .building-panel .bld-btn.danger:hover { border-color: #e06a55; color: #ffd0c4; }
+.building-panel .bld-btn.primary {
+  color: #b9f6aa;
+  border-color: #438347;
+  background: #172b19;
+}
+.building-panel .bld-btn.primary:hover {
+  color: #e8ffe2;
+  border-color: #72c978;
+  background: #203d23;
+}
+.special-building-actions {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 4px 0 7px;
+  border-top: 1px solid #3d2c16;
+}
 .building-panel .bld-note { margin: -2px 10px 8px; color: #9a9282; font: 400 11px var(--df-font-face); }
 .building-panel .bld-note.warning { color: #ffb454; }
 .building-control-panel { max-height: min(78vh, 720px); overflow: hidden; }
 .lever-panel {
-  display: grid !important;
-  grid-template-rows: auto auto auto auto auto auto minmax(120px, 1fr);
+  display: flex !important;
+  flex-direction: column;
 }
+.lever-action-row {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+.lever-action-row .bld-btn { margin-top: 3px; margin-bottom: 4px; }
 .ownership-top-button {
   min-width: 154px;
   height: 24px;
@@ -943,7 +967,7 @@ body.dfc-delta-active #view { opacity: 0; }
   font: 700 11px var(--df-font-face);
 }
 .lever-target-search:focus { border-color: #ffd36a; outline: none; }
-.lever-target-list { max-height: none; min-height: 0; }
+.lever-target-list { flex: 1 1 140px; max-height: none; min-height: 120px; }
 .building-control-row.linked { border-color: #35643a; }
 .building-control-row.pending { border-color: #80642b; }
 .building-control-row .bld-btn:disabled {
@@ -3585,11 +3609,13 @@ body.dfc-delta-active #view { opacity: 0; }
 }
 #bmRow {
   position: absolute;
-  top: 0;
-  right: 100%;
-  display: flex;
-  gap: 2px;
-  justify-content: center;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 75;
+  display: grid;
+  width: 92px;
+  grid-template-columns: repeat(4, 18px);
+  gap: 3px;
   padding: 5px;
   pointer-events: auto;
   background: #111;
@@ -3602,13 +3628,6 @@ body.dfc-delta-active #view { opacity: 0; }
 .bm-slot:hover { border-color: #d89b27; color: #ffd45c; }
 
 /* Persisted hotkeys, synchronized native popup, and shared panel frames. */
-#bmRow {
-  display: grid;
-  width: 92px;
-  grid-template-columns: repeat(4, 18px);
-  gap: 3px;
-  padding: 5px;
-}
 .set-command-row { cursor: pointer; }
 .set-command-row:hover { background: #29251e; }
 .df-movable-panel {

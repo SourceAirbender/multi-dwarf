@@ -224,6 +224,16 @@ std::set<int32_t> collect_pending_target_ids(df::building* lever) {
     return ids;
 }
 
+df::job* pending_pull_job(df::building* lever) {
+    if (!lever)
+        return nullptr;
+    for (auto job : lever->jobs) {
+        if (job && job->job_type == df::job_type::PullLever)
+            return job;
+    }
+    return nullptr;
+}
+
 std::vector<TargetRow> collect_targets(
     df::building* lever,
     const std::set<int32_t>& linked_ids,
@@ -269,12 +279,19 @@ std::string lever_link_json(int32_t id, std::string* err) {
         const auto mechanisms = collect_mechanisms();
         const auto linked_ids = collect_linked_target_ids(lever);
         const auto pending_ids = collect_pending_target_ids(lever);
+        const auto pull_job = pending_pull_job(lever);
+        const auto trap = virtual_cast<df::building_trapst>(lever);
         const auto targets = collect_targets(lever, linked_ids, pending_ids);
         std::ostringstream out;
         out << "{\"ok\":true,\"id\":" << id << ",\"isLever\":true"
             << ",\"name\":" << json_string(building_name(lever, "Lever"))
             << ",\"mechanismCount\":" << mechanisms.size()
             << ",\"needsMechanisms\":" << (mechanisms.size() < 2 ? "true" : "false")
+            << ",\"installedMechanismCount\":"
+            << (trap ? trap->linked_mechanisms.size() : 0)
+            << ",\"pullPending\":" << (pull_job ? "true" : "false")
+            << ",\"pullJobId\":" << (pull_job ? pull_job->id : -1)
+            << ",\"leverState\":" << (trap ? static_cast<int>(trap->state) : 0)
             << ",\"linkedCount\":" << linked_ids.size()
             << ",\"pendingCount\":" << pending_ids.size()
             << ",\"currentLinks\":[";
@@ -386,6 +403,46 @@ bool queue_link_job(int32_t lever_id, int32_t target_id, int32_t& job_id, std::s
             return false;
         }
         job_id = job->id;
+        Job::checkBuildingsNow();
+        return true;
+    });
+}
+
+bool queue_pull_job(int32_t lever_id, int32_t& job_id, std::string* err) {
+    return run_lever_link_locked([&]() {
+        auto lever = df::building::find(lever_id);
+        if (!is_lever(lever)) {
+            if (err) *err = "building is not a built lever";
+            return false;
+        }
+        if (auto existing = pending_pull_job(lever)) {
+            job_id = existing->id;
+            return true;
+        }
+
+        auto holder_ref = df::allocate<df::general_ref_building_holderst>();
+        auto job = new (std::nothrow) df::job();
+        if (!holder_ref || !job) {
+            delete holder_ref;
+            delete job;
+            if (err) *err = "allocation failed";
+            return false;
+        }
+        holder_ref->building_id = lever->id;
+        job->job_type = df::job_type::PullLever;
+        job->pos = df::coord(lever->centerx, lever->centery, lever->z);
+        job->flags.bits.do_now = true;
+        job->general_refs.push_back(holder_ref);
+        lever->jobs.push_back(job);
+        if (!Job::linkIntoWorld(job)) {
+            lever->jobs.erase(std::remove(lever->jobs.begin(), lever->jobs.end(), job),
+                              lever->jobs.end());
+            delete_unlinked_job(job);
+            if (err) *err = "failed to queue lever pull";
+            return false;
+        }
+        job_id = job->id;
+        Job::checkBuildingsNow();
         return true;
     });
 }
@@ -423,6 +480,26 @@ void register_lever_link_routes(httplib::Server& server) {
         int32_t job_id = -1;
         std::string err;
         if (!queue_link_job(id, target, job_id, &err)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content("{\"ok\":true,\"jobId\":" + std::to_string(job_id) + "}\n",
+                        "application/json; charset=utf-8");
+    });
+    server.Post("/lever-pull", [](const httplib::Request& req, httplib::Response& res) {
+        int id = -1;
+        if (!query_int(req, "id", id)) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing id\"}\n",
+                            "application/json; charset=utf-8");
+            return;
+        }
+        int32_t job_id = -1;
+        std::string err;
+        if (!queue_pull_job(id, job_id, &err)) {
             res.status = 400;
             res.set_content("{\"ok\":false,\"error\":" + json_string(err) + "}\n",
                             "application/json; charset=utf-8");

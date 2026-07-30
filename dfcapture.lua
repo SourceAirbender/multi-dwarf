@@ -1315,12 +1315,19 @@ end
 -- validates reachability/stockpile at build time; this is just to build the picker list + counts.
 local function item_buildable(item)
     if not item then return false end
-    local f = item.flags
-    if f.forbid or f.dump or f.garbage_collect or f.hostile or f.removed or f.in_job
-       or f.construction or f.in_building or f.encased or f.trader or f.owned or f.artifact
-       or f.spider_web or f.on_fire or f.rotten or f.murder or f.foreign then
-        return false
+    local outer = item
+    for _ = 1, 32 do
+        local f = outer.flags
+        if f.forbid or f.dump or f.garbage_collect or f.hostile or f.removed or f.in_job
+           or f.construction or f.in_building or f.encased or f.trader or f.owned or f.artifact
+           or f.spider_web or f.on_fire or f.rotten or f.murder then
+            return false
+        end
+        local ok, container = pcall(dfhack.items.getContainer, outer)
+        if not ok or not container or container == outer then break end
+        outer = container
     end
+    if outer.flags.in_inventory and not outer.flags.in_job then return false end
     return true
 end
 

@@ -370,6 +370,7 @@
         <span>${brokerLine}</span>
         <span class="td-access ${tdInfo.accessible ? "ok" : "blocked"}">${tdInfo.accessible ? "Wagon access available" : "No wagon access to this depot"}</span>
         <span class="wm-dim">${Number(tdInfo.goodsAtDepot) || 0} at depot · ${Number(tdInfo.pendingCount) || 0} hauling</span>
+        <button class="sq-btn danger" data-td-remove>Remove trade depot</button>
       </div>
       <div class="td-trader-choices">${traderChoices}</div>
       <div class="sq-section-title">Goods to haul</div>
@@ -580,6 +581,26 @@
         if (Number.isInteger(id) && id >= 0)
           openItemPanel(id);
       }));
+    clientPanel.querySelector("[data-td-remove]")?.addEventListener("click", async event => {
+      event.preventDefault();
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const params = new URLSearchParams({
+          id: String(tdSelId), action: "remove", t: String(Date.now())
+        });
+        const response = await fetch(`/building-action?${params}`, {
+          method: "POST", cache: "no-store"
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.ok === false)
+          throw new Error(result.error || "could not remove trade depot");
+        closeClientPanel();
+      } catch (error) {
+        button.disabled = false;
+        tdStatus(error.message || "Could not remove trade depot.", true);
+      }
+    });
     clientPanel.querySelectorAll("[data-td-mark]").forEach(btn => btn.addEventListener("click", async e => {
       e.preventDefault();
       try {

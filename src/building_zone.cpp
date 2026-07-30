@@ -952,8 +952,13 @@ bool building_action_on_core_thread(int32_t id, const std::string& action, std::
             return false;
         }
         if (action == "cancel" || action == "remove" || action == "deconstruct") {
+            if (Buildings::markedForRemoval(b))
+                return true;
             purge_ui_caches_for_building(b);
-            return Buildings::deconstruct(b);
+            const bool removed_immediately = Buildings::deconstruct(b);
+            // DFHack returns false for a built building when it successfully queues the
+            // native DestroyBuilding job. Treat the newly set removal mark as success.
+            return removed_immediately || Buildings::markedForRemoval(b);
         }
         if (action == "suspend" || action == "resume") {
             bool suspend = action == "suspend";

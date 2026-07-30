@@ -194,10 +194,32 @@
     }
   }
 
-  function wireSpecialBuildingClose() {
+  function wireSpecialBuildingControls(info, removeLabel = "Remove building") {
     selection.querySelector("[data-bld-close]")?.addEventListener("click", event => {
       event.stopPropagation();
       closeSelection();
+      focusPage();
+    });
+    if (!Number.isInteger(Number(info?.id)) || Number(info.id) < 0)
+      return;
+    if (!selection.querySelector("[data-special-building-remove]")) {
+      const actions = document.createElement("div");
+      actions.className = "special-building-actions";
+      actions.innerHTML = `<button class="bld-btn danger" data-special-building-remove>${escapeHtml(removeLabel)}</button>`;
+      selection.append(actions);
+    }
+    selection.querySelector("[data-special-building-remove]")?.addEventListener("click", async event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await buildingPanelPost("/building-action", { id: info.id, action: "remove" });
+        closeSelection();
+      } catch (error) {
+        button.disabled = false;
+        console.warn("building removal failed", error);
+      }
       focusPage();
     });
   }
@@ -237,7 +259,7 @@
         }
         focusPage();
       }));
-    wireSpecialBuildingClose();
+    wireSpecialBuildingControls(info, "Remove cage");
     return true;
   }
 
@@ -284,7 +306,7 @@
         }
         focusPage();
       }));
-    wireSpecialBuildingClose();
+    wireSpecialBuildingControls(info, "Remove coffin");
   }
 
   function renderLeverLinkPanel(info, lever) {
@@ -300,8 +322,14 @@
     selection.innerHTML = `
       <div class="bld-head"><div class="bld-name">${escapeHtml(lever.name || info.name || "Lever")}</div>
         <button class="bld-x" data-bld-close title="Close">X</button></div>
-      <div class="bld-status">${Number(lever.mechanismCount) || 0} available mechanism(s)</div>
-      ${lever.needsMechanisms ? `<div class="bld-note warning">Two available mechanisms are required to link a target.</div>` : ""}
+      <div class="bld-status">${Number(lever.mechanismCount) || 0} spare mechanism(s)
+        <span class="bld-note">${Number(lever.installedMechanismCount) || 0} installed in links</span></div>
+      ${lever.needsMechanisms ? `<div class="bld-note warning">Linking another building requires two spare mechanisms.</div>` : ""}
+      <div class="lever-action-row">
+        <button class="bld-btn primary" data-lever-pull${lever.pullPending ? " disabled" : ""}>
+          ${lever.pullPending ? "Pull order queued" : "Pull the lever"}
+        </button>
+      </div>
       <div class="lever-section-title">Current connections (${currentLinks.length})</div>
       <div class="lever-current-list">${currentRows}</div>
       <div class="lever-section-title">Link another building (${targets.length})</div>
@@ -340,7 +368,23 @@
         }
         focusPage();
       }));
-    wireSpecialBuildingClose();
+    selection.querySelector("[data-lever-pull]")?.addEventListener("click", async event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = "Queuing pull...";
+      try {
+        await buildingPanelPost("/lever-pull", { id: info.id });
+        await openBuildingPanel(info.id);
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "Pull the lever";
+        console.warn("lever pull failed", error);
+      }
+      focusPage();
+    });
+    wireSpecialBuildingControls(info, "Remove lever");
   }
 
   async function openBuildingPanel(id) {
@@ -640,9 +684,7 @@
       </div>
     `;
 
-    selection.querySelector("[data-bld-close]")?.addEventListener("click", event => {
-      event.stopPropagation(); closeSelection(); focusPage();
-    });
+    wireSpecialBuildingControls(info, "Remove workshop");
     selection.querySelectorAll("[data-ws-tab]").forEach(btn => btn.addEventListener("click", event => {
       event.preventDefault(); event.stopPropagation();
       activeWorkshopTab = btn.dataset.wsTab || "tasks";
