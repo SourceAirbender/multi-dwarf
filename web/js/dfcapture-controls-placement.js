@@ -84,6 +84,7 @@
   const setInstantRow = document.getElementById("setInstantDig");
   const setPredictiveRow = document.getElementById("setPredictivePan");
   const setUnitImagesRow = document.getElementById("setUnitImages");
+  const openControlsRow = document.getElementById("openControlsRow");
   function refreshSettingsUi() {
     if (setInstantRow) setInstantRow.classList.toggle("on", instantDesignate);
     if (setPredictiveRow) setPredictiveRow.classList.toggle("on", predictivePan);
@@ -108,6 +109,81 @@
     try { localStorage.setItem("dfplex.predictivePan", predictivePan ? "1" : "0"); } catch (_) {}
     if (predictivePan) applyPanPrediction(); else clearPanPrediction();
     refreshSettingsUi();
+  }
+  function setInvertElevationWheel(on) {
+    invertElevationWheel = !!on;
+    try {
+      localStorage.setItem("dfplex.invertElevationWheel", invertElevationWheel ? "1" : "0");
+    } catch (_) {}
+  }
+  function setSwapWheelControls(on) {
+    swapWheelControls = !!on;
+    try {
+      localStorage.setItem("dfplex.swapWheelControls", swapWheelControls ? "1" : "0");
+    } catch (_) {}
+  }
+  function setPingShortcut(value) {
+    pingShortcut = PING_SHORTCUTS.has(value) ? value : "alt";
+    try { localStorage.setItem("dfplex.pingShortcut", pingShortcut); } catch (_) {}
+  }
+  function renderControlsPanel() {
+    const domainUi = window.dfDomainUi;
+    if (!domainUi?.openWindow) return;
+    const wheelSummary = swapWheelControls
+      ? "Scroll: map zoom. Ctrl + scroll: elevation."
+      : "Scroll: elevation. Ctrl + scroll: map zoom.";
+    const pingOptions = [
+      ["alt", "Alt + left click"],
+      ["ctrl", "Ctrl + left click"],
+      ["shift", "Shift + left click"],
+      ["middle", "Middle click"]
+    ].map(([value, label]) =>
+      `<option value="${value}"${pingShortcut === value ? " selected" : ""}>${label}</option>`).join("");
+    domainUi.openWindow("Controls", `
+      <div class="controls-settings">
+        <h3 class="domain-section-title">Mouse wheel</h3>
+        <div class="controls-current-binding">${wheelSummary}</div>
+        <button type="button" class="set-row controls-setting-row${swapWheelControls ? " on" : ""}"
+                data-controls-toggle="swap-wheel">
+          <span class="set-toggle"></span>
+          <span class="set-label"><b>Swap elevation and zoom</b>
+            <span>Use regular scrolling for map zoom and Ctrl + scroll for elevation.</span>
+          </span>
+        </button>
+        <button type="button" class="set-row controls-setting-row${invertElevationWheel ? " on" : ""}"
+                data-controls-toggle="invert-elevation">
+          <span class="set-toggle"></span>
+          <span class="set-label"><b>Invert elevation scrolling</b>
+            <span>Reverse the scroll direction whenever the wheel controls elevation.</span>
+          </span>
+        </button>
+        <h3 class="domain-section-title">Map ping</h3>
+        <label class="controls-select-row">
+          <span class="set-label"><b>Ping shortcut</b>
+            <span>Choose the mouse shortcut that sends a location ping to every player.</span>
+          </span>
+          <select data-controls-ping>${pingOptions}</select>
+        </label>
+      </div>`);
+    clientPanel.querySelector('[data-controls-toggle="swap-wheel"]')?.addEventListener("click", () => {
+      setSwapWheelControls(!swapWheelControls);
+      renderControlsPanel();
+    });
+    clientPanel.querySelector('[data-controls-toggle="invert-elevation"]')?.addEventListener("click", () => {
+      setInvertElevationWheel(!invertElevationWheel);
+      renderControlsPanel();
+    });
+    clientPanel.querySelector("[data-controls-ping]")?.addEventListener("change", event => {
+      setPingShortcut(event.currentTarget.value);
+      renderControlsPanel();
+    });
+  }
+  function openControlsPanel(event) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    settingsMenu?.classList.remove("open");
+    refreshSettingsUi();
+    renderControlsPanel();
   }
   function setUnitImagesEnabled(on) {
     unitImagesEnabled = !!on;
@@ -149,6 +225,7 @@
       refreshSettingsUi();
     });
   }
+  openControlsRow?.addEventListener("click", openControlsPanel);
   refreshSettingsUi();
 
   // Camera zoom and browser-interface scale are session-local. They use the per-player /zoom
@@ -1112,7 +1189,10 @@
       return;
     focusPage();
     event.preventDefault();
-    queueMove(0, 0, event.deltaY < 0 ? zstep : -zstep);
+    if (wheelUsesElevation(event))
+      queueMove(0, 0, zstep * elevationStepForWheel(event.deltaY));
+    else
+      sendZoom(event.deltaY < 0 ? "in" : "out");
   }, { passive: false });
 
   // Camera panning is keyboard-only (WASD / arrows / PgUp-PgDn), like DF. A mouse drag

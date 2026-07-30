@@ -292,8 +292,12 @@ bool build_hud_state(const Camera& camera, HudState& hud, std::string* err) {
             hud.minimap.push_back(enc(minimap_column_category(wx, wy, world, camera.z)));
         }
     }
-    hud.surface_z = compute_surface_z(camera.x, camera.y, world);
-    hud.deepest_z = compute_deepest_z(camera.x, camera.y, world);
+    // Camera origins may intentionally overscroll beyond the north/west map edges. Sample
+    // elevation controls at the visible map center, clamped back into the playable map.
+    const int sample_x = std::max(0, std::min(mw - 1, camera.x + hud.viewport_w / 2));
+    const int sample_y = std::max(0, std::min(mh - 1, camera.y + hud.viewport_h / 2));
+    hud.surface_z = compute_surface_z(sample_x, sample_y, world);
+    hud.deepest_z = compute_deepest_z(sample_x, sample_y, world);
     return true;
 }
 

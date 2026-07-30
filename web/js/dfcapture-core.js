@@ -94,6 +94,34 @@
   // identical content at the same place. Off (or offset 0) => behaves exactly as before.
   let predictivePan = true;
   try { const v = localStorage.getItem("dfplex.predictivePan"); predictivePan = (v === null) ? true : (v === "1"); } catch (_) {}
+  let invertElevationWheel = false;
+  try { invertElevationWheel = localStorage.getItem("dfplex.invertElevationWheel") === "1"; } catch (_) {}
+  let swapWheelControls = false;
+  try { swapWheelControls = localStorage.getItem("dfplex.swapWheelControls") === "1"; } catch (_) {}
+  const PING_SHORTCUTS = new Set(["alt", "ctrl", "shift", "middle"]);
+  let pingShortcut = "alt";
+  try {
+    const saved = localStorage.getItem("dfplex.pingShortcut");
+    if (PING_SHORTCUTS.has(saved)) pingShortcut = saved;
+  } catch (_) {}
+  function elevationStepForWheel(deltaY) {
+    const normal = deltaY < 0 ? 1 : -1;
+    return invertElevationWheel ? -normal : normal;
+  }
+  function wheelUsesElevation(event) {
+    const modified = !!(event.ctrlKey || event.metaKey);
+    return swapWheelControls ? modified : !modified;
+  }
+  function pingShortcutMatches(event) {
+    if (pingShortcut === "middle")
+      return event.button === 1 && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+    if (event.button !== 0) return false;
+    if (pingShortcut === "alt")
+      return event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+    if (pingShortcut === "ctrl")
+      return (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey;
+    return event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+  }
   // Native unit portraits/body sprites touch DF's unit texture fields and have been crash-prone
   // when the host opens related native unit lists. Default off for stability; users can opt in.
   let unitImagesEnabled = false;
@@ -134,8 +162,14 @@
     if (!predictedCam) return;
     const map = currentHud && currentHud.map, vp = currentHud && currentHud.viewport;
     if (map && vp) {
-      predictedCam.x = Math.max(0, Math.min(predictedCam.x, Math.max(0, (Number(map.w) || 0) - (Number(vp.w) || 0))));
-      predictedCam.y = Math.max(0, Math.min(predictedCam.y, Math.max(0, (Number(map.h) || 0) - (Number(vp.h) || 0))));
+      const viewportW = Math.max(1, Number(vp.w) || 1);
+      const viewportH = Math.max(1, Number(vp.h) || 1);
+      const mapW = Math.max(1, Number(map.w) || 1);
+      const mapH = Math.max(1, Number(map.h) || 1);
+      predictedCam.x = Math.max(-Math.floor(viewportW / 2),
+        Math.min(predictedCam.x, mapW - 1));
+      predictedCam.y = Math.max(-Math.floor(viewportH / 2),
+        Math.min(predictedCam.y, mapH - 1));
     }
   }
   function applyPanPrediction() {
@@ -694,14 +728,10 @@
       focusPage();
       event.preventDefault();
       event.stopImmediatePropagation();
-      if ((event.ctrlKey || event.metaKey) && window.DFCaptureUIScale) {
-        window.DFCaptureUIScale.adjust(event.deltaY < 0 ? 1 : -1);
-        return;
-      }
-      if (event.shiftKey) {
-        sendZoom(event.deltaY < 0 ? "in" : "out");
+      if (wheelUsesElevation(event)) {
+        queueMove(0, 0, zstep * elevationStepForWheel(event.deltaY));
       } else {
-        queueMove(0, 0, event.deltaY < 0 ? zstep : -zstep);
+        sendZoom(event.deltaY < 0 ? "in" : "out");
       }
     }, { passive: false, capture: true });
   }
@@ -1015,7 +1045,7 @@
     window.dfPresencePeers = () => [...presencePeers.values()];   // for the minimap viewport boxes
     view.addEventListener("pointermove", event => { myTile = worldTileFromEvent(event); postPresence(); });
     view.addEventListener("pointerleave", () => { myTile = null; postPresence(true); });
-    // Alt+click on the map fires a "look here" ping (intercepted before it becomes a designation).
+    // The configured map-click shortcut fires a "look here" ping before inspection or placement.
     view.addEventListener("pointerdown", event => {
       if (event.button === 0 && window.DFCaptureChat?.isPicking?.()) {
         event.preventDefault();
@@ -1024,7 +1054,7 @@
         if (t) window.DFCaptureChat.consumeMapPick(t);
         return;
       }
-      if (!event.altKey || event.button !== 0) return;
+      if (!pingShortcutMatches(event)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       const t = worldTileFromEvent(event) || myTile;
@@ -1035,6 +1065,10 @@
       }
       const q = new URLSearchParams({ player, name: player, color: myColor, x: t.x, y: t.y, z: t.z });
       fetch("/ping?" + q.toString(), { method: "POST", cache: "no-store" }).catch(() => {});
+    }, { capture: true });
+    view.addEventListener("auxclick", event => {
+      if (pingShortcut === "middle" && event.button === 1)
+        event.preventDefault();
     }, { capture: true });
     setInterval(pollPresence, PRESENCE_POLL_MS);
     setInterval(() => postPresence(true), 1500);

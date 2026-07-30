@@ -204,7 +204,12 @@
       track.addEventListener("pointermove", e => { if (dragging) zTrackSetFromY(e.clientY); });
       track.addEventListener("pointerup", e => { dragging = false; try { track.releasePointerCapture(e.pointerId); } catch (_) {} });
       track.addEventListener("pointercancel", e => { dragging = false; try { track.releasePointerCapture(e.pointerId); } catch (_) {} });
-      track.addEventListener("wheel", e => { e.preventDefault(); e.stopPropagation(); const cam = currentHud && currentHud.camera; if (cam) setCameraZ(cam.z + (e.deltaY < 0 ? 1 : -1)); }, { passive: false });
+      track.addEventListener("wheel", e => {
+        e.preventDefault();
+        e.stopPropagation();
+        const cam = currentHud && currentHud.camera;
+        if (cam) setCameraZ(cam.z + elevationStepForWheel(e.deltaY));
+      }, { passive: false });
     }
     document.querySelectorAll("[data-z-meter-step]").forEach(button => {
       button.addEventListener("click", e => {

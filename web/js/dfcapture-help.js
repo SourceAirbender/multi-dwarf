@@ -30,9 +30,10 @@
       { control: "PageUp / PageDown", text: "Z-level up / down", group: "Camera" },
       { control: "e / q", text: "Z-level up / down (alternate)", group: "Camera" },
       { control: "Home or r", text: "Reset this camera to the host's", group: "Camera" },
+      { control: "Wheel / Ctrl+Wheel", text: "Elevation and map zoom; assignments are configurable under Settings > Controls", group: "Mouse" },
       { control: "Click a tile", text: "Inspect what's there (unit, building, item, zone)", group: "Mouse" },
       { control: "Drag with a tool", text: "Paint the selection (dig, zone, stockpile, build)", group: "Mouse" },
-      { control: "Alt+Click", text: "Ping that spot for every player", group: "Multiplayer" },
+      { control: "Configurable click", text: "Ping that spot for every player; choose the shortcut under Settings > Controls", group: "Multiplayer" },
       { control: "Esc", text: "Close the open panel or cancel targeting", group: "Panels" },
     ],
   };

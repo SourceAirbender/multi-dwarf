@@ -1444,8 +1444,25 @@ bool clamp_camera(Camera& camera, std::string* err) {
             return;
         }
 
-        request->camera.x = std::max(0, std::min(request->camera.x, std::max(0, world->map.x_count - 1)));
-        request->camera.y = std::max(0, std::min(request->camera.y, std::max(0, world->map.y_count - 1)));
+        int viewport_w = 1;
+        int viewport_h = 1;
+        auto gps = df::global::gps;
+        auto vp = gps ? gps->main_viewport : nullptr;
+        if (vp && vp->dim_x > 0 && vp->dim_y > 0) {
+            capture_zoom_reference_if_needed();
+            effective_zoom_dims(request->camera, vp->dim_x, vp->dim_y,
+                                viewport_w, viewport_h);
+        }
+
+        // The browser HUD covers the north and west edges of the native frame. Allow the
+        // camera to overscroll by half a viewport so every border tile can be brought into
+        // clear, clickable space. DF's map renderer already clips out-of-map coordinates.
+        const int min_x = -(viewport_w / 2);
+        const int min_y = -(viewport_h / 2);
+        const int max_x = std::max(0, static_cast<int>(world->map.x_count) - 1);
+        const int max_y = std::max(0, static_cast<int>(world->map.y_count) - 1);
+        request->camera.x = std::max(min_x, std::min(request->camera.x, max_x));
+        request->camera.y = std::max(min_y, std::min(request->camera.y, max_y));
         request->camera.z = std::max(0, std::min(request->camera.z, std::max(0, world->map.z_count - 1)));
         request->done.set_value(true);
 #ifdef _WIN32

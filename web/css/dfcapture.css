@@ -3697,6 +3697,49 @@ body.dfc-delta-active #view { opacity: 0; }
   color: #aaa18f;
   font-size: 12px;
 }
+.controls-settings {
+  width: min(560px, 100%);
+  margin: 0 auto;
+}
+.controls-current-binding {
+  margin: 5px 0 8px;
+  padding: 7px 9px;
+  border: 1px solid #71531d;
+  color: #f2e6cf;
+  background: #1b1812;
+}
+.controls-setting-row {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 3px 0;
+  border: 1px solid #41361f;
+  background: #151515;
+  color: #f2e6cf;
+  font: inherit;
+  text-align: left;
+}
+.controls-setting-row:hover {
+  border-color: #d89b27;
+  background: #20180a;
+}
+.controls-select-row {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(170px, auto);
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border: 1px solid #41361f;
+  background: #151515;
+}
+.controls-select-row select {
+  min-width: 170px;
+  padding: 5px 7px;
+  border: 1px solid #d89b27;
+  color: #f2e6cf;
+  background: #211a10;
+  font: inherit;
+}
 .domain-mission-rescue {
   display: flex;
   gap: 8px;
