@@ -268,7 +268,7 @@ static bool call_update_full_viewport_seh(df::renderer* renderer, df::graphic_vi
 }
 
 static uint8_t g_dummy_follow[0x4000] = {0};
-constexpr uintptr_t VIEW_FOLLOW_RVA = 0x23d9db0; // DF 53.15 (was 0x23d2df0 on Steam 53.14)
+constexpr uintptr_t VIEW_FOLLOW_RVA = 0x23e5110; // Steam DF 53.16
 
 static int call_native_sequence_seh(uintptr_t map_renderer) {
     void** p_follow = reinterpret_cast<void**>(g_exe_base + VIEW_FOLLOW_RVA);
@@ -451,11 +451,11 @@ bool resolve_render_map(std::string* err = nullptr) {
         return false;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(exe);
-    // Steam DF 53.15 native map-render RVAs. Prologue checks below fail closed on binary mismatch.
-    const uintptr_t CLEAR_RVA = 0x8bcb60;
-    const uintptr_t SETUP_RVA = 0x801630;
-    const uintptr_t FILL_RVA = 0xe949e0;
-    const uintptr_t BLIT_RVA = 0xaeead0;
+    // Steam DF 53.16 native map-render RVAs. Prologue checks below fail closed on binary mismatch.
+    const uintptr_t CLEAR_RVA = 0x8be780;
+    const uintptr_t SETUP_RVA = 0x803250;
+    const uintptr_t FILL_RVA = 0xe9afe0;
+    const uintptr_t BLIT_RVA = 0xaf1190;
 
     struct Probe {
         uintptr_t rva;
@@ -477,7 +477,7 @@ bool resolve_render_map(std::string* err = nullptr) {
         if (std::memcmp(reinterpret_cast<const uint8_t*>(base + p.rva), p.sig, p.n) != 0) {
             if (err) {
                 *err = std::string("native map render: prologue mismatch for ") +
-                       p.name + " (binary differs from Steam 53.15)";
+                       p.name + " (binary differs from Steam 53.16)";
             }
             return false;
         }
@@ -485,7 +485,7 @@ bool resolve_render_map(std::string* err = nullptr) {
 
     uintptr_t map_renderer = core.vinfo->getAddress("map_renderer");
     if (!map_renderer)
-        map_renderer = base + 0x238f2c0; // DF 53.15 (was 0x2388300); normally resolved via the symbol above
+        map_renderer = base + 0x239a620; // Steam DF 53.16; normally resolved via the symbol above
 
     g_map_renderer_addr = map_renderer;
     g_exe_base = base;
@@ -495,7 +495,7 @@ bool resolve_render_map(std::string* err = nullptr) {
     p_NativeBlit = reinterpret_cast<pfn_NativeBlit>(base + BLIT_RVA);
     g_render_map_mode = RenderMapMode::NativeSequence;
     if (!g_warned_recovered_render_map.exchange(true)) {
-        diagnostics_log("DIAG: resolved DF 53.15 native map-render sequence "
+        diagnostics_log("DIAG: resolved DF 53.16 native map-render sequence "
                         "(clear/setup/fill/blit) -- independent map render, no UI state.");
     }
     return true;

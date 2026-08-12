@@ -1486,7 +1486,7 @@ bool do_squad_assign(int32_t squad_id, int32_t unit_id, int32_t squad_pos, std::
             if (err) *err = "unit is not an assignable living citizen";
             return false;
         }
-        // DFHack 53.15-r1 exposes both predicates (modules/Units.h); checking the freshly
+        // DFHack exposes both predicates (modules/Units.h); checking the freshly
         // resolved unit under CoreSuspender closes the stale/crafted-request path too.
         if (DFHack::Units::isBaby(unit) || DFHack::Units::isChild(unit)) {
             if (err) *err = "unit is a child";

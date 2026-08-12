@@ -28,7 +28,7 @@
 #include "http_server.h"
 #include "json_util.h"
 #include "lua_bridge.h"
-#include "native_trade_5315.h"
+#include "native_trade.h"
 #include "save_barrier.h"
 #include "sdl_capture.h"
 
@@ -641,7 +641,7 @@ std::string build_barter_json(int32_t id, int32_t caravan_index, std::string* er
         std::string civ = state.civ
             ? DFHack::Translation::translateName(&state.civ->name, false)
             : std::string();
-        js << "{\"ok\":true,\"nativeVersion\":\"53.15\""
+        js << "{\"ok\":true,\"nativeVersion\":\"53.16\""
            << ",\"depotId\":" << id
            << ",\"caravanIndex\":" << resolved_index
            << ",\"merchantCiv\":" << json_string(civ)
@@ -958,7 +958,7 @@ void register_trade_depot_routes(httplib::Server& server) {
     //   action=accept token=<server-held-counteroffer-token>
     //   action=decline token=<server-held-counteroffer-token>
     //
-    // Only the selection vectors are assembled here. Steam DF 53.15's standalone native barter
+    // Only the selection vectors are assembled here. Steam DF's standalone native barter
     // function owns counteroffer choice and the complete item/caravan/entity/history mutation.
     // Counteroffer acceptance is server-held so a client cannot forge the bypass flag.
     server.Post("/depot-trade", [](const httplib::Request& req, httplib::Response& res) {

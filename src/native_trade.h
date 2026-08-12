@@ -30,10 +30,10 @@ struct NativeTradeOfferResult {
     std::vector<int32_t> counter_offer_ids;
 };
 
-// Resolve and validate the Steam DF 53.15 native barter ABI. This verifies the complete
+// Resolve and validate the supported Steam DF native barter ABI. This verifies the complete
 // executable SHA-256, required DFHack structure offsets, and native prologues.
 // It never opens or drives DF's global trade interface.
-bool native_trade_5315_available(std::string* err);
+bool native_trade_available(std::string* err);
 
 // Locate an at-depot caravan by its plotinfo vector index. A negative index chooses the first.
 df::caravan_state* native_trade_caravan(int32_t caravan_index, int32_t* resolved_index);
@@ -44,7 +44,7 @@ bool native_trade_prepare(df::building_tradedepotst* depot, int32_t caravan_inde
                           df::trade_interfacest& state, int32_t* resolved_index,
                           std::string* err);
 
-// Apply an offer through DF 53.15's atomic native barter routine. `accept_counter` is permitted
+// Apply an offer through DF's atomic native barter routine. `accept_counter` is permitted
 // only by the caller after validating a server-held counteroffer token.
 bool native_trade_execute(df::building_tradedepotst* depot, int32_t caravan_index,
                           const std::vector<NativeTradeSelection>& merchant,

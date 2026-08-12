@@ -36,8 +36,8 @@ showing the game's real rendered pixels, and the streaming has been improved so 
 
 This version is built for:
 
-- **Dwarf Fortress 53.15**
-- **DFHack 53.15-r1**
+- **Dwarf Fortress 53.16**
+- **DFHack 53.16-r1.1**
 - **Windows x64**
 - **Fortress mode**
 
@@ -53,8 +53,8 @@ Please keep normal fortress backups and include your DFHack logs when reporting 
 
 ## Install
 
-1. Install **DFHack 53.15-r1 directly into your Dwarf Fortress game folder**.
-2. Download `dfcapture-v0.9.71-DFHack-53.15-r1.zip` from the
+1. Install **DFHack 53.16-r1.1 directly into your Dwarf Fortress game folder**.
+2. Download the matching `dfcapture` package for **DFHack 53.16-r1.1** from the
    [**Releases**](../../releases) page.
 3. Extract it, then copy the included **`hack`** folder into the Dwarf Fortress folder that contains
    `Dwarf Fortress.exe`. Merge it with the `hack` folder that is already there.
@@ -110,7 +110,7 @@ This is an *external* DFHack plugin, so it builds as part of a matching DFHack s
 1. Clone DFHack at the matching tag, with submodules:
 
    ```powershell
-   git clone --recursive --branch 53.15-r1 https://github.com/DFHack/dfhack
+   git clone --recursive --branch 53.16-r1.1 https://github.com/DFHack/dfhack
    ```
 
 2. Clone this repository into `dfhack/plugins/external/dfcapture_public/`.

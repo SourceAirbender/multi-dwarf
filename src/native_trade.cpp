@@ -1,13 +1,13 @@
 // dfcapture - multiplayer Dwarf Fortress in the browser, as a DFHack plugin
 // Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 //
-// Native fortress barter bridge for the exact Steam DF 53.15 executable. The global UI dispatcher
+// Native fortress barter bridge for the exact supported Steam DF executable. The global UI dispatcher
 // is never called: typed C++ constructs the lists and DF's standalone routine commits the complete
 // transaction.
 //
 // SPDX-License-Identifier: AGPL-3.0-only
 
-#include "native_trade_5315.h"
+#include "native_trade.h"
 
 #include "modules/Items.h"
 
@@ -45,12 +45,12 @@
 namespace dfcapture {
 namespace {
 
-constexpr uintptr_t kNativeTradeRva = 0x367f10;
-constexpr uintptr_t kNativeTradeInitRva = 0x36a010;
-constexpr uintptr_t kNativeWeightWholeRva = 0x30b600;
-constexpr uintptr_t kNativeWeightFractionRva = 0x30b5d0;
-constexpr char kDf5315Sha256[] =
-    "683c721d1261e77ff862a2e01dfe3ff93d107ab7b1c92b5a3b6f313ccc8fc284";
+constexpr uintptr_t kNativeTradeRva = 0x369490;
+constexpr uintptr_t kNativeTradeInitRva = 0x36b590;
+constexpr uintptr_t kNativeWeightWholeRva = 0x30cb50;
+constexpr uintptr_t kNativeWeightFractionRva = 0x30cb20;
+constexpr char kSupportedDfSha256[] =
+    "205770918fd54c96cbbcf89223ebd449e2e113c7c873ed81177c4511a3450db7";
 
 using NativeTradeFn =
     void(__fastcall*)(df::trade_interfacest*, int32_t, int32_t, df::massst*);
@@ -147,7 +147,7 @@ bool check_signature(uintptr_t base, uintptr_t rva, const unsigned char* bytes,
     if (std::memcmp(reinterpret_cast<const void*>(base + rva), bytes, count) == 0)
         return true;
     if (err)
-        *err = std::string("DF 53.15 native barter signature mismatch at ") + label;
+        *err = std::string("DF 53.16 native barter signature mismatch at ") + label;
     return false;
 }
 #endif
@@ -159,13 +159,13 @@ bool resolve_native(std::string* err) {
     }
     g_resolve_attempted = true;
 #ifndef _WIN32
-    g_resolve_error = "native barter is currently available only on Steam DF 53.15 for Windows";
+    g_resolve_error = "native barter is currently available only on Steam DF 53.16 for Windows";
 #else
     std::string actual_hash;
     if (!executable_sha256(&actual_hash, &g_resolve_error))
         goto failed;
-    if (actual_hash != kDf5315Sha256) {
-        g_resolve_error = "native barter requires the exact supported Steam DF 53.15 executable "
+    if (actual_hash != kSupportedDfSha256) {
+        g_resolve_error = "native barter requires the exact supported Steam DF 53.16 executable "
                           "(SHA-256 mismatch)";
         goto failed;
     }
@@ -311,7 +311,7 @@ df::massst remaining_capacity(df::trade_interfacest& state) {
 
 } // namespace
 
-bool native_trade_5315_available(std::string* err) {
+bool native_trade_available(std::string* err) {
     return resolve_native(err);
 }
 

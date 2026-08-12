@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Gabriel Rios <grios019@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-  // ---- Trade Depot: hauling/broker management plus atomic DF 53.15 browser barter ------------
+  // ---- Trade Depot: hauling, broker management, and browser barter -----------------------------
   let tdDepots = [];
   let tdSelId = null;
   let tdInfo = null;

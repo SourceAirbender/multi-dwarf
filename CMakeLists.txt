@@ -109,7 +109,7 @@ dfhack_plugin(dfcapture_public
     src/missions.cpp
     src/notifications.cpp
     src/native_popup.cpp
-    src/native_trade_5315.cpp
+    src/native_trade.cpp
     src/overlay_control.cpp
     src/placement.cpp
     src/player_ownership.cpp
