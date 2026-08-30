@@ -40,6 +40,12 @@
 #  define NOMINMAX
 #  include <windows.h>
 #  include <bcrypt.h>
+#  define DFCAPTURE_FASTCALL __fastcall
+#else
+// __fastcall only matters on 32-bit x86; on every Linux target (and on x86-64) it is a
+// no-op, so simply omit it. The native function pointers are never called off-Windows
+// (resolve_native() returns false first), so this is purely to keep the types compiling.
+#  define DFCAPTURE_FASTCALL
 #endif
 
 namespace dfcapture {
@@ -53,9 +59,9 @@ constexpr char kSupportedDfSha256[] =
     "205770918fd54c96cbbcf89223ebd449e2e113c7c873ed81177c4511a3450db7";
 
 using NativeTradeFn =
-    void(__fastcall*)(df::trade_interfacest*, int32_t, int32_t, df::massst*);
-using NativeTradeInitFn = void(__fastcall*)(df::trade_interfacest*, df::caravan_state*);
-using NativeWeightFn = int32_t(__fastcall*)(df::item*);
+    void(DFCAPTURE_FASTCALL*)(df::trade_interfacest*, int32_t, int32_t, df::massst*);
+using NativeTradeInitFn = void(DFCAPTURE_FASTCALL*)(df::trade_interfacest*, df::caravan_state*);
+using NativeWeightFn = int32_t(DFCAPTURE_FASTCALL*)(df::item*);
 
 NativeTradeFn g_native_trade = nullptr;
 NativeTradeInitFn g_native_trade_init = nullptr;

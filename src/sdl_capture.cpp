@@ -43,6 +43,12 @@
 #include "df/renderer.h"
 #include "df/renderer_2d.h"
 #include "df/viewscreen.h"
+
+#ifndef _WIN32
+#include <SDL.h>
+#endif
+
+#include "df/widget_unit_portrait.h"
 #include "df/viewscreen_dwarfmodest.h"
 #include "df/world.h"
 
@@ -321,8 +327,24 @@ bool resolve_sdl(std::string* err) {
     if (err) *err = "could not resolve required SDL2 render-target functions";
     return false;
 #else
-    if (err) *err = "SDL capture is currently Windows-only";
-    return false;
+    // On Linux SDL2 is linked directly (not dlopen'd from SDL2.dll). The signatures of
+    // SDL_CreateTexture / SDL_SetRenderTarget / SDL_RenderReadPixels / SDL_DestroyTexture /
+    // SDL_GetRendererOutputSize / SDL_SetRenderDrawColor / SDL_RenderClear match the pfn_*
+    // typedefs above, so we just publish the real symbols through the same indirect call
+    // surface used by the rest of the capture pipeline.
+    if (p_CreateTexture && p_SetRenderTarget && p_RenderReadPixels &&
+        p_DestroyTexture && p_GetRendererOutputSize &&
+        p_SetRenderDrawColor && p_RenderClear) {
+        return true; // already resolved
+    }
+    p_CreateTexture = reinterpret_cast<pfn_CreateTexture>(&SDL_CreateTexture);
+    p_SetRenderTarget = reinterpret_cast<pfn_SetRenderTarget>(&SDL_SetRenderTarget);
+    p_RenderReadPixels = reinterpret_cast<pfn_RenderReadPixels>(&SDL_RenderReadPixels);
+    p_DestroyTexture = reinterpret_cast<pfn_DestroyTexture>(&SDL_DestroyTexture);
+    p_GetRendererOutputSize = reinterpret_cast<pfn_GetRendererOutputSize>(&SDL_GetRendererOutputSize);
+    p_SetRenderDrawColor = reinterpret_cast<pfn_SetRenderDrawColor>(&SDL_SetRenderDrawColor);
+    p_RenderClear = reinterpret_cast<pfn_RenderClear>(&SDL_RenderClear);
+    return true;
 #endif
 }
 

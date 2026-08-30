@@ -132,10 +132,17 @@ dfhack_plugin(dfcapture_public
     src/kitchen_panel.cpp
     src/trade_depot.cpp
     src/unit_activity.cpp
-    LINK_LIBRARIES bcrypt gdiplus ole32 ws2_32 lua jsoncpp_static)
+    LINK_LIBRARIES
+    $<$<PLATFORM_ID:Windows>:bcrypt>
+    $<$<PLATFORM_ID:Windows>:gdiplus>
+    $<$<PLATFORM_ID:Windows>:ole32>
+    $<$<PLATFORM_ID:Windows>:ws2_32>
+    $<$<NOT:$<PLATFORM_ID:Windows>>:SDL2>
+    lua jsoncpp_static)
 
 target_include_directories(dfcapture_public PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-httplib")
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-httplib"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb")
 
 target_compile_definitions(dfcapture_public PRIVATE
     DFCAPTURE_GIT_REV="${DFCAPTURE_GIT_REV}")

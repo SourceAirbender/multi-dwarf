@@ -30,6 +30,9 @@
 #include <windows.h>
 #include <objidl.h>
 #include <gdiplus.h>
+#else
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 #endif
 
 #include <algorithm>
@@ -201,8 +204,27 @@ bool encode_jpeg(const CapturedFrame& frame, std::vector<uint8_t>& jpeg,
 
     return save_bitmap_to_memory(frame, jpeg_clsid, &params, jpeg, err);
 #else
-    if (err) *err = "JPEG encoding is currently Windows-only";
-    return false;
+    // BGRA -> RGB for the JPEG compressor (stb consumes top-down RGB rows).
+    std::vector<uint8_t> rgb(static_cast<size_t>(frame.width) * frame.height * 3);
+    const uint8_t* src = frame.bgra.data();
+    for (size_t i = 0, o = 0; i + 3 < frame.bgra.size() && o + 2 < rgb.size(); i += 4, o += 3) {
+        rgb[o + 0] = src[i + 2];
+        rgb[o + 1] = src[i + 1];
+        rgb[o + 2] = src[i + 0];
+    }
+    auto sink = [](void* ctx, void* data, int size) {
+        auto* out = static_cast<std::vector<uint8_t>*>(ctx);
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        out->insert(out->end(), bytes, bytes + size);
+    };
+    const int q = std::max(1, std::min(100, quality));
+    int ok = stbi_write_jpg_to_func(sink, &jpeg, frame.width, frame.height, 3,
+                                    rgb.data(), q);
+    if (!ok) {
+        if (err) *err = "stb JPEG encode failed";
+        return false;
+    }
+    return true;
 #endif
 }
 
@@ -222,8 +244,28 @@ bool encode_png(const CapturedFrame& frame, std::vector<uint8_t>& png, std::stri
 
     return save_bitmap_to_memory(frame, png_clsid, nullptr, png, err);
 #else
-    if (err) *err = "PNG encoding is currently Windows-only";
-    return false;
+    // BGRA -> RGBA. PNG patches may carry semi-transparent alpha, so keep 4 channels.
+    std::vector<uint8_t> rgba(static_cast<size_t>(frame.width) * frame.height * 4);
+    const uint8_t* src = frame.bgra.data();
+    for (size_t i = 0; i + 3 < frame.bgra.size(); i += 4) {
+        rgba[i + 0] = src[i + 2];
+        rgba[i + 1] = src[i + 1];
+        rgba[i + 2] = src[i + 0];
+        rgba[i + 3] = src[i + 3];
+    }
+    auto sink = [](void* ctx, void* data, int size) {
+        auto* out = static_cast<std::vector<uint8_t>*>(ctx);
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        out->insert(out->end(), bytes, bytes + size);
+    };
+    const int stride_bytes = frame.width * 4;
+    int ok = stbi_write_png_to_func(sink, &png, frame.width, frame.height, 4,
+                                    rgba.data(), stride_bytes);
+    if (!ok) {
+        if (err) *err = "stb PNG encode failed";
+        return false;
+    }
+    return true;
 #endif
 }
 

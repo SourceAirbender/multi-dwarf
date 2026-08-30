@@ -49,6 +49,8 @@
 #endif
 #include <windows.h>
 #include <cstdlib>
+#else
+#include <SDL.h>
 #endif
 
 #include <algorithm>
@@ -206,8 +208,26 @@ bool resolve_sdl(std::string* err = nullptr) {
     if (err) *err = "could not resolve SDL2 portrait surface/render-target functions";
     return false;
 #else
-    if (err) *err = "native portrait rendering is Windows-only";
-    return false;
+    // Linux builds link SDL2 directly; publish the real symbols through the same
+    // indirect surface used on Windows so the rest of the portrait pipeline is unchanged.
+    if (p_CreateTexture && p_SetRenderTarget && p_RenderReadPixels &&
+        p_DestroyTexture && p_GetRendererOutputSize && p_SetRenderDrawColor &&
+        p_RenderClear && p_ConvertSurfaceFormat && p_LockSurface &&
+        p_UnlockSurface && p_FreeSurface) {
+        return true; // already resolved
+    }
+    p_CreateTexture = reinterpret_cast<pfn_CreateTexture>(&SDL_CreateTexture);
+    p_SetRenderTarget = reinterpret_cast<pfn_SetRenderTarget>(&SDL_SetRenderTarget);
+    p_RenderReadPixels = reinterpret_cast<pfn_RenderReadPixels>(&SDL_RenderReadPixels);
+    p_DestroyTexture = reinterpret_cast<pfn_DestroyTexture>(&SDL_DestroyTexture);
+    p_GetRendererOutputSize = reinterpret_cast<pfn_GetRendererOutputSize>(&SDL_GetRendererOutputSize);
+    p_SetRenderDrawColor = reinterpret_cast<pfn_SetRenderDrawColor>(&SDL_SetRenderDrawColor);
+    p_RenderClear = reinterpret_cast<pfn_RenderClear>(&SDL_RenderClear);
+    p_ConvertSurfaceFormat = reinterpret_cast<pfn_ConvertSurfaceFormat>(&SDL_ConvertSurfaceFormat);
+    p_LockSurface = reinterpret_cast<pfn_LockSurface>(&SDL_LockSurface);
+    p_UnlockSurface = reinterpret_cast<pfn_UnlockSurface>(&SDL_UnlockSurface);
+    p_FreeSurface = reinterpret_cast<pfn_FreeSurface>(&SDL_FreeSurface);
+    return true;
 #endif
 }
 

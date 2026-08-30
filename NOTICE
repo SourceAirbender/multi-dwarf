@@ -46,6 +46,13 @@ cpp-httplib
     Copyright (c) 2017 yhirose
     https://github.com/yhirose/cpp-httplib
 
+stb_image_write
+    Single-header JPEG/PNG encoder used as the portable (non-GDI+) encoder on
+    Linux and other non-Windows targets, vendored under third_party/stb/.
+    License: public domain / MIT (dual)
+    Copyright (c) 2010-2019 Sean Barrett
+    https://github.com/nothings/stb
+
 ================================================================================
 Zlib License  --  applies to DFHack and DFPlex
 ================================================================================

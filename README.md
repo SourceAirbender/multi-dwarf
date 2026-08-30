@@ -126,6 +126,47 @@ The result is `dfcapture.plug.dll`. Copy it, the `web/` directory, `dfcapture.lu
 
 `cpp-httplib` is vendored in `third_party/cpp-httplib/`, so no extra checkout is needed.
 
+### Building on Linux
+
+The capture, HTTP, and web layers are cross-platform SDL2/cpp-httplib. Linux builds link
+SDL2 (`libsdl2-dev`) directly instead of dlopening `SDL2.dll`, and use the vendored
+`stb_image_write.h` for JPEG/PNG encoding instead of GDI+.
+
+1. Prerequisites on Debian/Ubuntu:
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y cmake ninja-build g++ libsdl2-dev \
+       liblua5.4-dev zlib1g-dev
+   ```
+
+2. Clone DFHack at the matching tag, with submodules:
+
+   ```bash
+   git clone --recursive --branch 53.16-r1.1 https://github.com/DFHack/dfhack
+   ```
+
+3. Clone this repository into `dfhack/plugins/external/dfcapture_public/`.
+4. Configure and build just this plugin:
+
+   ```bash
+   cmake -S dfhack -B dfhack/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+     -DDFHACK_BUILD_ARCH=64
+   cmake --build dfhack/build --target dfcapture_public
+   ```
+
+The result is `dfcapture.plug.so`. Install it (into `hack/plugins/`), plus `web/`,
+`dfcapture.lua`, and `scripts/gui/dfcapture.lua`.
+
+> **Linux feature status:** the fortress capture pipeline, browser streaming, and
+> multiplayer management run on Linux. The Windows-only *native* paths degrade
+> gracefully and are skipped rather than compiled: native barter signature-driven
+> controls (native_trade.cpp), the native map-render sequence + SEH guards
+> (sdl_capture.cpp `resolve_render_map`), and GDI+ encoding are all behind
+> `_WIN32` and use their cross-platform fallbacks on Linux (`viewscreen->render`
+> + SDL_RenderReadPixels; stb_image_write). Dwarf Fortress itself must be the
+> Linux build, and all locking/versions must match the DFHack 53.16-r1.1 tree.
+
 
 ## License
 
