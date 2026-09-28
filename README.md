@@ -1,11 +1,16 @@
 # Multi Dwarf / DFCapture — multiplayer Dwarf Fortress in your browser
 
+**MultiDwarf has moved to [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3799084530).**
+
+Future features and mod updates will be released there. This repository and its releases
+remain available for the original browser version. I'll continue updating this GitHub version for Dwarf Fortress version
+compatibility. The instructions below apply to this browser version.
+
+Support development: [Ko-fi](https://ko-fi.com/airbending_gabrielr) · [Patreon](https://www.patreon.com/c/baxtuel)
+
 A [DFHack](https://github.com/DFHack/dfhack) plugin that lets several people watch and
 play **one shared Dwarf Fortress** through a web browser. The host runs the actual game &
 everyone else opens a link and gets their own independent camera, controls, menus, and HUD.
-
-The big thing I wanted to preserve is that this still looks like Dwarf Fortress. The browser is
-showing the game's real rendered pixels, and the streaming has been improved so it can send only the parts of the screen that changed.
 
 [Video showcase of the mod — older version though](https://www.youtube.com/watch?v=5uvzqwSsfbQ)
 
