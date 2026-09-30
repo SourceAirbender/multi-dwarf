@@ -39,6 +39,7 @@
 #include "df/graphic.h"
 #include "df/graphic_viewport_flag.h"
 #include "df/graphic_viewportst.h"
+#include "df/viewport_spatter_flag.h"
 #include "df/main_interface.h"
 #include "df/renderer.h"
 #include "df/renderer_2d.h"

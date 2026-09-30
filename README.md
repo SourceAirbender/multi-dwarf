@@ -3,8 +3,8 @@
 **MultiDwarf has moved to [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3799084530).**
 
 Future features and mod updates will be released there. This repository and its releases
-remain available for the original browser version. I'll continue updating this GitHub version for Dwarf Fortress version
-compatibility. The instructions below apply to this browser version.
+remain available for the original browser version. I'll continue updating this GitHub version for
+Dwarf Fortress and DFHack compatibility. The instructions below apply to this browser version.
 
 Support development: [Ko-fi](https://ko-fi.com/airbending_gabrielr) · [Patreon](https://www.patreon.com/c/baxtuel)
 
@@ -42,7 +42,7 @@ everyone else opens a link and gets their own independent camera, controls, menu
 This version is built for:
 
 - **Dwarf Fortress 53.16**
-- **DFHack 53.16-r1.1**
+- **DFHack 53.16-r2**
 - **Windows x64**
 - **Fortress mode**
 
@@ -58,9 +58,10 @@ Please keep normal fortress backups and include your DFHack logs when reporting 
 
 ## Install
 
-1. Install **DFHack 53.16-r1.1 directly into your Dwarf Fortress game folder**.
-2. Download the matching `dfcapture` package for **DFHack 53.16-r1.1** from the
-   [**Releases**](../../releases) page.
+1. Install **DFHack 53.16-r2 directly into your Dwarf Fortress game folder**.
+2. Use a `dfcapture` package built for **DFHack 53.16-r2** from the
+   [**Releases**](../../releases) page, or build this source using the instructions below.
+   Older packages built for r1.1 must be rebuilt; changing the filename does not update them.
 3. Extract it, then copy the included **`hack`** folder into the Dwarf Fortress folder that contains
    `Dwarf Fortress.exe`. Merge it with the `hack` folder that is already there.
 4. Start Dwarf Fortress normally with DFHack loaded.
@@ -115,7 +116,7 @@ This is an *external* DFHack plugin, so it builds as part of a matching DFHack s
 1. Clone DFHack at the matching tag, with submodules:
 
    ```powershell
-   git clone --recursive --branch 53.16-r1.1 https://github.com/DFHack/dfhack
+   git clone --recursive --branch 53.16-r2 https://github.com/DFHack/dfhack
    ```
 
 2. Clone this repository into `dfhack/plugins/external/dfcapture_public/`.
