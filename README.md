@@ -1,4 +1,4 @@
-# Multi Dwarf / DFCapture — multiplayer Dwarf Fortress in your browser
+# Multi Dwarf / DFCapture: multiplayer Dwarf Fortress in your browser
 
 **MultiDwarf has moved to [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3799084530).**
 
@@ -15,17 +15,17 @@ A [DFHack](https://github.com/DFHack/dfhack) plugin that lets several people wat
 play **one shared Dwarf Fortress** through a web browser. The host runs the actual game &
 everyone else opens a link and gets their own independent camera, controls, menus, and HUD.
 
-[Video showcase of the mod — older version though](https://www.youtube.com/watch?v=5uvzqwSsfbQ)
+[Video showcase of the mod (older version)](https://www.youtube.com/watch?v=5uvzqwSsfbQ)
 
 ## Original / Experimental and Native
 
-The earlier custom-interface examples are on the left; the Native examples are on the right.
+The earlier custom interface examples are on the left; the Native examples are on the right.
 Native uses Dwarf Fortress's own menus and tools. The new captures below are from a live
-two-PC session running the Workshop version, v10.0.25.
+session across two PCs running the Workshop version, v10.0.25.
 
-| Original / Experimental — custom interface | Native — Dwarf Fortress interface |
+| Original / Experimental (custom interface) | Native (Dwarf Fortress interface) |
 | --- | --- |
-| **Player cursors and views**<br><img src="img/presence.gif" alt="Original interface showing another player's cursor, name, and elevation" width="420"> | **Player cursors and minimap views**<br><img src="img/native-player-cursor.png" alt="Native gameplay showing Baxyo's remote cursor beside the workshops" width="420"><br><img src="img/native-player-minimap.png" alt="Native minimap showing the players' view areas" width="160"> |
+| **Player cursors and views**<br><img src="img/presence.gif" alt="Original interface showing another player's cursor, name, and elevation" width="420"> | **Player cursors**<br><img src="img/native-player-cursor.png" alt="Native gameplay showing Baxyo's remote cursor beside the workshops" width="420"> |
 | **Location pings**<br><img src="img/pinging.gif" alt="Pinging a location through the original interface" width="420"> | **Location pings**<br><img src="img/native-pinging.gif" alt="A live Native multiplayer location ping and its coordinate notice" width="420"> |
 
 More Native multiplayer features:
@@ -36,31 +36,31 @@ More Native multiplayer features:
 
 ## What can you do with the browser version?
 
-- Every player gets their own camera, zoom, elevation, follow mode, cursors, pings, and bookmarks.
+* Every player gets their own camera, zoom, elevation, follow mode, cursors, pings, and bookmarks.
 
-- Mine, chop trees, gather plants, smooth, engrave, build, place exact furniture, and manage
+* Mine, chop trees, gather plants, smooth, engrave, build, place exact furniture, and manage
   stockpiles, zones, burrows, and hauling routes.
-- Manage work orders, labors, workshops, kitchen rules, standing orders, squads, uniforms,
+* Manage work orders, labors, workshops, kitchen rules, standing orders, squads, uniforms,
   schedules, hospitals, locations, nobles, and most everyday fortress administration.
-- Use the trade depot and barter with merchants
-- See alerts, petitions, diplomacy, reports, native popups, announcements, and what happened since
+* Use the trade depot and barter with merchants
+* See alerts, petitions, diplomacy, reports, native popups, announcements, and what happened since
   you last connected.
-- Chat, see what the other players are doing, and attribute buildings, zones, stockpiles, and work
+* Chat, see what the other players are doing, and attribute buildings, zones, stockpiles, and work
   orders to the player who created them.
-- Assign dwarves to players, favorite up to five of them, and keep small MMO-style HUDs open for
+* Assign dwarves to players, favorite up to five of them, and keep small MMO style HUDs open for
   their health and current activity.
-- Player owned dwarves! Assign dwarves to yourself and favorite them to add them to your HUD.
+* Player owned dwarves! Assign dwarves to yourself and favorite them to add them to your HUD.
 
-![Assigning player-owned dwarves and managing favorite dwarf HUDs](img/player-owned-dwarves.gif)
+![Assigning player owned dwarves and managing favorite dwarf HUDs](img/player-owned-dwarves.gif)
 
 ## Important notes
 
 This version is built for:
 
-- **Dwarf Fortress 53.16**
-- **DFHack 53.16-r2**
-- **Windows x64**
-- **Fortress mode**
+* **Dwarf Fortress 53.16**
+* **DFHack 53.16-r2**
+* **Windows x64**
+* **Fortress mode**
 
 The versions have to match. The plugin will not load in a different DFHack version. Apparently this works with Linux with Proton though.
 
@@ -87,15 +87,15 @@ the actual Dwarf Fortress game folder. DFHack needs to be installed the old way:
 
 ```text
 <Dwarf Fortress>/hack/
-|-- plugins/dfcapture.plug.dll        the plugin
-|-- dfcapture-web/                    the browser UI
-|-- lua/plugins/dfcapture.lua         plugin support code
-`-- scripts/gui/dfcapture.lua         the in-game control window
+    plugins/dfcapture.plug.dll        the plugin
+    dfcapture-web/                    the browser UI
+    lua/plugins/dfcapture.lua         plugin support code
+    scripts/gui/dfcapture.lua         the control window inside DF
 ```
 
 ## Usage
 
-In-game, open the DFHack launcher (**Ctrl-Shift-D**) and run:
+In the game, open the DFHack launcher (**Ctrl + Shift + D**) and run:
 
 ```text
 gui/dfcapture
@@ -109,9 +109,9 @@ A small window lets you start/stop the server
 
 Give every viewer a link with their **own unique name** at the end:
 
-- **You:** `http://localhost:8765/view?player=YOURNAME`
-- **Friends:** `http://<your-LAN-IP>:8765/view?player=THEIRNAME`
-- **Example:** `http://192.168.1.202:8765/view?player=player1`
+* **You:** `http://localhost:8765/view?player=YOURNAME`
+* **Friends:** `http://<your-LAN-IP>:8765/view?player=THEIRNAME`
+* **Example:** `http://192.168.1.202:8765/view?player=player1`
 
 Friends need to be on the same network or connected through your private VPN.
 
@@ -151,10 +151,10 @@ The result is `dfcapture.plug.dll`. Copy it, the `web/` directory, `dfcapture.lu
 
 ## License
 
-DFCapture is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0-only) —
-see [LICENSE](LICENSE). Because it serves over a network, the AGPL also requires offering the
+DFCapture is licensed under the **GNU Affero General Public License v3.0** (AGPL version 3 only).
+See [LICENSE](LICENSE). Because it serves over a network, the AGPL also requires offering the
 source to people who use it remotely.
 
 It builds on **DFHack** (Zlib), continues the approach of **DFPlex** (Zlib), descends from
-**webfort** (ISC), and embeds **cpp-httplib** (MIT). Full third-party notices and license text are
+**webfort** (ISC), and embeds **cpp-httplib** (MIT). Full third party notices and license text are
 in [NOTICE](NOTICE).
