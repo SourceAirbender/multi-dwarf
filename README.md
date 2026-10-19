@@ -6,6 +6,9 @@ Future features and mod updates will be released there. This repository and its 
 remain available for the original browser version. I'll continue updating this GitHub version for
 Dwarf Fortress and DFHack compatibility. The instructions below apply to this browser version.
 
+The Workshop package offers **Original**, **Experimental**, and **Native** gameplay modes.
+The Native implementation is distributed through Steam Workshop, not this repository.
+
 Support development: [Ko-fi](https://ko-fi.com/airbending_gabrielr) · [Patreon](https://www.patreon.com/c/baxtuel)
 
 A [DFHack](https://github.com/DFHack/dfhack) plugin that lets several people watch and
@@ -14,13 +17,26 @@ everyone else opens a link and gets their own independent camera, controls, menu
 
 [Video showcase of the mod — older version though](https://www.youtube.com/watch?v=5uvzqwSsfbQ)
 
-## What can you do with it?
+## Original / Experimental and Native
+
+The earlier custom-interface examples are on the left; the Native examples are on the right.
+Native uses Dwarf Fortress's own menus and tools. The new captures below are from a live
+two-PC session running the Workshop version, v10.0.25.
+
+| Original / Experimental — custom interface | Native — Dwarf Fortress interface |
+| --- | --- |
+| **Player cursors and views**<br><img src="img/presence.gif" alt="Original interface showing another player's cursor, name, and elevation" width="420"> | **Player cursors and minimap views**<br><img src="img/native-player-cursor.png" alt="Native gameplay showing Baxyo's remote cursor beside the workshops" width="420"><br><img src="img/native-player-minimap.png" alt="Native minimap showing the players' view areas" width="160"> |
+| **Location pings**<br><img src="img/pinging.gif" alt="Pinging a location through the original interface" width="420"> | **Location pings**<br><img src="img/native-pinging.gif" alt="A live Native multiplayer location ping and its coordinate notice" width="420"> |
+
+More Native multiplayer features:
+
+| Chat | Shared selection previews |
+| --- | --- |
+| <img src="img/native-chat.gif" alt="Opening Native multiplayer chat and typing hello without leaving the game" width="420"> | <img src="img/native-shared-selection.gif" alt="Another player's selection rectangle moving beside the workshops in Native gameplay" width="420"> |
+
+## What can you do with the browser version?
 
 - Every player gets their own camera, zoom, elevation, follow mode, cursors, pings, and bookmarks.
-
-![Another player's live cursor, name, and elevation](img/presence.gif)
-
-![Pinging a map location for the other players](img/pinging.gif)
 
 - Mine, chop trees, gather plants, smooth, engrave, build, place exact furniture, and manage
   stockpiles, zones, burrows, and hauling routes.
